@@ -1,7 +1,6 @@
 import threading
 import time
 import winsound
-from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 
@@ -43,6 +42,8 @@ def _notificar_desktop(titulo: str, mensagem: str) -> None:
         )
     except Exception:
         pass
+
+
 from .noticias import CalendarioEconomico, e_sintetico
 from .recuperacao import recuperar_operacoes_pendentes
 from .registro import RegistroSQLite
@@ -57,6 +58,63 @@ def main(config: Configuracao | None = None) -> None:
     estrategia = EstrategiaReversaoM5(config)
     grafico = GraficoM5(config) if config.abrir_grafico else None
     calendario = CalendarioEconomico(config.pasta_dados)
+
+    # --- Gráfico: dict latest-wins (sem fila, sem buildup) ---
+    _grafico_latest: dict[str, dict] = {}
+    _lock_grafico = threading.Lock()
+    grafico_thread_viva = True
+
+    def _grafico_post(ativo: str, dados: dict) -> None:
+        with _lock_grafico:
+            _grafico_latest[ativo] = dados
+
+    def _grafico_worker():
+        while grafico_thread_viva:
+            time.sleep(0.08)
+            with _lock_grafico:
+                batch = dict(_grafico_latest)
+                _grafico_latest.clear()
+            for ativo_w, dados_w in batch.items():
+                try:
+                    if grafico is not None:
+                        grafico.atualizar(ativo_w, dados_w)
+                except Exception as e:
+                    print(f"[{datetime.now():%H:%M:%S}] [grafico] {ativo_w}: {e}")
+
+    def _grafico_updater():
+        """Atualiza o gráfico a cada 1s com dados do stream — sem esperar o ciclo principal."""
+        while grafico_thread_viva:
+            time.sleep(1.0)
+            if grafico is None:
+                continue
+            for ativo_upd in config.ativos:
+                try:
+                    sn_upd = mercado.snapshot_leve(ativo_upd)
+                    if sn_upd is None:
+                        continue
+                    ind_upd = estrategia.calcular_indicadores(sn_upd.candles, ativo_upd)
+                    dados_upd = grafico.montar_dados(
+                        snapshot=sn_upd,
+                        indicadores=ind_upd,
+                        sinais=sinais_historicos_cache.get(ativo_upd, []),
+                        possivel=estrategia.possivel_entrada(ativo_upd, sn_upd.candles),
+                        operacoes=registro.operacoes_grafico(ativo_upd),
+                        desempenho=registro.resumo_desempenho(ativo_upd),
+                        desempenho_por_setup=registro.desempenho_por_setup(),
+                        desempenho_simulado_por_setup=registro.desempenho_simulado_por_setup(),
+                        funil={
+                            **registro.funil_reversao_hoje(),
+                            "aproximando": contagem_aproximando_hoje.get(ativo_upd, 0),
+                        },
+                    )
+                    _grafico_post(ativo_upd, dados_upd)
+                except Exception:
+                    pass
+
+    if grafico is not None:
+        threading.Thread(target=_grafico_worker, name="grafico-io", daemon=True).start()
+        threading.Thread(target=_grafico_updater, name="grafico-1s", daemon=True).start()
+
     ultimo_candle_processado = {ativo: None for ativo in config.ativos}
     candle_historico_grafico = {ativo: None for ativo in config.ativos}
     sinais_historicos_cache = {ativo: [] for ativo in config.ativos}
@@ -64,7 +122,7 @@ def main(config: Configuracao | None = None) -> None:
     ultimo_alerta_executado = {ativo: None for ativo in config.ativos}
     contagem_aproximando_hoje = {ativo: 0 for ativo in config.ativos}
     dia_contagem_aproximando = datetime.now().date()
-    ultimo_alerta_som = {ativo: None for ativo in config.ativos}  # (tipo, direcao, momento_wall_clock)
+    ultimo_alerta_som = {ativo: None for ativo in config.ativos}
     COOLDOWN_ALERTA_SEGUNDOS = config.timeframe_segundos * 2
     ultima_explicacao = {ativo: [] for ativo in config.ativos}
     parecer_ia = {ativo: None for ativo in config.ativos}
@@ -100,6 +158,7 @@ def main(config: Configuracao | None = None) -> None:
             "Aviso: a triagem walk-forward mediu apenas M5. Os números daquele "
             "estudo não valem para este timeframe."
         )
+
     mercado_conectado = False
     estado_inicial = registro.estado_hoje()
     if estado_inicial.ordem_pendente:
@@ -126,9 +185,11 @@ def main(config: Configuracao | None = None) -> None:
         if mercado_conectado:
             mercado.fechar()
         return
+
     if not mercado_conectado:
         print("Conectando e carregando candles M5...")
         mercado.iniciar()
+
     if grafico is not None:
         try:
             url_grafico = grafico.iniciar()
@@ -138,6 +199,7 @@ def main(config: Configuracao | None = None) -> None:
             grafico = None
 
     def _avaliar_ativo(ativo: str, snapshot, agora_utc: datetime) -> None:
+        print(f"[{datetime.now():%H:%M:%S}] [INICIO] {ativo}")
         candle_fechado = snapshot.candles.index[-2]
         indicadores = estrategia.calcular_indicadores(snapshot.candles, ativo)
 
@@ -165,11 +227,6 @@ def main(config: Configuracao | None = None) -> None:
         if alerta is not None:
             alerta = anexar_noticia(alerta, calendario, agora_utc)
 
-            # Esta e a unica familia com indicio real de vantagem na
-            # triagem walk-forward (56-58% em GBPUSD/EURUSD/USDJPY).
-            # Ate aqui ela so avisava; agora tambem manda ordem de
-            # verdade, em paralelo ao pullback/bollinger, pra dar pra
-            # comparar o desempenho real das duas.
             par_validado = not config.pares_validados or ativo in config.pares_validados
             if alerta.tipo == "entrada" and alerta.entrada_confirmada:
                 marca_execucao = (alerta.hora, alerta.direcao)
@@ -183,25 +240,21 @@ def main(config: Configuracao | None = None) -> None:
                         motivo="reversao_candle_curta",
                         detalhes={"setup": "reversao_candle", "motivos": list(alerta.motivos)},
                     )
-                    if not par_validado:
-                        setup_simulado = "reversao_confluencia" if alerta.confluencia else "reversao_candle_nao_validado"
-                        print(
-                            f"[{datetime.now():%H:%M:%S}] {ativo}: {setup_simulado} "
-                            f"{alerta.direcao.upper()} @ {decisao_reversao.preco:.5f} | "
-                            f"par nao validado, ignorado (use backtest offline)"
-                        )
-                    else:
-                        setup_real = "reversao_confluencia" if alerta.confluencia else "reversao_candle"
-                        decisao_reversao = replace(decisao_reversao, detalhes={**decisao_reversao.detalhes, "setup": setup_real})
-                        autorizacao_reversao = risco.avaliar(snapshot, decisao_reversao)
-                        registro.registrar_decisao(decisao_reversao, snapshot, autorizacao_reversao)
-                        print(
-                            f"[{datetime.now():%H:%M:%S}] {ativo}: {setup_real} "
-                            f"{alerta.direcao.upper()} @ {decisao_reversao.preco:.5f} | "
-                            f"risco={autorizacao_reversao.motivo}"
-                        )
-                        if autorizacao_reversao.permitida:
-                            executor.executar(snapshot, decisao_reversao)
+                    setup_real = "reversao_confluencia" if alerta.confluencia else "reversao_candle"
+                    decisao_reversao = replace(
+                        decisao_reversao,
+                        detalhes={**decisao_reversao.detalhes, "setup": setup_real},
+                    )
+                    autorizacao_reversao = risco.avaliar(snapshot, decisao_reversao)
+                    registro.registrar_decisao(decisao_reversao, snapshot, autorizacao_reversao)
+                    print(
+                        f"[{datetime.now():%H:%M:%S}] {ativo}: {setup_real} "
+                        f"{alerta.direcao.upper()} @ {decisao_reversao.preco:.5f} | "
+                        f"risco={autorizacao_reversao.motivo}"
+                    )
+                    if autorizacao_reversao.permitida:
+                        executor.executar(snapshot, decisao_reversao)
+
             marca = (alerta.hora, alerta.tipo, alerta.direcao)
             if ultimo_alerta_avisado[ativo] != marca:
                 ultimo_alerta_avisado[ativo] = marca
@@ -210,7 +263,9 @@ def main(config: Configuracao | None = None) -> None:
                 print(f"[{datetime.now():%H:%M:%S}] {alerta.resumo()}")
                 for motivo in alerta.motivos:
                     print(f"    - {motivo}")
-                print(f"    {alerta.instrucao_timing(segundos_restantes, config.timeframe_segundos, config.entrada_max_segundos_no_candle)}")
+                print(
+                    f"    {alerta.instrucao_timing(segundos_restantes, config.timeframe_segundos, config.entrada_max_segundos_no_candle)}"
+                )
                 if alerta.expiracao_sugerida_min:
                     print(f"    expiracao medida para esse padrao: {alerta.expiracao_sugerida_min} min")
                 if alerta.noticia:
@@ -231,11 +286,20 @@ def main(config: Configuracao | None = None) -> None:
                     _alerta_sonoro(alerta.tipo)
                     _notificar_desktop(
                         f"{alerta.tipo.upper()} {alerta.direcao.upper()} {ativo}",
-                        alerta.instrucao_timing(segundos_restantes, config.timeframe_segundos, config.entrada_max_segundos_no_candle),
+                        alerta.instrucao_timing(
+                            segundos_restantes,
+                            config.timeframe_segundos,
+                            config.entrada_max_segundos_no_candle,
+                        ),
                     )
 
                 if _pode_chamar_ia(ativo):
-                    def _ia_alerta(av=ativo, al=alerta, ind=indicadores.copy(), nots=list(proximas_noticias)):
+                    def _ia_alerta(
+                        av=ativo,
+                        al=alerta,
+                        ind=indicadores.copy(),
+                        nots=list(proximas_noticias),
+                    ):
                         try:
                             ctx = ia_contexto(av, config.rotulo_timeframe, al, ind, nots)
                             resultado = ia_analisar(ctx)
@@ -243,19 +307,25 @@ def main(config: Configuracao | None = None) -> None:
                                 with _lock_ia:
                                     parecer_ia[av] = resultado
                                 print(f"[{datetime.now():%H:%M:%S}] [IA] {av}: {resultado.texto}")
-                                print(f"    [IA] direcao={resultado.direcao_sugerida or 'NEUTRO'} confianca={resultado.confianca}")
+                                print(
+                                    f"    [IA] direcao={resultado.direcao_sugerida or 'NEUTRO'} "
+                                    f"confianca={resultado.confianca}"
+                                )
                         except Exception as e:
                             print(f"    [IA] erro: {e}")
 
                     threading.Thread(target=_ia_alerta, daemon=True).start()
 
+        # --- Gráfico em tempo real (atualiza a cada 3s, não só no fechamento) ---
         if grafico is not None and _pode_atualizar_grafico(ativo):
             try:
+                # Sinais históricos só recalculam quando o candle fecha
                 if candle_historico_grafico[ativo] != candle_fechado:
                     sinais_historicos_cache[ativo] = estrategia.sinais_historicos(
                         ativo, snapshot.candles
                     )
                     candle_historico_grafico[ativo] = candle_fechado
+
                 status_sinais = registro.status_decisoes_grafico(ativo)
                 sinais_grafico = []
                 for sinal in sinais_historicos_cache[ativo]:
@@ -294,19 +364,31 @@ def main(config: Configuracao | None = None) -> None:
                         "aproximando": contagem_aproximando_hoje.get(ativo, 0),
                     },
                 )
-                grafico.atualizar(ativo, dados_grafico)
+                _grafico_post(ativo, dados_grafico)
             except Exception as erro:
                 print(f"[{datetime.now():%H:%M:%S}] {ativo}: falha ao atualizar gráfico ({erro})")
 
         if ultimo_candle_processado[ativo] == candle_fechado:
+            print(f"[{datetime.now():%H:%M:%S}] [FIM] {ativo}")
             return
         ultimo_candle_processado[ativo] = candle_fechado
 
-        ctx_candidato = ia_contexto(ativo, config.rotulo_timeframe, alerta, indicadores, list(proximas_noticias))
+        ctx_candidato = ia_contexto(
+            ativo, config.rotulo_timeframe, alerta, indicadores, list(proximas_noticias)
+        )
         chave_ctx = tuple(
             ctx_candidato.get(campo)
-            for campo in ("tipo", "direcao", "rsi", "tendencia_macro", "tendencia_micro",
-                          "corpo_atr", "ema_posicao", "motivos", "sugestao_noticia")
+            for campo in (
+                "tipo",
+                "direcao",
+                "rsi",
+                "tendencia_macro",
+                "tendencia_micro",
+                "corpo_atr",
+                "ema_posicao",
+                "motivos",
+                "sugestao_noticia",
+            )
         )
         if chave_ctx != ultimo_contexto_ia[ativo] and _pode_chamar_ia(ativo):
             ultimo_contexto_ia[ativo] = chave_ctx
@@ -318,7 +400,10 @@ def main(config: Configuracao | None = None) -> None:
                         with _lock_ia:
                             parecer_ia[av] = resultado
                         print(f"[{datetime.now():%H:%M:%S}] [IA] {av}: {resultado.texto}")
-                        print(f"    [IA] direcao={resultado.direcao_sugerida or 'NEUTRO'} confianca={resultado.confianca}")
+                        print(
+                            f"    [IA] direcao={resultado.direcao_sugerida or 'NEUTRO'} "
+                            f"confianca={resultado.confianca}"
+                        )
                 except Exception as e:
                     print(f"    [IA] erro: {e}")
 
@@ -333,6 +418,7 @@ def main(config: Configuracao | None = None) -> None:
                 f"[{datetime.now():%H:%M:%S}] {ativo}: sem sinal | "
                 f"mercado={status} payout={payout} candle={candle_fechado}"
             )
+            print(f"[{datetime.now():%H:%M:%S}] [FIM] {ativo}")
             return
 
         aviso_noticia = calendario.aviso(ativo, agora_utc)
@@ -346,8 +432,6 @@ def main(config: Configuracao | None = None) -> None:
         todos_motivos: list[str] = []
         for decisao in decisoes_todas:
             setup_nome = decisao.detalhes.get("setup", decisao.motivo)
-            # fibo_sr_retracao entra na vela do toque (pedido do usuário).
-            # Todas as outras entram na vela SEGUINTE ao sinal.
             if setup_nome != "fibo_sr_retracao":
                 decisao = replace(decisao, candle_hora=proxima_vela)
             autorizacao = risco.avaliar(snapshot, decisao)
@@ -390,31 +474,43 @@ def main(config: Configuracao | None = None) -> None:
                 )
             elif autorizacao.permitida:
                 if ia_discorda and favorece_noticia:
-                    print("    [IA] discordou mas a noticia confirmada a favor do sinal tem prioridade")
+                    print(
+                        "    [IA] discordou mas a noticia confirmada a favor do sinal tem prioridade"
+                    )
                 executor.executar(snapshot, decisao)
 
         ultima_explicacao[ativo] = todos_motivos
+        print(f"[{datetime.now():%H:%M:%S}] [FIM] {ativo}")
 
+    _ultimo_teste_conexao: float = 0.0
     try:
         while not risco.resumo().encerrado:
-            # Reconexão periódica em background (a cada 10 ciclos)
-            if "ciclo_loop" not in locals():
-                ciclo_loop = 0
-            if ciclo_loop % 10 == 0:
-                mercado.reconectar_se_necessario()
-            ciclo_loop += 1
+            # Reconexão periódica em background — throttle por tempo
+            agora_loop = time.time()
+            if agora_loop - _ultimo_teste_conexao > 60.0:
+                _ultimo_teste_conexao = agora_loop
+                threading.Thread(
+                    target=mercado.reconectar_se_necessario, daemon=True
+                ).start()
 
             if datetime.now().date() != dia_contagem_aproximando:
                 dia_contagem_aproximando = datetime.now().date()
                 contagem_aproximando_hoje = {ativo: 0 for ativo in config.ativos}
+
             ativos_toggle = grafico.ativos_ativos() if grafico else None
             agora_utc = datetime.now(timezone.utc)
             calendario.atualizar()
 
-            # Fase 1: snapshots sequenciais (API tem lock interno)
+            # Fase 0: refresh de cache UMA VEZ (payouts + abertura de mercado)
+            try:
+                mercado.preparar_ciclo()
+            except Exception as e_prep:
+                print(f"[{datetime.now():%H:%M:%S}] aviso: preparar_ciclo falhou ({e_prep})")
+
+            # Fase 1: snapshots sequenciais (sem cache refresh interno)
             snapshots: dict = {}
-            ts_servidor_ref: int | None = None   # timestamp_servidor do último snapshot
-            t_local_ref: float = time.time()      # tempo local no momento desse snapshot
+            ts_servidor_ref: int | None = None
+            t_local_ref: float = time.time()
             for ativo in config.ativos:
                 if ativos_toggle is not None and ativo not in ativos_toggle:
                     continue
@@ -426,31 +522,47 @@ def main(config: Configuracao | None = None) -> None:
                 except MercadoIndisponivel as e:
                     print(f"[{datetime.now():%H:%M:%S}] {ativo}: mercado indisponível ({e})")
 
-            # Fase 2: avaliação paralela — indicadores + estratégia + execução
-            with ThreadPoolExecutor(max_workers=max(len(snapshots), 1)) as pool:
-                futs = [pool.submit(_avaliar_ativo, av, sn, agora_utc) for av, sn in snapshots.items()]
-                for fut in as_completed(futs):
-                    try:
-                        fut.result()
-                    except Exception as exc:
-                        print(f"[{datetime.now():%H:%M:%S}] [worker] erro: {exc}")
+            # Fase 2: avaliação sequencial (sem ThreadPoolExecutor)
+            for av, sn in snapshots.items():
+                try:
+                    _avaliar_ativo(av, sn, agora_utc)
+                except Exception as exc:
+                    print(f"[{datetime.now():%H:%M:%S}] {av}: erro na avaliação: {exc}")
 
-            # Sleep inteligente: usa o relógio do servidor IQ Option para alinhar
-            # com o limite real de candle (evita entrada_atrasada por drift de clock).
+            # --- Sleep anti-spinlock ---
+            agora_epoch = time.time()
             if ts_servidor_ref is not None:
-                elapsed = time.time() - t_local_ref
+                elapsed = agora_epoch - t_local_ref
                 seg_no_candle = (ts_servidor_ref + elapsed) % config.timeframe_segundos
             else:
-                seg_no_candle = time.time() % config.timeframe_segundos
+                seg_no_candle = agora_epoch % config.timeframe_segundos
+
             seg_restantes = config.timeframe_segundos - seg_no_candle
-            margem = len(config.ativos) * 0.45 + 1.0  # ~5.5s para 10 ativos
-            sono = max(0.1, seg_restantes - margem)
-            proxima = datetime.now() + timedelta(seconds=sono)
-            print(f"[{datetime.now():%H:%M:%S}] aguardando próximo candle em {sono:.0f}s (acorda ~{proxima:%H:%M:%S})")
-            time.sleep(sono)
+            margem = 10.0
+
+            if seg_restantes > margem + 5.0:
+                sono = seg_restantes - margem
+            else:
+                sono = seg_restantes + 5.0
+
+            sono = max(3.0, sono)
+
+            _ultimo_aviso_sono = time.time()
+            while sono > 0.5:
+                pedaco = min(10.0, sono)
+                time.sleep(pedaco)
+                sono -= pedaco
+                agora_sono = time.time()
+                if sono > 0.5 and agora_sono - _ultimo_aviso_sono >= 60.0:
+                    _ultimo_aviso_sono = agora_sono
+                    print(
+                        f"[{datetime.now():%H:%M:%S}] dormindo, "
+                        f"faltam {sono:.0f}s"
+                    )
     except KeyboardInterrupt:
         print("Interrupção solicitada. Aguardando eventual ordem aberta...")
     finally:
+        grafico_thread_viva = False
         executor.aguardar_ordens()
         mercado.fechar()
         if grafico is not None:

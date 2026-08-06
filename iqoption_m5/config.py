@@ -15,11 +15,6 @@ class Configuracao:
         "USDJPY",
         "AUDCAD",
         "EURGBP",
-        "EURUSD-OTC",
-        "GBPUSD-OTC",
-        "USDJPY-OTC",
-        "AUDCAD-OTC",
-        "EURGBP-OTC",
     )
     conta: str = "PRACTICE"
     confirmo_conta_real: bool = False  # trava extra: precisa ser True de propósito pra operar dinheiro real

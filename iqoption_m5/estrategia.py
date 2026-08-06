@@ -1,5 +1,3 @@
-from dataclasses import replace
-
 import numpy as np
 import pandas as pd
 
@@ -16,12 +14,6 @@ class EstrategiaReversaoM5:
         self._cache_ultimo_fechado: dict[str, pd.Timestamp] = {}
 
     def calcular_indicadores(self, candles: pd.DataFrame, ativo: str = "") -> pd.DataFrame:
-        """Retorna DataFrame com todos os indicadores.
-
-        Com `ativo` informado, usa cache: se o candle fechado (index[-2]) não
-        mudou desde a última chamada, devolve o resultado anterior sem recalcular.
-        Elimina ~70% do cálculo repetido no loop principal.
-        """
         if not ativo or len(candles) < 3:
             return self._calcular_do_zero(candles)
 
@@ -29,7 +21,11 @@ class EstrategiaReversaoM5:
         cacheado = self._cache_indicadores.get(ativo)
         ts_cacheado = self._cache_ultimo_fechado.get(ativo)
 
-        if cacheado is not None and ts_cacheado == ultimo_fechado and len(cacheado) == len(candles):
+        if (
+            cacheado is not None
+            and ts_cacheado == ultimo_fechado
+            and len(cacheado) == len(candles)
+        ):
             return cacheado
 
         df = self._calcular_do_zero(candles)
@@ -192,8 +188,6 @@ class EstrategiaReversaoM5:
             pos_extremo = int(np.argmax(impulso["High"].to_numpy()))
             if pos_extremo == 0:
                 return None
-            # busca origem ESTRITAMENTE antes do extremo para nao incluir o
-            # proprio extremo no argmin (o que distorceria a amplitude)
             antes_extremo = impulso.iloc[:pos_extremo]
             pos_origem = int(np.argmin(antes_extremo["Low"].to_numpy()))
             origem = float(antes_extremo.iloc[pos_origem]["Low"])
@@ -231,7 +225,6 @@ class EstrategiaReversaoM5:
         if tendencia not in {"alta", "baixa"}:
             return None
 
-        # Tendência forte demais → pullback contra-tendência é perigoso
         inclinacao = recuo.get("InclinacaoMacro")
         if inclinacao is not None and not pd.isna(inclinacao):
             limite_slope = self.config.pullback_slope_forte_multiplo_atr * float(recuo["ATR"])
@@ -274,8 +267,6 @@ class EstrategiaReversaoM5:
         if indice_confirmacao < 11 or indice_confirmacao >= len(df):
             return None
         contexto = self._contexto_pullback(df, indice_confirmacao - 1)
-        # atr regime verificado em ambos os candles: o recuo pode ser um spike
-        # de alta volatilidade que nao deve disparar sinal mesmo confirmado
         if contexto is None:
             return None
         if not self._atr_regime_valido(df, indice_confirmacao - 1):
@@ -308,9 +299,6 @@ class EstrategiaReversaoM5:
             return None
 
         zona = contexto["zona_fib"]
-        # Fibo + suporte/resistencia juntos e uma confluencia mais forte que
-        # so um dos dois — separado aqui pra medir se isso realmente melhora
-        # o winrate, em vez de ficar tudo misturado sob "pullback".
         setup = "pullback_confluencia" if len(contexto["fatores"]) >= 2 else "pullback"
         return Decisao(
             ativo=ativo,
@@ -334,11 +322,6 @@ class EstrategiaReversaoM5:
     def _avaliar_pin_bar(
         self, ativo: str, df: pd.DataFrame, indice_confirmacao: int
     ) -> Decisao | None:
-        """Pin bar (martelo/estrela cadente) em nível de S/R com confirmação EMA.
-
-        O sinal é o candle [-2] (pin bar); o candle [-1] é a confirmação.
-        Win rate documentado: 58-65% em pares principais com filtro de tendência.
-        """
         if indice_confirmacao < max(self.config.ema_macro_periodo, self.config.atr_regime_janela) + 1:
             return None
         if indice_confirmacao >= len(df):
@@ -355,7 +338,6 @@ class EstrategiaReversaoM5:
         if total <= 0:
             return None
         body = abs(float(pin["Close"]) - float(pin["Open"]))
-        # Corpo pequeno: menos de 35% do range total
         if body / total > 0.35:
             return None
 
@@ -363,9 +345,7 @@ class EstrategiaReversaoM5:
         sombra_sup = float(pin["High"]) - float(max(pin["Open"], pin["Close"]))
         ema_alta = float(pin["EMA_Micro"]) > float(pin["EMA_Macro"])
 
-        # Bullish pin: sombra inferior longa (≥2x corpo), fechamento no terço superior
         ponto_wick_bull = float(pin["Low"])
-        # Bearish pin: sombra superior longa (≥2x corpo), fechamento no terço inferior
         ponto_wick_bear = float(pin["High"])
 
         corpo_min = max(body, 0.0001)
@@ -383,13 +363,11 @@ class EstrategiaReversaoM5:
         if not eh_bull_pin and not eh_bear_pin:
             return None
 
-        # Tendência EMA deve confirmar
         if eh_bull_pin and not ema_alta:
             return None
         if eh_bear_pin and ema_alta:
             return None
 
-        # Wick deve tocar nível de S/R (pin bars testam o nível, tolerância maior)
         atr = float(pin["ATR"])
         tolerancia = max(self.config.pullback_tolerancia_atr * 2, 0.5) * atr
         suportes, resistencias = self._pivos(df, indice_confirmacao - 1)
@@ -405,12 +383,9 @@ class EstrategiaReversaoM5:
                 return None
             direcao = "put"
 
-        # ATR regime: verifica volatilidade no candle ANTES do pin bar
-        # (o pin em si tem range grande por definição — checá-lo causaria falso positivo)
         if not self._atr_regime_valido(df, max(0, indice_confirmacao - 2)):
             return None
 
-        # Candle de confirmação deve mover na direção esperada
         if direcao == "call":
             confirmou = float(conf["Close"]) > float(conf["Open"])
         else:
@@ -435,13 +410,6 @@ class EstrategiaReversaoM5:
         )
 
     def _avaliar_sr_rejeicao(self, ativo: str, df: pd.DataFrame, indice: int) -> Decisao | None:
-        """Qualquer vela que toca um nível de S/R e fecha no lado oposto.
-
-        Mais amplo que o pin_bar_sr (que exige corpo pequeno + mecha 2x + confirmação):
-        aqui vale qualquer vela cujo Low (ou High) encostou no pivô e o fechamento
-        ficou na metade superior (ou inferior) do range, mostrando rejeição direta.
-        Não exige tendência prévia — funciona em lateralização.
-        """
         min_candles = self.config.pullback_pivo_raio * 2 + 10
         if indice < min_candles or indice >= len(df):
             return None
@@ -516,11 +484,6 @@ class EstrategiaReversaoM5:
         return None
 
     def _avaliar_fibo_sr_retracao(self, ativo: str, df: pd.DataFrame, indice: int) -> Decisao | None:
-        """Fibo + S/R + tendência + corpo de vela contra a tendência (retração).
-
-        Entra no fechamento da própria vela de recuo, sem esperar confirmação.
-        Exige confluência obrigatória: Fibo E S/R juntos.
-        """
         if indice < 11 or indice >= len(df):
             return None
         if not self._atr_regime_valido(df, indice):
@@ -603,12 +566,6 @@ class EstrategiaReversaoM5:
         return None
 
     def _avaliar_engulfing_sr(self, ativo: str, df: pd.DataFrame, indice: int) -> Decisao | None:
-        """Candle de absorção (engulfing) sobre pivô de S/R.
-
-        Edge: um candle que engole completamente o anterior diretamente em S/R
-        sinaliza absorção de toda a pressão direcional; winrate documentado >60%
-        em M5 Forex quando combinado com filtro de tendência macro.
-        """
         c = self.config
         if indice < 2 or indice >= len(df):
             return None
@@ -670,12 +627,6 @@ class EstrategiaReversaoM5:
         return None
 
     def _avaliar_divergencia_rsi(self, ativo: str, df: pd.DataFrame, indice: int) -> Decisao | None:
-        """Divergência clássica entre fundos/topos de preço e RSI(14).
-
-        Edge: discordância de momentum (RSI) e preço indica exaustão; um dos sinais
-        de reversão mais robustos em AT, especialmente quando o RSI está em zona
-        extrema (<40 / >60) e o candle de confirmação fecha na direção correta.
-        """
         c = self.config
         raio = c.divergencia_rsi_janela_pivos
         if indice < raio * 2 + 5 or indice >= len(df):
@@ -741,12 +692,6 @@ class EstrategiaReversaoM5:
         return None
 
     def _avaliar_bollinger_squeeze(self, ativo: str, df: pd.DataFrame, indice: int) -> Decisao | None:
-        """Squeeze de Bollinger seguido de rompimento com corpo forte.
-
-        Edge: contração de volatilidade (squeeze) precede expansão direcional;
-        rompimento após squeeze tem probabilidade maior de movimento sustentado,
-        equilibrando o portfólio que é majoritariamente mean-reversion.
-        """
         c = self.config
         janela = c.bollinger_squeeze_percentil_janela
         if indice < janela + 5 or indice >= len(df):
@@ -775,8 +720,8 @@ class EstrategiaReversaoM5:
         corpo = abs(close - open_)
 
         if (close > float(vela["BandaSup"])
-                and corpo >= c.bollinger_squeeze_min_corpo_atr * atr
-                and rsi > 50):
+            and corpo >= c.bollinger_squeeze_min_corpo_atr * atr
+            and rsi > 50):
             return Decisao(
                 ativo=ativo, direcao="call", preco=close,
                 candle_hora=pd.Timestamp(df.index[indice]),
@@ -787,8 +732,8 @@ class EstrategiaReversaoM5:
             )
 
         if (close < float(vela["BandaInf"])
-                and corpo >= c.bollinger_squeeze_min_corpo_atr * atr
-                and rsi < 50):
+            and corpo >= c.bollinger_squeeze_min_corpo_atr * atr
+            and rsi < 50):
             return Decisao(
                 ativo=ativo, direcao="put", preco=close,
                 candle_hora=pd.Timestamp(df.index[indice]),
@@ -802,7 +747,6 @@ class EstrategiaReversaoM5:
     def _avaliar_todas_estrategias(
         self, ativo: str, df: pd.DataFrame, indice: int
     ) -> list[Decisao]:
-        """Avalia cada estratégia de forma independente; retorna todas que dispararam."""
         c = self.config
         resultado = []
         for fn in (
@@ -841,7 +785,6 @@ class EstrategiaReversaoM5:
         return todas[0] if todas else None
 
     def avaliar_todas(self, ativo: str, indicadores: pd.DataFrame) -> list[Decisao]:
-        """Retorna todas as estratégias que dispararam no candle mais recente."""
         minimo = max(self.config.ema_macro_periodo, self.config.atr_regime_janela) + 3
         if len(indicadores) < minimo:
             return []
@@ -854,23 +797,16 @@ class EstrategiaReversaoM5:
         return self._avaliar_estrategias(ativo, df, len(df) - 2)
 
     def sinais_historicos(self, ativo: str, candles: pd.DataFrame) -> list[Decisao]:
-        """Marca sinais no candle de ENTRADA (não o de sinal), para alinhar com as ordens reais."""
         df = self.calcular_indicadores(candles, ativo)
         inicio = max(self.config.ema_macro_periodo, self.config.atr_regime_janela) + 1
         sinais = []
         for indice in range(inicio, len(df) - 1):
             sinal = self._avaliar_estrategias(ativo, df, indice)
-            if sinal is None:
-                continue
-            setup = sinal.detalhes.get("setup", sinal.motivo)
-            # fibo_sr_retracao entra na vela do sinal; todas as outras na seguinte.
-            if setup != "fibo_sr_retracao" and indice + 1 < len(df):
-                sinal = replace(sinal, candle_hora=pd.Timestamp(df.index[indice + 1]))
-            sinais.append(sinal)
+            if sinal is not None:
+                sinais.append(sinal)
         return sinais
 
     def possivel_entrada(self, ativo: str, candles: pd.DataFrame) -> dict | None:
-        """Aviso visual no candle em formação; nunca autoriza uma ordem."""
         if len(candles) < max(self.config.ema_macro_periodo, self.config.atr_regime_janela) + 3:
             return None
         df = self.calcular_indicadores(candles, ativo)

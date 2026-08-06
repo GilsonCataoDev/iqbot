@@ -22,7 +22,7 @@ class MercadoIQ:
         self._api = None
         self._buffers: dict[str, pd.DataFrame] = {}
         self._lock_api = threading.RLock()
-        self._lock_buffers = threading.Lock()  # lock leve só para _buffers
+        self._lock_buffers = threading.Lock()
         self._mercado_aberto: dict[str, bool] = {}
         self._payouts: dict[str, float | None] = {}
         self._ids_ativos: dict[str, int] = {}
@@ -88,11 +88,7 @@ class MercadoIQ:
             )
 
     def conectar_somente_leitura(self):
-        """Conexão crua para ferramentas que apenas leem histórico (backtest).
-
-        Não abre streams nem monta o cache de payout: nada aqui habilita o
-        envio de ordens, só a leitura de candles antigos.
-        """
+        """Conexão crua para ferramentas que apenas leem histórico (backtest)."""
         return self._nova_conexao()
 
     def iniciar(self) -> None:
@@ -105,13 +101,12 @@ class MercadoIQ:
             self._atualizar_cache_forcado()
 
     def _obter_abertura_turbo(self) -> dict[str, bool]:
-        """Lê somente turbo; get_all_open_time também consulta digital e pode travar."""
         abertos = {ativo: False for ativo in self.config.ativos}
         try:
             dados = self._api.get_all_init_v2()
             turbo = dados.get("turbo", {}).get("actives", {}) if isinstance(dados, dict) else {}
             if not turbo:
-                print(f"    [mercado] get_all_init_v2 voltou sem 'turbo.actives'. Chaves recebidas: {list(dados.keys()) if isinstance(dados, dict) else type(dados)}")
+                print(f" [mercado] get_all_init_v2 voltou sem 'turbo.actives'. Chaves recebidas: {list(dados.keys()) if isinstance(dados, dict) else type(dados)}")
             nomes_vistos = []
             resolvidos = set()
             for chave, detalhe in turbo.items():
@@ -119,9 +114,6 @@ class MercadoIQ:
                     continue
                 nome = str(detalhe.get("name", "")).split(".", 1)[-1]
                 nomes_vistos.append(nome)
-                # A IQ retorna nomes como "EURUSD-op" pra pares reais e
-                # as vezes "USDJPY-op" no lugar de "USDJPY-OTC". Geramos
-                # todos os candidatos possiveis pra bater com o config.
                 candidatos = {nome}
                 if nome.endswith("-op"):
                     base = nome[: -len("-op")]
@@ -132,27 +124,18 @@ class MercadoIQ:
                     if candidato in abertos:
                         abertos[candidato] = aberto
                         resolvidos.add(candidato)
-                        # A biblioteca usa uma tabela fixa e desatualizada de
-                        # IDs internos (iqoptionapi/constants.py). A chave
-                        # deste dicionario e o ID de verdade, atualizado pela
-                        # propria IQ — sobrescrevemos a tabela da lib com ele
-                        # pra "comprar" nao ser recusado por ID obsoleto.
-                        try:
-                            self._ids_ativos[candidato] = int(chave)
-                        except (TypeError, ValueError):
-                            pass
+                try:
+                    self._ids_ativos[candidato] = int(chave)
+                except (TypeError, ValueError):
+                    pass
             faltando = [a for a in self.config.ativos if a not in resolvidos]
             if faltando:
-                print(f"    [mercado] ativos configurados mas NAO encontrados na resposta da IQ: {faltando}")
-                # Busca direta por cada faltante (em vez de so mostrar os
-                # primeiros 40 em ordem alfabetica, que escondia nomes com
-                # letra inicial tardia tipo USDCHF/USDJPY-OTC).
+                print(f" [mercado] ativos configurados mas NAO encontrados na resposta da IQ: {faltando}")
                 for ativo_faltante in faltando:
                     parecidos = [n for n in nomes_vistos if ativo_faltante.split("-")[0] in n]
-                    print(f"    [mercado] nomes parecidos com '{ativo_faltante}' na resposta: {parecidos or 'NENHUM'}")
+                    print(f" [mercado] nomes parecidos com '{ativo_faltante}' na resposta: {parecidos or 'NENHUM'}")
         except Exception as erro:
-            # Falha fechada: sem confirmação da IQ, nenhuma ordem é autorizada.
-            print(f"    [mercado] falha ao consultar abertura turbo, marcando tudo como fechado: {erro!r}")
+            print(f" [mercado] falha ao consultar abertura turbo, marcando tudo como fechado: {erro!r}")
         return abertos
 
     def _atualizar_cache_forcado(self) -> None:
@@ -160,36 +143,25 @@ class MercadoIQ:
         try:
             lucros = self._api.get_all_profit()
         except Exception as erro:
-            print(f"    [mercado] falha ao consultar payout (get_all_profit): {erro!r}")
+            print(f" [mercado] falha ao consultar payout (get_all_profit): {erro!r}")
             lucros = {}
         novos_payouts = {}
         faltando_payout = []
         for ativo in self.config.ativos:
-            # Tenta várias variações de chave:
-            # 1. chave exata ("USDJPY-OTC")
-            # 2. chave com "-op" ("EURUSD-op")
-            # 3. para OTC, base sem sufixo + "-op" ("USDJPY-op")
-            candidatos = [ativo, f"{ativo}-op"]
+            candidatos_payout = [ativo, f"{ativo}-op"]
             if ativo.upper().endswith("-OTC"):
                 base = ativo[:-4]
-                candidatos += [base, f"{base}-op"]
-            entrada = None
-            for chave in candidatos:
-                entrada = lucros.get(chave)
-                if entrada:
-                    break
-            # Ativos OTC usam chave "binary"; pares normais em turbo usam "turbo".
-            valor = None
-            if isinstance(entrada, dict):
-                valor = entrada.get("turbo") or entrada.get("binary")
+                candidatos_payout += [base, f"{base}-op"]
+            entrada = next((lucros[k] for k in candidatos_payout if k in lucros and isinstance(lucros[k], dict)), None)
+            valor = (entrada.get("turbo") or entrada.get("binary")) if isinstance(entrada, dict) else None
             novos_payouts[ativo] = float(valor) if isinstance(valor, (int, float)) else None
             if novos_payouts[ativo] is None:
                 faltando_payout.append(ativo)
         if faltando_payout and lucros:
-            print(f"    [mercado] payout indisponivel pra: {faltando_payout}")
+            print(f" [mercado] payout indisponivel pra: {faltando_payout}")
             for ativo_faltante in faltando_payout:
                 parecidos = [k for k in lucros.keys() if ativo_faltante.split("-")[0] in k]
-                print(f"    [mercado] chaves de payout parecidas com '{ativo_faltante}': {parecidos or 'NENHUM'}")
+                print(f" [mercado] chaves de payout parecidas com '{ativo_faltante}': {parecidos or 'NENHUM'}")
         self._mercado_aberto = novos_abertos
         self._payouts = novos_payouts
         self._cache_atualizado = time.time()
@@ -211,12 +183,48 @@ class MercadoIQ:
         except Exception:
             pass
 
+    def preparar_ciclo(self) -> None:
+        """Atualiza cache de mercado UMA VEZ por ciclo, antes do loop de snapshots.
+        Mantém o cache refresh fora de cada snapshot individual para reduzir latência."""
+        with self._lock_api:
+            self._atualizar_cache_se_preciso()
+
+    def snapshot_leve(self, ativo: str) -> SnapshotMercado | None:
+        """Lê candle do stream sem refresh de cache — para o gráfico em tempo real.
+        Rápido: só lê estado do websocket, sem chamar get_server_timestamp."""
+        try:
+            with self._lock_api:
+                bruto = self._api.get_realtime_candles(ativo, self.config.timeframe_segundos)
+            linhas = [
+                {"from": ts, "open": c["open"], "close": c["close"],
+                 "min": c["min"], "max": c["max"], "volume": c.get("volume", 0)}
+                for ts, c in bruto.items()
+            ]
+            with self._lock_buffers:
+                if linhas and ativo in self._buffers:
+                    recentes = self._candles_para_df(linhas)
+                    combinado = pd.concat([self._buffers[ativo], recentes])
+                    combinado = combinado[~combinado.index.duplicated(keep="last")]
+                    self._buffers[ativo] = combinado.sort_index().tail(self.config.limite_candles)
+                buf = self._buffers.get(ativo)
+                if buf is None or len(buf) < 3:
+                    return None
+                buf_copia = buf.copy()
+            return SnapshotMercado(
+                ativo=ativo,
+                candles=buf_copia,
+                payout=self._payouts.get(ativo),
+                mercado_aberto=self._mercado_aberto.get(ativo, False),
+                timestamp_servidor=int(time.time()),
+            )
+        except Exception:
+            return None
+
     def _snapshot_uma_vez(self, ativo: str) -> SnapshotMercado:
         if ativo not in self.config.ativos:
             raise ValueError(f"Ativo fora da configuração: {ativo}")
-        self._atualizar_cache_se_preciso()
 
-        # Leitura de rede sob o lock pesado
+        # Cache já atualizado por preparar_ciclo(). Aqui só candles + timestamp.
         with self._lock_api:
             bruto = self._api.get_realtime_candles(ativo, self.config.timeframe_segundos)
             timestamp_servidor = int(self._api.get_server_timestamp())
@@ -240,13 +248,11 @@ class MercadoIQ:
                 combinado = pd.concat([self._buffers[ativo], recentes])
                 combinado = combinado[~combinado.index.duplicated(keep="last")]
                 self._buffers[ativo] = combinado.sort_index().tail(self.config.limite_candles)
-
             if ativo not in self._buffers or len(self._buffers[ativo]) < 3:
                 raise MercadoIndisponivel(f"Sem candles suficientes para {ativo}.")
-
             buffer_local = self._buffers[ativo].copy()
 
-        # Validação de atraso usa o buffer copiado (fora do lock)
+        # Validação de atraso (fora do lock)
         if self._mercado_aberto.get(ativo, False):
             ultimo = pd.Timestamp(buffer_local.index[-1])
             ultimo_epoch = int(ultimo.tz_localize("UTC").timestamp()) if ultimo.tzinfo is None else int(ultimo.timestamp())
@@ -268,7 +274,7 @@ class MercadoIQ:
             raise MercadoIndisponivel(f"Falha ao ler snapshot de {ativo}: {erro}") from erro
 
     def reconectar_se_necessario(self) -> bool:
-        """Testa a conexão e reconecta se necessário. Thread-safe."""
+        """Tenta reconectar se a conexão parece morta. Thread-safe."""
         with self._lock_api:
             try:
                 self._api.get_server_timestamp()
@@ -285,12 +291,6 @@ class MercadoIQ:
             id_fresco = self._ids_ativos.get(ativo)
             if id_fresco is None:
                 return self._api.buy(valor, ativo, direcao, expiracao_minutos)
-            # NUNCA sobrescrever OP_code.ACTIVES aqui: essa tabela e global e
-            # compartilhada tambem pelo decodificador de mensagens do stream
-            # (client.py faz o caminho inverso, id -> nome). Trocar o valor
-            # quebra a leitura de qualquer mensagem que ainda chegue com o ID
-            # antigo e derruba a thread de mensagens em loop de erro. Em vez
-            # disso, chamamos buyv3 direto com o ID certo, sem tocar na tabela.
             return self._comprar_com_id(valor, id_fresco, direcao, expiracao_minutos)
 
     def _comprar_com_id(self, valor: float, id_ativo: int, direcao: str, expiracao_minutos: int) -> tuple[bool, object]:
@@ -312,26 +312,13 @@ class MercadoIQ:
         return api_baixo_nivel.result, api_baixo_nivel.buy_multi_option[req_id]["id"]
 
     def aguardar_resultado(self, id_ordem: object) -> object:
-        """Espera o resultado por consulta ao historico, nao pelo stream.
-
-        check_win/check_win_v4 dependem de uma notificacao especifica do
-        websocket que, se o ID interno do ativo mudou (o mesmo caso do
-        '-op'), pode nunca chegar — e check_win() da biblioteca instalada
-        e um `while True` SEM timeout, travando a ordem pra sempre e
-        segurando o risco em "ordem_ja_aberta" indefinidamente.
-        consultar_resultado() ja usa a mesma consulta de historico que
-        recupera ordens pendentes no restart, e tem timeout embutido.
-        """
         if not self.config.confiar_resultado_automatico:
-            # O historico da IQ ja devolveu "win" pra ordens que na
-            # realidade foram perda (2 vezes confirmadas). Ate existir uma
-            # verificacao independente (comparar preco de entrada com o
-            # candle no fechamento da expiracao), e mais seguro assumir
-            # perda tecnica sempre do que confiar num "win" que pode ser
-            # mentira — um falso positivo infla a banca e deixa o pyramid
-            # arriscar mais em cima de informacao errada.
             return None
-        limite = time.monotonic() + self.config.expiracao_minutos * 60 + 90
+        # Opção binária de N minutos não expira antes de (N*60 - 20)s.
+        # Consultar imediatamente acha ordens ANTIGAS com ID parecido → win falso.
+        espera_inicial = max(0, self.config.expiracao_minutos * 60 - 20)
+        time.sleep(espera_inicial)
+        limite = time.monotonic() + 120  # até 2min pós-expiração para aparecer
         while time.monotonic() < limite:
             resultado = self.consultar_resultado(id_ordem, timeout_segundos=6.0)
             if resultado is not None:
@@ -347,16 +334,6 @@ class MercadoIQ:
         candle_hora,
         timeout_segundos: float,
     ) -> str | None:
-        """Calcula o resultado sozinho, comparando o preço de entrada com o
-        fechamento do candle de entrada — exatamente como a IQ decide quem
-        ganha (CALL ganha se fechar acima, PUT ganha se fechar abaixo).
-
-        Usa os candles que o bot já recebe via stream (os mesmos que geram
-        os sinais), sem depender do histórico da IQ — que já devolveu "win"
-        pra ordens que na realidade foram perda (confirmado 2 vezes com
-        prints reais da conta). Mais lento pra descobrir o resultado (só
-        depois que o candle seguinte aparece no buffer), mas não mente.
-        """
         alvo = pd.Timestamp(candle_hora)
         limite = time.monotonic() + timeout_segundos
         while time.monotonic() < limite:
@@ -364,9 +341,6 @@ class MercadoIQ:
                 buffer = self._buffers.get(ativo)
             if buffer is not None and alvo in buffer.index:
                 posicao = buffer.index.get_loc(alvo)
-                # So confia se ja existe candle DEPOIS dele no buffer — prova
-                # que o candle de entrada fechou de vez, nao e mais o que
-                # esta se formando agora (que ainda pode mudar de preco).
                 if isinstance(posicao, int) and posicao < len(buffer.index) - 1:
                     fechamento = float(buffer.iloc[posicao + 1]["Close"])
                     if fechamento == preco_entrada:
@@ -377,15 +351,11 @@ class MercadoIQ:
             time.sleep(2.0)
         return None
 
-    _CAMPOS_CONFIRMAM_OPCAO = ("active_id", "amount", "deposit", "win", "expired", "direction")
+    _CAMPOS_CONFIRMA_OPCAO = ("active_id", "amount", "deposit", "win", "expired", "direction")
 
     @classmethod
     def _parece_registro_de_opcao(cls, dados: dict) -> bool:
-        """Reduz falso-positivo: um dict que só por acaso tem uma chave 'id'
-        batendo com o numero da ordem (ex: metadado de instrumento, id de
-        outro objeto qualquer) nao e uma opcao de verdade. Exige que o dict
-        tambem pareça uma opcao (tenha pelo menos um desses campos)."""
-        return any(campo in dados for campo in cls._CAMPOS_CONFIRMAM_OPCAO)
+        return any(campo in dados for campo in cls._CAMPOS_CONFIRMA_OPCAO)
 
     @classmethod
     def _localizar_ordem_historico(cls, dados, id_ordem: str) -> dict | None:
@@ -416,13 +386,6 @@ class MercadoIQ:
 
     @staticmethod
     def _extrair_lucro_historico(ordem: dict) -> object | None:
-        # So confiamos em campos de lucro documentados (pnl_net/net_profit)
-        # ou no rotulo texto (win/loss/equal). Formulas de subtracao entre
-        # campos como profit_amount-amount ja mostraram devolver numeros
-        # absurdos (ex: -1999998 numa aposta de R$2) quando o dict
-        # encontrado nao e exatamente o que a gente espera — melhor nao ter
-        # resultado do que confiar numa conta especulativa com campos que a
-        # gente nao sabe ao certo o que significam nessa conta/regiao.
         for chave in ("pnl_net", "net_profit"):
             if ordem.get(chave) is not None:
                 try:
@@ -437,7 +400,6 @@ class MercadoIQ:
     def consultar_resultado(
         self, id_ordem: object, timeout_segundos: float = 6.0
     ) -> object | None:
-        """Busca uma ordem antiga no histórico sem usar as rotinas infinitas da biblioteca."""
         api_baixo_nivel = self._api.api
         api_baixo_nivel.get_options_v2_data = None
         api_baixo_nivel.get_options_v2(100, "binary,turbo")

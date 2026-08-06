@@ -4,6 +4,7 @@ import functools
 import http.server
 import json
 import os
+import socket
 import socketserver
 import threading
 import tempfile
@@ -21,9 +22,11 @@ class _ServidorReutilizavel(socketserver.ThreadingTCPServer):
     allow_reuse_address = True
     daemon_threads = True
 
+    def server_bind(self):
+        self.socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        super().server_bind()
+
     def handle_error(self, request, client_address):
-        # Navegador fecha a conexao no meio de uma resposta (F5, troca de aba,
-        # polling abortado) o tempo todo; isso e normal, nao um bug do servidor.
         import sys
         excecao = sys.exc_info()[1]
         if isinstance(excecao, (ConnectionAbortedError, ConnectionResetError, BrokenPipeError)):
@@ -77,11 +80,6 @@ class GraficoM5:
         self._toggle_cache_em: float = 0.0
 
     def ativos_ativos(self) -> set[str] | None:
-        """Le o toggle salvo pelo grafico. Retorna None se nao ha arquivo (todos ativos).
-
-        Cacheado por 3s: com 18 ativos por ciclo, ler o disco toda vez é
-        I/O redundante já que o usuário não muda o toggle a cada segundo.
-        """
         agora = time.time()
         if agora - self._toggle_cache_em < 3.0:
             return self._toggle_cache
@@ -107,21 +105,23 @@ class GraficoM5:
     @staticmethod
     def _json_atomico(caminho: Path, dados: dict) -> None:
         caminho.parent.mkdir(parents=True, exist_ok=True)
+        conteudo = json.dumps(dados, ensure_ascii=False, allow_nan=False).encode("utf-8")
         temporario = caminho.with_name(
             f".{caminho.name}.{os.getpid()}.{threading.get_ident()}.tmp"
         )
         try:
-            temporario.write_text(
-                json.dumps(dados, ensure_ascii=False, allow_nan=False), encoding="utf-8"
-            )
-            for tentativa in range(5):
+            temporario.write_bytes(conteudo)
+            for tentativa in range(8):
                 try:
                     os.replace(temporario, caminho)
                     return
                 except PermissionError:
-                    if tentativa == 4:
-                        raise
-                    time.sleep(0.02 * (tentativa + 1))
+                    if tentativa == 7:
+                        # No Windows o browser pode manter o arquivo aberto por um frame.
+                        # Fallback: sobrescreve direto (não atômico mas não trava).
+                        caminho.write_bytes(conteudo)
+                        return
+                    time.sleep(0.01 * (tentativa + 1))
         finally:
             try:
                 temporario.unlink(missing_ok=True)
@@ -147,6 +147,7 @@ class GraficoM5:
                 ultimo_erro = erro
         if self.servidor is None or self.porta is None:
             raise RuntimeError(f"Nenhuma porta disponível para o gráfico: {ultimo_erro}")
+        self.servidor.timeout = 1.0
         threading.Thread(target=self.servidor.serve_forever, name="grafico-m5", daemon=True).start()
         url = f"http://127.0.0.1:{self.porta}/index.html?fonte=iqoption_m5"
         if abrir_navegador:
