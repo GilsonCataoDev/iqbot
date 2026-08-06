@@ -87,6 +87,16 @@ class RegistroSQLite:
                     criado_em TEXT NOT NULL,
                     UNIQUE(ativo, candle_hora, direcao, setup)
                 );
+
+                CREATE TABLE IF NOT EXISTS slippage (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    registrado_em TEXT NOT NULL,
+                    ativo TEXT NOT NULL,
+                    id_ordem TEXT NOT NULL,
+                    preco_sinal REAL NOT NULL,
+                    preco_execucao REAL NOT NULL,
+                    slippage_pips REAL NOT NULL
+                );
                 """
             )
             colunas_operacoes = {
@@ -395,6 +405,35 @@ class RegistroSQLite:
             else:
                 bloqueios[motivo] = bloqueios.get(motivo, 0) + 1
         return {"confirmados": confirmados, "executados": executados, "bloqueios": bloqueios}
+
+    def registrar_slippage(
+        self, ativo: str, id_ordem: str, preco_sinal: float, preco_execucao: float
+    ) -> None:
+        slippage_pips = abs(preco_execucao - preco_sinal)
+        with self._lock, self._sessao() as db:
+            db.execute(
+                """
+                INSERT INTO slippage (registrado_em, ativo, id_ordem, preco_sinal,
+                    preco_execucao, slippage_pips)
+                VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                (datetime.now().isoformat(), ativo, id_ordem,
+                 preco_sinal, preco_execucao, slippage_pips),
+            )
+
+    def slippage_medio(self, ativo: str | None = None, limite: int = 200) -> float | None:
+        with self._lock, self._sessao() as db:
+            if ativo:
+                linha = db.execute(
+                    "SELECT AVG(slippage_pips) FROM slippage WHERE ativo=? ORDER BY id DESC LIMIT ?",
+                    (ativo, limite),
+                ).fetchone()
+            else:
+                linha = db.execute(
+                    "SELECT AVG(slippage_pips) FROM (SELECT slippage_pips FROM slippage ORDER BY id DESC LIMIT ?)",
+                    (limite,),
+                ).fetchone()
+        return float(linha[0]) if linha and linha[0] is not None else None
 
     def status_decisoes_grafico(self, ativo: str) -> dict[tuple[str, str], str]:
         with self._lock, self._sessao() as db:

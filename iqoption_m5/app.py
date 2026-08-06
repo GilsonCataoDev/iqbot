@@ -48,7 +48,7 @@ def _notificar_desktop(titulo: str, mensagem: str) -> None:
 from .noticias import CalendarioEconomico, e_sintetico
 from .recuperacao import recuperar_operacoes_pendentes
 from .registro import RegistroSQLite
-from .risco import GerenciadorRisco
+from .risco import GerenciadorRisco, kill_switch_ativo
 
 
 def main(config: Configuracao | None = None) -> None:
@@ -448,6 +448,9 @@ def main(config: Configuracao | None = None) -> None:
     _ultimo_teste_conexao: float = 0.0
     try:
         while not risco.resumo().encerrado:
+            if kill_switch_ativo():
+                print("[KILL SWITCH] arquivo kill_switch.json detectado — encerrando loop.")
+                break
             # Reconexão periódica em background — throttle por tempo
             agora_loop = time.time()
             if agora_loop - _ultimo_teste_conexao > 60.0:

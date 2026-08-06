@@ -86,6 +86,24 @@ class Configuracao:
     parar_por_prejuizo: bool = False
     cooldown_pos_ordem_segundos: float = 0.0  # 0 = desligado; >0 = bloqueia nova entrada por N segundos após resultado
 
+    # --- Horário bloqueado (UTC) ---
+    # Evita operar em janelas de baixa liquidez / mercado OTC suspenso.
+    # None = sem restrição. Tupla ((h_inicio, m_inicio), (h_fim, m_fim)).
+    horario_bloqueado: tuple | None = ((0, 0), (7, 0))  # 00:00-07:00 UTC
+
+    # --- Drawdown máximo percentual ---
+    # Para o bot quando (banca_pico - banca_atual) / banca_pico >= este valor.
+    # 0.0 = desativado.
+    drawdown_maximo_percentual: float = 0.0
+
+    # --- Circuit breaker ---
+    # Após N perdas seguidas, bloqueia por cooldown_minutos. 0 = desativado.
+    circuit_breaker_max_perdas: int = 0
+    circuit_breaker_cooldown_minutos: int = 60
+
+    # --- Slippage monitor ---
+    slippage_alerta_pips: float = 0.0003  # alerta se |exec - sinal| > este valor
+
     pasta_dados: Path = Path(__file__).resolve().parent / "dados"
 
     @property

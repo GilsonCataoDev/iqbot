@@ -1,13 +1,26 @@
+import json
 import threading
 import time
 from datetime import datetime
+from pathlib import Path
 
 from .config import Configuracao
 from .modelos import Autorizacao, Decisao, EstadoPersistido, ResumoRisco, SnapshotMercado
 
+KILL_SWITCH_ARQUIVO = Path(__file__).resolve().parent.parent / "kill_switch.json"
+
+
+def kill_switch_ativo() -> bool:
+    """Retorna True se o arquivo kill_switch.json existir com {"ativo": false}."""
+    try:
+        dados = json.loads(KILL_SWITCH_ARQUIVO.read_text())
+        return not bool(dados.get("ativo", True))
+    except Exception:
+        return False
+
 
 class GerenciadorRisco:
-    """Única interface capaz de autorizar uma ordem na ferramenta."""
+    """RiskEngine central: única interface capaz de autorizar uma ordem."""
 
     def __init__(self, config: Configuracao, estado: EstadoPersistido | None = None):
         self.config = config
@@ -23,9 +36,11 @@ class GerenciadorRisco:
         self._ordem_aberta = estado.ordem_pendente
         self._encerrado = estado.ordem_pendente
         self._motivo_encerramento = "operacao_pendente_banco" if estado.ordem_pendente else None
-        # Cooldown: bloqueia nova entrada pelo tempo de expiração após o resultado
-        # da anterior, impedindo duas operações seguidas no mesmo ciclo de candle.
         self._cooldown_ate: float = 0.0
+        # Drawdown: rastreia banca pico para calcular drawdown percentual
+        self._banca_pico: float = max(config.banca_inicial + estado.lucro_total, config.banca_inicial)
+        # Circuit breaker: bloqueia por tempo após N perdas seguidas
+        self._circuit_breaker_ate: float = 0.0
         if (
             not self._encerrado
             and config.parar_por_perdas
@@ -79,8 +94,34 @@ class GerenciadorRisco:
                 self._encerrado = False
                 self._motivo_encerramento = None
 
+    def _horario_bloqueado(self, timestamp_servidor: int) -> bool:
+        cfg = self.config.horario_bloqueado
+        if cfg is None:
+            return False
+        (h_ini, m_ini), (h_fim, m_fim) = cfg
+        dt = datetime.utcfromtimestamp(timestamp_servidor)
+        minuto_atual = dt.hour * 60 + dt.minute
+        minuto_ini = h_ini * 60 + m_ini
+        minuto_fim = h_fim * 60 + m_fim
+        if minuto_ini < minuto_fim:
+            return minuto_ini <= minuto_atual < minuto_fim
+        # intervalo vira meia-noite: ex. 22:00-06:00
+        return minuto_atual >= minuto_ini or minuto_atual < minuto_fim
+
+    def _drawdown_percentual(self) -> float:
+        banca_atual = self.config.banca_inicial + self._lucro_total
+        if self._banca_pico <= 0:
+            return 0.0
+        return (self._banca_pico - banca_atual) / self._banca_pico
+
     def _avaliar_sem_lock(self, snapshot: SnapshotMercado, decisao: Decisao) -> Autorizacao:
         self._atualizar_dia(snapshot.timestamp_servidor)
+        # 1. Kill switch (arquivo externo)
+        if kill_switch_ativo():
+            return Autorizacao(False, "kill_switch")
+        # 2. Horário bloqueado
+        if self._horario_bloqueado(snapshot.timestamp_servidor):
+            return Autorizacao(False, "horario_bloqueado")
         if self.config.conta not in ("PRACTICE", "REAL"):
             return Autorizacao(False, "conta_invalida")
         if self._encerrado:
@@ -103,6 +144,9 @@ class GerenciadorRisco:
             return Autorizacao(False, "ordem_ja_aberta")
         if self.config.cooldown_pos_ordem_segundos > 0 and time.time() < self._cooldown_ate:
             return Autorizacao(False, "cooldown_pos_ordem")
+        # 3. Circuit breaker
+        if self._circuit_breaker_ate > 0 and time.time() < self._circuit_breaker_ate:
+            return Autorizacao(False, "circuit_breaker")
         if self._enviadas >= self.config.max_operacoes_dia:
             return Autorizacao(False, "limite_diario")
         if (
@@ -112,6 +156,10 @@ class GerenciadorRisco:
             return Autorizacao(False, "limite_perdas_consecutivas")
         if self.config.parar_por_prejuizo and self._lucro <= self.config.stop_diario:
             return Autorizacao(False, "stop_diario")
+        # 4. Drawdown percentual
+        if (self.config.drawdown_maximo_percentual > 0
+                and self._drawdown_percentual() >= self.config.drawdown_maximo_percentual):
+            return Autorizacao(False, "drawdown_maximo")
         if self.config.meta_diaria > 0 and self._lucro >= self.config.meta_diaria:
             return Autorizacao(False, "meta_diaria_atingida")
         return Autorizacao(True, "autorizada")
@@ -145,6 +193,16 @@ class GerenciadorRisco:
                 self._lucro_total += lucro
                 self._ultimo_lucro = lucro
                 self._perdas_consecutivas = self._perdas_consecutivas + 1 if lucro < 0 else 0
+                # Atualiza pico de banca para drawdown percentual
+                banca_atual = self.config.banca_inicial + self._lucro_total
+                if banca_atual > self._banca_pico:
+                    self._banca_pico = banca_atual
+                # Circuit breaker: N perdas seguidas → bloqueia por cooldown
+                if (self.config.circuit_breaker_max_perdas > 0
+                        and self._perdas_consecutivas >= self.config.circuit_breaker_max_perdas):
+                    self._circuit_breaker_ate = (
+                        time.time() + self.config.circuit_breaker_cooldown_minutos * 60
+                    )
 
             if (
                 self.config.parar_por_perdas
@@ -158,6 +216,10 @@ class GerenciadorRisco:
             elif self._enviadas >= self.config.max_operacoes_dia:
                 self._encerrado = True
                 self._motivo_encerramento = "limite_diario"
+            elif (self.config.drawdown_maximo_percentual > 0
+                  and self._drawdown_percentual() >= self.config.drawdown_maximo_percentual):
+                self._encerrado = True
+                self._motivo_encerramento = "drawdown_maximo"
             self._checar_meta_diaria()
             self._checar_piso_banca()
 

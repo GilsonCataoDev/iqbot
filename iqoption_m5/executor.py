@@ -104,6 +104,20 @@ class ExecutorSeguro:
             return
 
         self.registro.registrar_abertura(id_ordem, decisao, valor, payout, enviada_em)
+        # Slippage: candle aberto no momento da execução vs preço do sinal
+        try:
+            preco_execucao = snapshot.candles.iloc[-1]["Open"]
+            slippage = abs(preco_execucao - decisao.preco)
+            self.registro.registrar_slippage(
+                decisao.ativo, str(id_ordem), decisao.preco, float(preco_execucao)
+            )
+            if slippage > self.config.slippage_alerta_pips:
+                print(
+                    f" [SLIP] {decisao.ativo}: slippage={slippage:.5f} pips "
+                    f"(sinal={decisao.preco:.5f} exec={preco_execucao:.5f})"
+                )
+        except Exception:
+            pass
         resumo = self.risco.resumo()
         print(
             f">> {decisao.ativo}: {decisao.direcao.upper()} enviada, id={id_ordem}, "

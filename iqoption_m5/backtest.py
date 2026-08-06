@@ -351,3 +351,93 @@ def validar_fora_da_amostra(df: pd.DataFrame, payout: float, fracao_treino: floa
     else:
         print("Nenhum filtro sobreviveu: no período escondido, nenhum teve o piso do")
         print("IC95% acima do breakeven. O que parecia bom no treino era ruído.")
+
+
+# ---------------------------------------------------------------------------
+# Backtest realista com custos reais
+# ---------------------------------------------------------------------------
+@dataclass(frozen=True)
+class CustoOperacao:
+    """Parâmetros de custo usados pelo BacktestRealista."""
+    payout: float = 0.85       # lucro líquido em caso de ganho (ex: 0.85 = 85%)
+    spread_pips: float = 0.0   # spread médio observado no slippage (ex: 0.0002)
+    slippage_pips: float = 0.0 # slippage médio da execução (ex: 0.0001)
+
+
+class BacktestRealista:
+    """Backtesta com payout real + spread + slippage sobre o histórico de operações.
+
+    Usa os mesmos `Operacao` do `simular()` mas aplica os custos reais em vez
+    do modelo binário puro, para ter uma estimativa mais honesta do resultado.
+    """
+
+    def __init__(self, custo: CustoOperacao | None = None):
+        self.custo = custo or CustoOperacao()
+
+    def _lucro_operacao(self, op: Operacao, valor: float) -> float:
+        custo_total_pips = self.custo.spread_pips + self.custo.slippage_pips
+        if op.resultado == "empate":
+            return -custo_total_pips * valor  # custo mesmo no empate
+        if op.resultado == "ganho":
+            return valor * self.custo.payout - custo_total_pips * valor
+        return -valor - custo_total_pips * valor  # perda + custos
+
+    def simular(self, operacoes: list[Operacao], valor: float = 1.0) -> pd.DataFrame:
+        if not operacoes:
+            return pd.DataFrame()
+        linhas = []
+        banca = 0.0
+        for op in operacoes:
+            lucro = self._lucro_operacao(op, valor)
+            banca += lucro
+            linhas.append({
+                "hora_entrada": op.hora_entrada,
+                "ativo": op.ativo,
+                "setup": op.setup,
+                "direcao": op.direcao,
+                "resultado": op.resultado,
+                "lucro": round(lucro, 4),
+                "banca_acumulada": round(banca, 4),
+            })
+        return pd.DataFrame(linhas)
+
+    def resumo(self, operacoes: list[Operacao], valor: float = 1.0) -> dict:
+        df = self.simular(operacoes, valor)
+        if df.empty:
+            return {}
+        decididas = df[df["resultado"] != "empate"]
+        total = len(decididas)
+        ganhos = int((decididas["resultado"] == "ganho").sum())
+        taxa = ganhos / total if total else 0.0
+        ic_inf, ic_sup = intervalo_wilson(ganhos, total)
+        lucro_total = float(df["lucro"].sum())
+        pico = float(df["banca_acumulada"].cummax().iloc[-1])
+        fundo = float(df["banca_acumulada"].cummin().iloc[-1])
+        return {
+            "operacoes": total,
+            "empates": int((df["resultado"] == "empate").sum()),
+            "acerto_pct": round(taxa * 100, 1),
+            "ic95_min_pct": round(ic_inf * 100, 1),
+            "ic95_max_pct": round(ic_sup * 100, 1),
+            "lucro_total": round(lucro_total, 4),
+            "banca_pico": round(pico, 4),
+            "banca_piso": round(fundo, 4),
+            "breakeven_pct": round(breakeven(self.custo.payout) * 100, 1),
+            "custo": {
+                "payout": self.custo.payout,
+                "spread_pips": self.custo.spread_pips,
+                "slippage_pips": self.custo.slippage_pips,
+            },
+        }
+
+    def imprimir(self, operacoes: list[Operacao], valor: float = 1.0) -> None:
+        r = self.resumo(operacoes, valor)
+        if not r:
+            print("Nenhuma operação para backtest realista.")
+            return
+        print(f"\n=== BacktestRealista — payout={r['custo']['payout']:.1%} | "
+              f"spread={r['custo']['spread_pips']:.5f} | slippage={r['custo']['slippage_pips']:.5f} ===")
+        print(f"Operações: {r['operacoes']}  |  Empates: {r['empates']}")
+        print(f"Acerto: {r['acerto_pct']}%  |  IC95%: {r['ic95_min_pct']}% — {r['ic95_max_pct']}%")
+        print(f"Breakeven (com custos): {r['breakeven_pct']}%")
+        print(f"Lucro total: {r['lucro_total']:+.4f}  |  Pico: {r['banca_pico']:+.4f}  |  Piso: {r['banca_piso']:+.4f}")
