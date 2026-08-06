@@ -334,9 +334,14 @@ def main(config: Configuracao | None = None) -> None:
             ia_atual = parecer_ia.get(ativo)
         par_validado = not config.pares_validados or ativo in config.pares_validados
 
+        proxima_vela = pd.Timestamp(indicadores.index[-1])
         todos_motivos: list[str] = []
         for decisao in decisoes_todas:
             setup_nome = decisao.detalhes.get("setup", decisao.motivo)
+            # fibo_sr_retracao entra na vela do toque (pedido do usuário).
+            # Todas as outras entram na vela SEGUINTE ao sinal.
+            if setup_nome != "fibo_sr_retracao":
+                decisao = replace(decisao, candle_hora=proxima_vela)
             autorizacao = risco.avaliar(snapshot, decisao)
             registro.registrar_decisao(decisao, snapshot, autorizacao)
             motivos = explicar_decisao(decisao, indicadores)
