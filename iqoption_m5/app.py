@@ -426,7 +426,15 @@ def main(config: Configuracao | None = None) -> None:
                     except Exception as exc:
                         print(f"[{datetime.now():%H:%M:%S}] [worker] erro: {exc}")
 
-            time.sleep(config.intervalo_loop_segundos)
+            # Sleep inteligente: acorda pouco antes do próximo candle fechar.
+            # Margem = tempo estimado para buscar todos os snapshots + folga.
+            # Isso elimina o delay de "loop dormindo enquanto o candle vira".
+            agora_epoch = time.time()
+            seg_no_candle = agora_epoch % config.timeframe_segundos
+            seg_restantes = config.timeframe_segundos - seg_no_candle
+            margem = len(config.ativos) * 0.45 + 1.0  # ~5.5s para 10 ativos
+            sono = max(0.1, seg_restantes - margem)
+            time.sleep(sono)
     except KeyboardInterrupt:
         print("Interrupção solicitada. Aguardando eventual ordem aberta...")
     finally:
