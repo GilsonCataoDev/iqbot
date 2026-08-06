@@ -855,7 +855,7 @@ class EstrategiaReversaoM5:
 
     def sinais_historicos(self, ativo: str, candles: pd.DataFrame) -> list[Decisao]:
         """Marca sinais no candle de ENTRADA (não o de sinal), para alinhar com as ordens reais."""
-        df = self._calcular_do_zero(candles)  # histórico completo — não usa cache
+        df = self.calcular_indicadores(candles, ativo)
         inicio = max(self.config.ema_macro_periodo, self.config.atr_regime_janela) + 1
         sinais = []
         for indice in range(inicio, len(df) - 1):

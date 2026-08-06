@@ -395,20 +395,21 @@ def main(config: Configuracao | None = None) -> None:
 
         ultima_explicacao[ativo] = todos_motivos
 
-    ciclo = 0
     try:
         while not risco.resumo().encerrado:
+            # Reconexão periódica em background (a cada 10 ciclos)
+            if "ciclo_loop" not in locals():
+                ciclo_loop = 0
+            if ciclo_loop % 10 == 0:
+                mercado.reconectar_se_necessario()
+            ciclo_loop += 1
+
             if datetime.now().date() != dia_contagem_aproximando:
                 dia_contagem_aproximando = datetime.now().date()
                 contagem_aproximando_hoje = {ativo: 0 for ativo in config.ativos}
             ativos_toggle = grafico.ativos_ativos() if grafico else None
             agora_utc = datetime.now(timezone.utc)
             calendario.atualizar()
-
-            # Testa a conexão a cada 10 ciclos em background (não bloqueia o loop)
-            if ciclo % 10 == 0:
-                threading.Thread(target=mercado.reconectar_se_necessario, daemon=True).start()
-            ciclo += 1
 
             # Fase 1: snapshots sequenciais (API tem lock interno)
             snapshots: dict = {}

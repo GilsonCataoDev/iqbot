@@ -211,28 +211,16 @@ class MercadoIQ:
         except Exception:
             pass
 
-    def snapshot(self, ativo: str) -> SnapshotMercado:
-        """Lê candles e estado do mercado para um ativo.
-
-        Separa chamadas de rede (_lock_api) de atualizações de buffer
-        (_lock_buffers), para que comprar() e resultado_por_candle() não
-        bloqueiem a leitura dos outros ativos.
-        """
+    def _snapshot_uma_vez(self, ativo: str) -> SnapshotMercado:
         if ativo not in self.config.ativos:
             raise ValueError(f"Ativo fora da configuração: {ativo}")
+        self._atualizar_cache_se_preciso()
 
-        # Fase 1: chamadas de rede — _lock_api (pesado, exclui comprar/reconectar)
+        # Leitura de rede sob o lock pesado
         with self._lock_api:
-            try:
-                self._atualizar_cache_se_preciso()
-                bruto = self._api.get_realtime_candles(ativo, self.config.timeframe_segundos)
-                timestamp_servidor = int(self._api.get_server_timestamp())
-            except Exception as erro:
-                raise MercadoIndisponivel(f"Falha de rede para {ativo}: {erro}") from erro
-            mercado_aberto = self._mercado_aberto.get(ativo, False)
-            payout = self._payouts.get(ativo)
+            bruto = self._api.get_realtime_candles(ativo, self.config.timeframe_segundos)
+            timestamp_servidor = int(self._api.get_server_timestamp())
 
-        # Conversão de dados brutos (sem lock — só cria objetos Python locais)
         linhas = [
             {
                 "from": ts,
@@ -245,36 +233,42 @@ class MercadoIQ:
             for ts, candle in bruto.items()
         ]
 
-        # Fase 2: atualiza buffer — _lock_buffers (leve, não bloqueia a rede)
+        # Atualização de buffers sob lock leve
         with self._lock_buffers:
             if linhas:
                 recentes = self._candles_para_df(linhas)
                 combinado = pd.concat([self._buffers[ativo], recentes])
                 combinado = combinado[~combinado.index.duplicated(keep="last")]
                 self._buffers[ativo] = combinado.sort_index().tail(self.config.limite_candles)
+
             if ativo not in self._buffers or len(self._buffers[ativo]) < 3:
                 raise MercadoIndisponivel(f"Sem candles suficientes para {ativo}.")
-            if mercado_aberto:
-                ultimo = pd.Timestamp(self._buffers[ativo].index[-1])
-                ultimo_epoch = (
-                    int(ultimo.tz_localize("UTC").timestamp())
-                    if ultimo.tzinfo is None
-                    else int(ultimo.timestamp())
-                )
-                if timestamp_servidor - ultimo_epoch > self.config.timeframe_segundos * 2:
-                    raise MercadoIndisponivel(f"Stream de {ativo} está atrasado.")
-            candles = self._buffers[ativo].copy()
+
+            buffer_local = self._buffers[ativo].copy()
+
+        # Validação de atraso usa o buffer copiado (fora do lock)
+        if self._mercado_aberto.get(ativo, False):
+            ultimo = pd.Timestamp(buffer_local.index[-1])
+            ultimo_epoch = int(ultimo.tz_localize("UTC").timestamp()) if ultimo.tzinfo is None else int(ultimo.timestamp())
+            if timestamp_servidor - ultimo_epoch > self.config.timeframe_segundos * 2:
+                raise MercadoIndisponivel(f"Stream de {ativo} está atrasado.")
 
         return SnapshotMercado(
             ativo=ativo,
-            candles=candles,
-            payout=payout,
-            mercado_aberto=mercado_aberto,
+            candles=buffer_local,
+            payout=self._payouts.get(ativo),
+            mercado_aberto=self._mercado_aberto.get(ativo, False),
             timestamp_servidor=timestamp_servidor,
         )
 
+    def snapshot(self, ativo: str) -> SnapshotMercado:
+        try:
+            return self._snapshot_uma_vez(ativo)
+        except Exception as erro:
+            raise MercadoIndisponivel(f"Falha ao ler snapshot de {ativo}: {erro}") from erro
+
     def reconectar_se_necessario(self) -> bool:
-        """Testa a conexão e reconecta se necessário. Thread-safe; pode rodar em background."""
+        """Testa a conexão e reconecta se necessário. Thread-safe."""
         with self._lock_api:
             try:
                 self._api.get_server_timestamp()
