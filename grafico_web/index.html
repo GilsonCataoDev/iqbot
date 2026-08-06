@@ -1,0 +1,745 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<meta charset="UTF-8">
+<title>IQ Option M5 — sinais ao vivo</title>
+<script src="https://unpkg.com/lightweight-charts@4.1.3/dist/lightweight-charts.standalone.production.js"></script>
+<style>
+  html, body { margin: 0; background: #131722; font-family: -apple-system, Arial, sans-serif; color: #d1d4dc; }
+  #barra { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; padding: 8px 12px; font-size: 13px; }
+  #ativo { background: #1e222d; color: #d1d4dc; border: 1px solid #363a45; border-radius: 4px; padding: 4px 8px; font-size: 13px; }
+  #status { flex: 1; min-width: 200px; }
+  #camadas { display: flex; gap: 12px; font-size: 12px; color: #9598a1; }
+  #camadas label { display: flex; align-items: center; gap: 4px; cursor: pointer; white-space: nowrap; }
+
+  #resumo { display: flex; flex-wrap: wrap; gap: 8px; padding: 6px 12px; background: #0e1117; border-bottom: 1px solid #222633; }
+  .resumo-item { font-size: 12px; padding: 3px 8px; border-radius: 4px; background: #1e222d; cursor: pointer; border: 1px solid transparent; white-space: nowrap; }
+  .resumo-item:hover { border-color: #363a45; }
+  .resumo-item.ativo-selecionado { border-color: #ffd700; }
+  .resumo-item.ativo-desligado { opacity: 0.35; }
+  .toggle-ativo { margin-right: 4px; cursor: pointer; accent-color: #26a69a; }
+  .resumo-label { pointer-events: none; }
+
+  #chart-preco { width: 100%; height: 50vh; }
+  #chart-volume { width: 100%; height: 10vh; }
+  #chart-rsi { width: 100%; height: 20vh; }
+
+  #legenda { display: flex; flex-wrap: wrap; gap: 14px; padding: 6px 12px; font-size: 11px; color: #9598a1; border-top: 1px solid #222633; }
+  #legenda span { display: flex; align-items: center; gap: 5px; white-space: nowrap; }
+  .marca { display: inline-block; width: 10px; height: 10px; border-radius: 2px; }
+
+  #painel { display: flex; flex-wrap: wrap; gap: 10px; padding: 8px 12px; background: #0e1117; border-bottom: 1px solid #222633; }
+  .cartao { flex: 1; min-width: 280px; background: #161a25; border: 1px solid #222633; border-radius: 6px; padding: 8px 10px; }
+  .cartao h3 { margin: 0 0 6px; font-size: 12px; letter-spacing: .04em; text-transform: uppercase; color: #787b86; font-weight: 600; }
+  .cartao ul { margin: 0; padding-left: 16px; font-size: 12px; line-height: 1.55; }
+  .cartao p { margin: 0; font-size: 12px; color: #787b86; }
+  .cabecalho-alerta { font-size: 14px; font-weight: 700; margin-bottom: 4px; }
+  .selo-informativo { display: inline-block; margin-left: 8px; padding: 2px 6px; border-radius: 3px; background: rgba(120,123,134,0.2); color: #9598a1; font-size: 9px; letter-spacing: 0; text-transform: none; font-weight: 700; vertical-align: middle; }
+  .alerta-entrada { border-color: #ffd700; }
+  .alerta-aproximando { border-color: #e0b040; }
+  .rodape-alerta { margin-top: 6px; font-size: 11px; color: #9598a1; }
+  .nivel-entrada { margin-top: 6px; padding: 5px 7px; border-radius: 4px; background: #1b2733; font-size: 13px; }
+  .nivel-entrada .rodape-alerta { margin: 0; display: inline; }
+  .aviso-noticia { margin-top: 6px; padding: 4px 6px; border-radius: 4px; background: #3a2a12; color: #ffcc80; font-size: 11px; }
+  .instrucao-timing { margin: 8px 0; padding: 10px 12px; border-radius: 4px; font-size: 14px; line-height: 1.5; }
+  .tempo-restante { font-size: 12px; opacity: 0.8; }
+  .noticia-linha { font-size: 12px; padding: 4px 0; border-bottom: 1px solid #222633; }
+  .impacto-High { color: #ef5350; font-weight: 600; }
+  .impacto-Medium { color: #e0b040; }
+  .noticia-iminente { background: rgba(239,83,80,0.12); padding: 4px 6px; border-radius: 4px; margin: 2px 0; animation: piscar 1.5s ease-in-out infinite; }
+  @keyframes piscar { 0%,100% { opacity: 1; } 50% { opacity: 0.6; } }
+  .noticia-recente { background: rgba(224,176,64,0.12); padding: 4px 6px; border-radius: 4px; margin: 2px 0; }
+  .noticia-tag { display: block; font-size: 10px; font-weight: 700; color: #e0b040; margin-top: 2px; }
+  .noticia-discurso { border-left: 3px solid #ef5350; padding-left: 6px; }
+  .noticia-tag-discurso { color: #ef5350; }
+  .noticia-tempo { white-space: nowrap; font-weight: 600; }
+  .noticia-cabecalho { display: flex; justify-content: space-between; gap: 10px; }
+  .noticia-detalhe { font-size: 11px; color: #9598a1; margin-top: 2px; }
+  .noticia-sugestao { font-size: 11px; margin-top: 2px; padding: 3px 6px; background: #1b2733; border-radius: 3px; }
+  .ia-resultado { margin-top: 6px; padding: 5px 8px; background: #1b2733; border-radius: 4px; font-size: 13px; }
+  .setup-linha { padding: 3px 0; border-bottom: 1px solid #1a1d28; font-size: 11px; }
+  .setup-linha:last-child { border-bottom: none; }
+  .setup-validada { border-left: 3px solid #ffd700; padding-left: 6px; }
+  .setup-simulada { opacity: 0.8; }
+  .setup-detalhe { font-size: 10px; color: #9598a1; margin-top: 1px; }
+  #cartao-estrategias { max-height: 220px; overflow-y: auto; }
+  #cartao-ia { border-left: 3px solid #7c4dff; }
+</style>
+</head>
+<body>
+  <div id="barra">
+    <select id="ativo"><option>carregando...</option></select>
+    <div id="status">Conectando...</div>
+    <div id="camadas">
+      <label><input type="checkbox" id="camada-bandas" checked> Bandas</label>
+      <label><input type="checkbox" id="camada-ema"> EMAs</label>
+      <label><input type="checkbox" id="camada-niveis" checked> Suporte/Resist.</label>
+      <label><input type="checkbox" id="camada-fib"> Fibonacci</label>
+    </div>
+  </div>
+  <div id="resumo"></div>
+  <div id="painel">
+    <div class="cartao" id="cartao-alerta"><h3>Alerta <span class="selo-informativo">SÓ AVISO — NÃO EXECUTA ORDEM</span></h3><p>Aguardando dados...</p></div>
+    <div class="cartao" id="cartao-motivo"><h3>Por que o robô sinalizou</h3><p>Sem sinal no último candle.</p></div>
+    <div class="cartao" id="cartao-noticias"><h3>Notícias do dia</h3><p>Carregando...</p></div>
+    <div class="cartao" id="cartao-ia"><h3>Opiniao da IA</h3><p>Aguardando sinal para analisar...</p></div>
+    <div class="cartao" id="cartao-estrategias"><h3>Reversão (validada) vs Pullback/Bollinger (não validadas)</h3><p>Sem operações suficientes ainda.</p></div>
+    <div class="cartao" id="cartao-funil"><h3>Funil de sinais hoje (reversão de vela)</h3><p>Sem dados ainda hoje.</p></div>
+  </div>
+  <div id="chart-preco"></div>
+  <div id="chart-volume"></div>
+  <div id="chart-rsi"></div>
+  <div id="legenda">
+    <span><span class="marca" style="background:#26a69a"></span>▲ sinal de compra</span>
+    <span><span class="marca" style="background:#ef5350"></span>▼ sinal de venda</span>
+    <span><span class="marca" style="background:#80cbc4;border-radius:50%"></span>● pullback (a favor da tendência)</span>
+    <span><span class="marca" style="background:#ffd700"></span>▲▼ confluência (pullback + fibo/suporte)</span>
+    <span><span class="marca" style="background:#ffd54f"></span>■ entrada próxima (aviso antecipado)</span>
+    <span><span class="marca" style="background:#42a5f5;border-radius:50%"></span>operação IQ PRACTICE (verde=ganhou, vermelho=perdeu)</span>
+  </div>
+
+<script>
+const params = new URLSearchParams(window.location.search);
+const fonte = params.get('fonte') || 'binance';   // qual monitor está servindo essa página: binance | iqoption
+const CHAVE_LOCALSTORAGE = `monitor_ativo_selecionado_${fonte}`;
+let ativoAtual = null;
+let listaAtivos = [];
+let atualizando = false;
+let resumoAtualizando = false;
+let ultimoStatusValido = '';
+
+async function buscarJson(url, timeoutMs = 2500) {
+  const controlador = new AbortController();
+  const timer = setTimeout(() => controlador.abort(), timeoutMs);
+  try {
+    const resp = await fetch(url, { signal: controlador.signal });
+    if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+    return await resp.json();
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+const opcoesComuns = {
+  layout: { background: { color: '#131722' }, textColor: '#d1d4dc' },
+  grid: { vertLines: { color: '#222633' }, horzLines: { color: '#222633' } },
+  timeScale: { timeVisible: true, secondsVisible: false },
+  crosshair: { mode: LightweightCharts.CrosshairMode.Normal },
+};
+
+const chartPreco = LightweightCharts.createChart(document.getElementById('chart-preco'), {
+  ...opcoesComuns,
+  width: document.getElementById('chart-preco').clientWidth,
+  height: document.getElementById('chart-preco').clientHeight,
+});
+const chartVolume = LightweightCharts.createChart(document.getElementById('chart-volume'), {
+  ...opcoesComuns,
+  width: document.getElementById('chart-volume').clientWidth,
+  height: document.getElementById('chart-volume').clientHeight,
+  timeScale: { visible: false },
+});
+const chartRsi = LightweightCharts.createChart(document.getElementById('chart-rsi'), {
+  ...opcoesComuns,
+  width: document.getElementById('chart-rsi').clientWidth,
+  height: document.getElementById('chart-rsi').clientHeight,
+});
+
+const serieCandle = chartPreco.addCandlestickSeries({
+  upColor: '#26a69a', downColor: '#ef5350',
+  borderVisible: false, wickUpColor: '#26a69a', wickDownColor: '#ef5350',
+});
+const serieBandaSup = chartPreco.addLineSeries({ color: '#787b86', lineWidth: 1, lineStyle: LightweightCharts.LineStyle.Dashed });
+const serieBandaInf = chartPreco.addLineSeries({ color: '#787b86', lineWidth: 1, lineStyle: LightweightCharts.LineStyle.Dashed });
+const serieBandaMedia = chartPreco.addLineSeries({ color: '#787b86', lineWidth: 1, lineStyle: LightweightCharts.LineStyle.Dotted });
+const serieEmaMicro = chartPreco.addLineSeries({ color: '#ffb74d', lineWidth: 1, title: 'EMA micro', visible: false });
+const serieEmaMacro = chartPreco.addLineSeries({ color: '#42a5f5', lineWidth: 2, title: 'EMA macro', visible: false });
+
+const serieVolume = chartVolume.addHistogramSeries({ priceFormat: { type: 'volume' } });
+
+const serieRsi = chartRsi.addLineSeries({ color: '#b388ff', lineWidth: 1 });
+const serieRsi70 = chartRsi.addLineSeries({ color: '#ef5350', lineWidth: 1, lineStyle: LightweightCharts.LineStyle.Dashed });
+const serieRsi30 = chartRsi.addLineSeries({ color: '#26a69a', lineWidth: 1, lineStyle: LightweightCharts.LineStyle.Dashed });
+
+// sincroniza pan/zoom entre os três gráficos
+function sincronizarRange(origem, destinos) {
+  origem.timeScale().subscribeVisibleLogicalRangeChange(range => {
+    if (range) destinos.forEach(d => d.timeScale().setVisibleLogicalRange(range));
+  });
+}
+sincronizarRange(chartPreco, [chartVolume, chartRsi]);
+sincronizarRange(chartVolume, [chartPreco, chartRsi]);
+sincronizarRange(chartRsi, [chartPreco, chartVolume]);
+
+window.addEventListener('resize', () => {
+  chartPreco.resize(document.getElementById('chart-preco').clientWidth, document.getElementById('chart-preco').clientHeight);
+  chartVolume.resize(document.getElementById('chart-volume').clientWidth, document.getElementById('chart-volume').clientHeight);
+  chartRsi.resize(document.getElementById('chart-rsi').clientWidth, document.getElementById('chart-rsi').clientHeight);
+});
+
+let primeiraCarga = true;
+let linhasNiveis = [];
+let linhasFib = [];
+let linhaEntrada = null;
+let linhasGatilho = [];
+
+const CORES_FIB = {
+  0: '#787b86', 0.236: '#e0b040', 0.382: '#e08040', 0.5: '#d1d4dc',
+  0.618: '#40b0e0', 0.786: '#a040e0', 1: '#787b86',
+};
+
+const chkBandas = document.getElementById('camada-bandas');
+const chkEma = document.getElementById('camada-ema');
+const chkNiveis = document.getElementById('camada-niveis');
+const chkFib = document.getElementById('camada-fib');
+[chkBandas, chkEma, chkNiveis, chkFib].forEach(chk => chk.addEventListener('change', () => {
+  serieBandaSup.applyOptions({ visible: chkBandas.checked });
+  serieBandaInf.applyOptions({ visible: chkBandas.checked });
+  serieBandaMedia.applyOptions({ visible: chkBandas.checked });
+  serieEmaMicro.applyOptions({ visible: chkEma.checked });
+  serieEmaMacro.applyOptions({ visible: chkEma.checked });
+  atualizar();
+}));
+
+function selecionarAtivo(id) {
+  ativoAtual = id;
+  document.getElementById('ativo').value = id;
+  localStorage.setItem(CHAVE_LOCALSTORAGE, id);
+  primeiraCarga = true;
+  atualizar();
+  atualizarResumo();
+}
+
+async function carregarManifesto() {
+  const select = document.getElementById('ativo');
+  try {
+    const resp = await fetch(`${fonte}/manifest.json?_=` + Date.now());
+    const manifesto = await resp.json();
+    listaAtivos = manifesto.ativos;
+    select.innerHTML = '';
+    for (const item of listaAtivos) {
+      const opt = document.createElement('option');
+      opt.value = item.id;
+      opt.textContent = item.label;
+      select.appendChild(opt);
+    }
+
+    const salvo = localStorage.getItem(CHAVE_LOCALSTORAGE);
+    const existeSalvo = salvo && listaAtivos.some(a => a.id === salvo);
+    ativoAtual = existeSalvo ? salvo : listaAtivos[0]?.id;
+    select.value = ativoAtual;
+
+    select.addEventListener('change', () => selecionarAtivo(select.value));
+
+    // carrega toggles do localStorage
+    const CHAVE_TOGGLE = `monitor_toggle_${fonte}`;
+    let togglesSalvos = {};
+    try { togglesSalvos = JSON.parse(localStorage.getItem(CHAVE_TOGGLE) || '{}'); } catch(e) {}
+
+    // monta a linha de resumo (um item clicável por ativo com toggle)
+    const resumo = document.getElementById('resumo');
+    resumo.innerHTML = '';
+    for (const item of listaAtivos) {
+      const el = document.createElement('div');
+      el.className = 'resumo-item';
+      el.dataset.id = item.id;
+
+      const chk = document.createElement('input');
+      chk.type = 'checkbox';
+      chk.className = 'toggle-ativo';
+      chk.checked = togglesSalvos[item.id] !== false;
+      chk.title = 'Ligar/desligar monitoramento';
+      chk.addEventListener('click', (ev) => ev.stopPropagation());
+      chk.addEventListener('change', () => {
+        salvarToggles();
+        el.classList.toggle('ativo-desligado', !chk.checked);
+      });
+
+      const span = document.createElement('span');
+      span.className = 'resumo-label';
+      span.textContent = item.label;
+
+      el.appendChild(chk);
+      el.appendChild(span);
+      if (!chk.checked) el.classList.add('ativo-desligado');
+      el.addEventListener('click', () => selecionarAtivo(item.id));
+      resumo.appendChild(el);
+    }
+
+    function salvarToggles() {
+      const estado = {};
+      for (const item of listaAtivos) {
+        const chk = document.querySelector(`.resumo-item[data-id="${item.id}"] .toggle-ativo`);
+        estado[item.id] = chk ? chk.checked : true;
+      }
+      localStorage.setItem(CHAVE_TOGGLE, JSON.stringify(estado));
+      fetch('toggle', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify(estado),
+      }).catch(() => {});
+    }
+
+    // salva estado inicial se nunca salvou
+    if (!Object.keys(togglesSalvos).length) salvarToggles();
+  } catch (e) {
+    select.innerHTML = '<option>sem ativos</option>';
+  }
+}
+
+async function atualizarResumo() {
+  if (resumoAtualizando) return;
+  resumoAtualizando = true;
+  const seta = t => t === 'alta' ? '↑' : (t === 'baixa' ? '↓' : '→');
+  try {
+    for (const item of listaAtivos) {
+      const el = document.querySelector(`.resumo-item[data-id="${item.id}"]`);
+      if (!el) continue;
+      el.classList.toggle('ativo-selecionado', item.id === ativoAtual);
+      const chk = el.querySelector('.toggle-ativo');
+      const label = el.querySelector('.resumo-label');
+      if (!label) continue;
+      try {
+        const dados = await buscarJson(`${fonte}/${item.id}.json?_=` + Date.now());
+        const rsi = dados.rsi.length ? dados.rsi[dados.rsi.length - 1].value.toFixed(0) : '?';
+        label.textContent = `${item.label} RSI ${rsi} ${seta(dados.tendenciaMacro)}`;
+        el.dataset.temDados = '1';
+      } catch (e) {
+        if (!el.dataset.temDados) label.textContent = `${item.label} (aguardando)`;
+      }
+    }
+  } finally {
+    resumoAtualizando = false;
+  }
+}
+
+async function atualizar() {
+  if (!ativoAtual) return;
+  if (atualizando) return;
+  atualizando = true;
+  const ativoSolicitado = ativoAtual;
+  try {
+    const dados = await buscarJson(`${fonte}/${ativoSolicitado}.json?_=` + Date.now());
+    if (ativoSolicitado !== ativoAtual) return;
+
+    // preços tipo forex (ex: EURUSD ~1.15) precisam de mais casas decimais
+    // que cripto (ex: BTC/USDT ~65000) — ajusta a precisão dinamicamente
+    if (dados.candles.length) {
+      const precoRef = dados.candles[dados.candles.length - 1].close;
+      const precisao = precoRef < 50 ? 5 : (precoRef < 1000 ? 3 : 2);
+      const minMove = 1 / Math.pow(10, precisao);
+      const priceFormat = { type: 'price', precision: precisao, minMove };
+      serieCandle.applyOptions({ priceFormat });
+      serieBandaSup.applyOptions({ priceFormat });
+      serieBandaInf.applyOptions({ priceFormat });
+      serieBandaMedia.applyOptions({ priceFormat });
+      serieEmaMicro.applyOptions({ priceFormat });
+      serieEmaMacro.applyOptions({ priceFormat });
+    }
+
+    serieCandle.setData(dados.candles);
+    serieVolume.setData(dados.volume || []);
+    serieBandaSup.setData(dados.bandaSup);
+    serieBandaInf.setData(dados.bandaInf);
+    serieBandaMedia.setData(dados.bandaMedia);
+    serieEmaMicro.setData(dados.emaMicro || []);
+    serieEmaMacro.setData(dados.emaMacro || []);
+    serieRsi.setData(dados.rsi);
+
+    linhasNiveis.forEach(l => serieCandle.removePriceLine(l));
+    linhasNiveis = chkNiveis.checked ? (dados.niveis || []).map(n => serieCandle.createPriceLine({
+      price: n.preco,
+      color: n.tipo === 'resistencia' ? '#ef5350' : '#26a69a',
+      lineWidth: 1,
+      lineStyle: LightweightCharts.LineStyle.Dashed,
+      axisLabelVisible: true,
+      title: n.tipo === 'resistencia' ? 'Resistência' : 'Suporte',
+    })) : [];
+
+    linhasFib.forEach(l => serieCandle.removePriceLine(l));
+    linhasFib = chkFib.checked ? (dados.fib || []).map(f => serieCandle.createPriceLine({
+      price: f.preco,
+      color: CORES_FIB[f.nivel] || '#9598a1',
+      lineWidth: 1,
+      lineStyle: LightweightCharts.LineStyle.Dotted,
+      axisLabelVisible: true,
+      title: `Fib ${(f.nivel * 100).toFixed(1)}%`,
+    })) : [];
+
+    // Onde a entrada aconteceria: linha grossa no nível, para bater o olho
+    // e comparar com o preço atual sem precisar ler o cartão.
+    if (linhaEntrada) { serieCandle.removePriceLine(linhaEntrada); linhaEntrada = null; }
+    if (dados.alerta && dados.alerta.precoEntrada != null) {
+      const confirmada = dados.alerta.entradaConfirmada;
+      linhaEntrada = serieCandle.createPriceLine({
+        price: dados.alerta.precoEntrada,
+        color: dados.alerta.direcao === 'call' ? '#26a69a' : '#ef5350',
+        lineWidth: 2,
+        lineStyle: confirmada ? LightweightCharts.LineStyle.Solid : LightweightCharts.LineStyle.Dashed,
+        axisLabelVisible: true,
+        title: `ENTRADA ${dados.alerta.direcao.toUpperCase()}${confirmada ? '' : ' (estimada)'}`,
+      });
+    }
+
+    // Nivel que a vela ATUAL precisa tocar pra virar alerta quando fechar —
+    // avisa antes do fato, nao so depois que a vela ja mexeu.
+    linhasGatilho.forEach(l => serieCandle.removePriceLine(l));
+    linhasGatilho = [];
+    if (dados.gatilhos) {
+      const g = dados.gatilhos;
+      linhasGatilho.push(serieCandle.createPriceLine({
+        price: g.callEntrada, color: '#26a69a', lineWidth: 1,
+        lineStyle: LightweightCharts.LineStyle.Dashed, axisLabelVisible: true,
+        title: 'gatilho CALL',
+      }));
+      linhasGatilho.push(serieCandle.createPriceLine({
+        price: g.callAproximando, color: '#26a69a', lineWidth: 1,
+        lineStyle: LightweightCharts.LineStyle.Dotted, axisLabelVisible: false,
+        title: '',
+      }));
+      linhasGatilho.push(serieCandle.createPriceLine({
+        price: g.putEntrada, color: '#ef5350', lineWidth: 1,
+        lineStyle: LightweightCharts.LineStyle.Dashed, axisLabelVisible: true,
+        title: 'gatilho PUT',
+      }));
+      linhasGatilho.push(serieCandle.createPriceLine({
+        price: g.putAproximando, color: '#ef5350', lineWidth: 1,
+        lineStyle: LightweightCharts.LineStyle.Dotted, axisLabelVisible: false,
+        title: '',
+      }));
+    }
+
+    if (primeiraCarga) {
+      chartPreco.priceScale('right').applyOptions({ autoScale: true });
+      chartVolume.priceScale('right').applyOptions({ autoScale: true });
+      chartRsi.priceScale('right').applyOptions({ autoScale: true });
+      chartPreco.timeScale().fitContent();
+      chartVolume.timeScale().fitContent();
+      chartRsi.timeScale().fitContent();
+      primeiraCarga = false;
+    }
+
+    if (dados.rsi.length) {
+      const t0 = dados.rsi[0].time, t1 = dados.rsi[dados.rsi.length - 1].time;
+      serieRsi70.setData([{ time: t0, value: 70 }, { time: t1, value: 70 }]);
+      serieRsi30.setData([{ time: t0, value: 30 }, { time: t1, value: 30 }]);
+    }
+
+    const marcadoresSinal = dados.sinais.map(s => ({
+      time: s.time,
+      position: s.direcao === 'compra' ? 'belowBar' : 'aboveBar',
+      color: s.status === 'bloqueado' ? '#9598a1' : (s.direcao === 'compra' ? '#26a69a' : '#ef5350'),
+      shape: s.direcao === 'compra' ? 'arrowUp' : 'arrowDown',
+      text: `${s.direcao === 'compra' ? 'CALL' : 'PUT'}${s.status === 'bloqueado' ? ' BLOQUEADO' : ''}`,
+    }));
+    const temposConfluencia = new Set((dados.confluencias || []).map(c => c.time));
+    const marcadoresPullback = (dados.pullbacks || [])
+      .filter(p => !temposConfluencia.has(p.time))
+      .map(p => ({
+        time: p.time,
+        position: p.direcao === 'compra' ? 'belowBar' : 'aboveBar',
+        color: p.status === 'bloqueado' ? '#9598a1' : (p.direcao === 'compra' ? '#80cbc4' : '#ef9a9a'),
+        shape: 'circle',
+        text: `PULLBACK ${(p.fatores || []).join('+').toUpperCase()}${p.status === 'bloqueado' ? ' BLOQUEADO' : ''}`,
+      }));
+    const marcadoresConfluencia = (dados.confluencias || []).map(c => ({
+      time: c.time,
+      position: c.direcao === 'compra' ? 'belowBar' : 'aboveBar',
+      color: c.status === 'bloqueado' ? '#9598a1' : '#ffd700',
+      shape: c.direcao === 'compra' ? 'arrowUp' : 'arrowDown',
+      text: `PULLBACK ${c.fatores.join('+').toUpperCase()}${c.status === 'bloqueado' ? ' BLOQUEADO' : ''}`,
+    }));
+    const marcadoresAlerta = dados.alertaProximo ? [{
+      time: dados.alertaProximo.time,
+      position: dados.alertaProximo.direcao === 'compra_proxima' ? 'belowBar' : 'aboveBar',
+      color: '#ffd54f',
+      shape: 'square',
+      text: dados.alertaProximo.setup === 'pullback'
+        ? `PULLBACK PRÓXIMO ${(dados.alertaProximo.fatores || []).join('+').toUpperCase()}`
+        : 'ENTRADA PRÓXIMA BOLLINGER+RSI',
+    }] : [];
+    const marcadoresReversao = (dados.alerta && dados.alerta.precoEntrada != null) ? [{
+      time: dados.alerta.time,
+      position: dados.alerta.direcao === 'call' ? 'belowBar' : 'aboveBar',
+      color: dados.alerta.direcao === 'call' ? '#26a69a' : '#ef5350',
+      shape: dados.alerta.entradaConfirmada
+        ? (dados.alerta.direcao === 'call' ? 'arrowUp' : 'arrowDown')
+        : 'circle',
+      text: dados.alerta.entradaConfirmada
+        ? `ENTRAR AGORA ${dados.alerta.direcao.toUpperCase()}`
+        : `AGUARDAR ${dados.alerta.direcao.toUpperCase()}`,
+    }] : [];
+    const marcadoresReais = (dados.operacoesReais || []).map(o => ({
+      time: o.time,
+      position: o.direcao === 'call' ? 'belowBar' : 'aboveBar',
+      color: o.aberta ? '#42a5f5' : (o.vitoria ? '#00e676' : '#ff1744'),
+      shape: 'circle',
+      text: o.aberta ? 'PRACTICE ABERTA' : `PRACTICE ${o.vitoria ? 'GANHOU' : 'PERDEU'}`,
+    }));
+
+    const marcadores = [...marcadoresSinal, ...marcadoresPullback, ...marcadoresConfluencia,
+      ...marcadoresAlerta, ...marcadoresReversao, ...marcadoresReais].sort((a, b) => a.time - b.time);
+    serieCandle.setMarkers(marcadores);
+
+    const emojiTendencia = t => t === 'alta' ? '↑' : (t === 'baixa' ? '↓' : '→');
+    const desemp = dados.desempenho;
+    const winrateTexto = desemp && desemp.winrate != null
+      ? ` — winrate ${desemp.winrate}% (${desemp.vitorias}/${desemp.total})`
+      : '';
+    ultimoStatusValido =
+      `${dados.par} ${dados.timeframe} — ${dados.mercadoAberto ? 'MERCADO ABERTO' : 'MERCADO FECHADO'} — ` +
+      `payout ${dados.payout == null ? 'indisponível' : (dados.payout * 100).toFixed(0) + '%'} — atualizado ${new Date(dados.atualizado_em * 1000).toLocaleTimeString('pt-BR')} — ` +
+      `macro ${emojiTendencia(dados.tendenciaMacro)} ${dados.tendenciaMacro || '?'} | micro ${emojiTendencia(dados.tendenciaMicro)} ${dados.tendenciaMicro || '?'} — ` +
+      `${(dados.confluencias || []).length} confluência(s) — ` +
+      `${dados.sinais.length} sinal(is), ${(dados.pullbacks || []).length} pullback(s) no histórico${winrateTexto}`;
+    document.getElementById('status').textContent = ultimoStatusValido;
+    document.getElementById('status').style.color = '';
+    renderizarPainel(dados);
+  } catch (e) {
+    if (ativoSolicitado !== ativoAtual) return;
+    document.getElementById('status').style.color = '#e0b040';
+    document.getElementById('status').textContent =
+      `${ultimoStatusValido || ativoSolicitado} — atualização atrasada. Mantendo o último gráfico.`;
+  } finally {
+    atualizando = false;
+  }
+}
+
+function escapar(texto) {
+  const div = document.createElement('div');
+  div.textContent = String(texto == null ? '' : texto);
+  return div.innerHTML;
+}
+
+function renderizarPainel(dados) {
+  const alerta = dados.alerta;
+  const cartaoAlerta = document.getElementById('cartao-alerta');
+  cartaoAlerta.className = 'cartao' + (alerta ? ` alerta-${alerta.tipo}` : '');
+  if (!alerta) {
+    cartaoAlerta.innerHTML = '<h3>Alerta <span class="selo-informativo">SÓ AVISO — NÃO EXECUTA ORDEM</span></h3><p>Nenhuma vela fora do padrão agora.</p>';
+  } else {
+    const eEntrada = alerta.tipo === 'entrada';
+    const cor = alerta.direcao === 'call' ? '#26a69a' : '#ef5350';
+    const corFundo = alerta.direcao === 'call' ? 'rgba(38,166,154,0.15)' : 'rgba(239,83,80,0.15)';
+
+    let tempoTexto = '';
+    if (alerta.segundosRestantes != null && alerta.segundosRestantes > 0) {
+      const min = Math.floor(alerta.segundosRestantes / 60);
+      const seg = alerta.segundosRestantes % 60;
+      tempoTexto = min > 0 ? `${min}:${seg.toString().padStart(2,'0')}` : `${seg}s`;
+    }
+
+    const tfSeg = dados.timeframeSeg || 300;
+    const segNaVela = tfSeg - (alerta.segundosRestantes || 0);
+    // Tem que bater com entrada_max_segundos_no_candle do config, senao o
+    // aviso fica dizendo "pode entrar" num momento em que o bot ja
+    // recusaria a ordem de verdade por "entrada_atrasada".
+    const JANELA_ENTRADA = dados.janelaEntradaSeg || 15;
+
+    let instrucao;
+    if (eEntrada && segNaVela <= JANELA_ENTRADA) {
+      const restJanela = JANELA_ENTRADA - segNaVela;
+      instrucao = `<div class="instrucao-timing" style="background:${corFundo};border-left:4px solid ${cor}">` +
+        `<strong>PADRÃO ATIVO</strong> ${alerta.direcao.toUpperCase()} (aviso, não é ordem) ` +
+        `@ <strong>${alerta.precoEntrada != null ? alerta.precoEntrada.toFixed(5) : '?'}</strong>` +
+        ` <span class="tempo-restante">(janela: ${restJanela}s)</span>` +
+        '</div>';
+    } else if (eEntrada) {
+      instrucao = `<div class="instrucao-timing" style="background:rgba(120,123,134,0.15);border-left:4px solid #787b86">` +
+        `<strong>JANELA PASSOU</strong> — sinal era ${alerta.direcao.toUpperCase()} ` +
+        `@ ${alerta.precoEntrada != null ? alerta.precoEntrada.toFixed(5) : '?'} ` +
+        `mas ja se passaram ${segNaVela}s. Aguardar proximo sinal` +
+        (tempoTexto ? ` <span class="tempo-restante">(vela fecha em ${tempoTexto})</span>` : '') +
+        '</div>';
+    } else {
+      instrucao = `<div class="instrucao-timing instrucao-aguardar" style="background:rgba(224,176,64,0.15);border-left:4px solid #e0b040">` +
+        `<strong>AGUARDAR</strong> — vela se aproximando do limiar` +
+        (tempoTexto ? ` <span class="tempo-restante">(fecha em ${tempoTexto})</span>` : '') +
+        `<br>Se fechar forte, entrar <strong>${alerta.direcao.toUpperCase()}</strong> na abertura da proxima vela` +
+        (alerta.precoEntrada != null ? ` (estimado ~${alerta.precoEntrada.toFixed(5)})` : '') +
+        '</div>';
+    }
+
+    const expiracao = alerta.expiracaoSugeridaMin
+      ? `<div class="rodape-alerta">Expiracao sugerida: <strong>${alerta.expiracaoSugeridaMin} min</strong></div>`
+      : '';
+    const noticia = alerta.noticia
+      ? `<div class="aviso-noticia">⚠ ${escapar(alerta.noticia)}</div>`
+      : '';
+    cartaoAlerta.innerHTML =
+      '<h3>Alerta</h3>' +
+      instrucao +
+      '<ul>' + alerta.motivos.map(m => `<li>${escapar(m)}</li>`).join('') + '</ul>' +
+      expiracao + noticia;
+  }
+
+  const motivos = dados.explicacao || [];
+  document.getElementById('cartao-motivo').innerHTML =
+    '<h3>Por que o robô sinalizou</h3>' +
+    (motivos.length
+      ? '<ul>' + motivos.map(m => `<li>${escapar(m)}</li>`).join('') + '</ul>'
+      : '<p>Sem sinal no último candle fechado.</p>');
+
+  const noticias = dados.noticias || [];
+  const sintetico = /-OTC$/i.test(dados.par || '');
+  let corpoNoticias;
+  if (sintetico) {
+    corpoNoticias = '<p>Ativo sintético: o preço é gerado pela corretora, então notícia econômica real não o move.</p>';
+  } else if (!noticias.length) {
+    corpoNoticias = '<p>Nada relevante nas próximas 8 horas para esse par.</p>';
+  } else {
+    corpoNoticias = noticias.map(n => {
+      const iminente = n.minutos >= -5 && n.minutos <= 20;
+      const saiuRecente = n.minutos < -5 && n.minutos >= -30;
+      const passado = n.minutos < 0;
+      let tempo;
+      if (passado) tempo = `há ${Math.abs(n.minutos)} min`;
+      else if (n.minutos === 0) tempo = 'AGORA';
+      else if (n.minutos <= 60) tempo = `em ${n.minutos} min`;
+      else tempo = `em ${Math.floor(n.minutos/60)}h${(n.minutos%60).toString().padStart(2,'0')}`;
+      const cls = (n.discurso ? ' noticia-discurso' : '') +
+        (iminente ? ' noticia-iminente' : (saiuRecente ? ' noticia-recente' : ''));
+      let rotulo = saiuRecente ? ' <span class="noticia-tag">SAIU HA POUCO — pode ter movido o grafico</span>' : '';
+      if (n.discurso) {
+        rotulo += ' <span class="noticia-tag noticia-tag-discurso">⚠ DISCURSO — direção imprevisível, evite entrar</span>';
+      }
+
+      let detalhes = '';
+      if (n.forecast || n.previous) {
+        detalhes += `<div class="noticia-detalhe">`;
+        if (n.previous) detalhes += `anterior: ${escapar(n.previous)}`;
+        if (n.previous && n.forecast) detalhes += ' | ';
+        if (n.forecast) detalhes += `previsao: ${escapar(n.forecast)}`;
+        detalhes += '</div>';
+      }
+
+      let sugestao = '';
+      if (n.acima && n.abaixo) {
+        const corAcima = n.acima === 'CALL' ? '#26a69a' : '#ef5350';
+        const corAbaixo = n.abaixo === 'CALL' ? '#26a69a' : '#ef5350';
+        sugestao = `<div class="noticia-sugestao">` +
+          `resultado > previsao → <strong style="color:${corAcima}">${n.acima}</strong> · ` +
+          `resultado < previsao → <strong style="color:${corAbaixo}">${n.abaixo}</strong>` +
+          `</div>`;
+      }
+
+      return '<div class="noticia-linha' + cls + '">' +
+        '<div class="noticia-cabecalho">' +
+          `<span class="impacto-${escapar(n.impacto)}">${escapar(n.impacto) === 'High' ? '!!!' : '!!'} ${escapar(n.moeda)} · ${escapar(n.titulo)}</span>` +
+          `<span class="noticia-tempo">${tempo}</span>` +
+        '</div>' +
+        rotulo +
+        detalhes + sugestao +
+      '</div>';
+    }).join('');
+  }
+  document.getElementById('cartao-noticias').innerHTML = '<h3>Notícias do dia</h3>' + corpoNoticias;
+
+  const ia = dados.parecerIA;
+  const cartaoIA = document.getElementById('cartao-ia');
+  if (!ia) {
+    cartaoIA.innerHTML = '<h3>Opiniao da IA</h3><p>Aguardando sinal para analisar...</p>';
+  } else {
+    const corConf = {alta: '#26a69a', media: '#e0b040', baixa: '#9598a1'};
+    const corDir = ia.direcao === 'CALL' ? '#26a69a' : (ia.direcao === 'PUT' ? '#ef5350' : '#9598a1');
+    const seg = ia.segundosAtras || 0;
+    const idadeTexto = seg < 60 ? `ha ${seg}s` : `ha ${Math.floor(seg / 60)} min`;
+    const desatualizada = seg > 180;
+    cartaoIA.innerHTML =
+      '<h3>Opiniao da IA</h3>' +
+      `<p>${escapar(ia.texto)}</p>` +
+      `<div class="ia-resultado">` +
+        `<span>Direcao: <strong style="color:${corDir}">${escapar(ia.direcao || 'NEUTRO')}</strong></span>` +
+        ` · <span>Confianca: <strong style="color:${corConf[ia.confianca] || '#9598a1'}">${escapar(ia.confianca || '?')}</strong></span>` +
+        ` · <span style="color:${desatualizada ? '#e0b040' : '#787b86'}">${idadeTexto}${desatualizada ? ' (desatualizada)' : ''}</span>` +
+      `</div>`;
+  }
+
+  const porSetup = dados.desempenhoPorSetup || {};
+  const porSetupSimulado = dados.desempenhoSimuladoPorSetup || {};
+  const cartaoEstrategias = document.getElementById('cartao-estrategias');
+  const NOMES_SETUP = {
+    reversao_candle: 'Reversão de vela (validada na triagem)',
+    reversao_confluencia: 'Reversão de vela + Bollinger+RSI (não validada)',
+    pullback: 'Pullback (não validada)',
+    pullback_confluencia: 'Pullback + Fibo/S-R juntos (não validada)',
+    reversao_bollinger_rsi: 'Bollinger+RSI (não validada)',
+    pin_bar_sr: 'Pin Bar em S/R (não validada)',
+    sr_rejeicao: 'S/R + Rejeição de vela (não validada)',
+    reversao_candle_nao_validado: 'Reversão de vela em par não validado',
+    reversao_confluencia: 'Reversão de vela + RSI/Bollinger (não validada)',
+  };
+  const linhasReais = Object.keys(porSetup).map(setup => {
+    const s = porSetup[setup];
+    const nome = NOMES_SETUP[setup] || setup;
+    const validada = setup === 'reversao_candle';
+    const corLucro = s.lucro >= 0 ? '#26a69a' : '#ef5350';
+    return `<div class="setup-linha${validada ? ' setup-validada' : ''}">` +
+      `<strong>${escapar(nome)}</strong>` +
+      `<div class="setup-detalhe">` +
+        `${s.total} operação(ões) real(is) · winrate ${s.winrate != null ? s.winrate + '%' : '?'} ` +
+        `(${s.vitorias}/${s.total}) · <span style="color:${corLucro}">R$${s.lucro.toFixed(2)}</span>` +
+      `</div>` +
+    `</div>`;
+  });
+  const linhasSimuladas = Object.keys(porSetupSimulado).map(setup => {
+    const s = porSetupSimulado[setup];
+    const nome = NOMES_SETUP[setup] || setup;
+    const corLucro = s.lucro >= 0 ? '#26a69a' : '#ef5350';
+    return `<div class="setup-linha setup-simulada">` +
+      `<strong>${escapar(nome)}</strong> <span class="selo-informativo">SIMULADO — SEM DINHEIRO REAL</span>` +
+      `<div class="setup-detalhe">` +
+        `${s.total} sinal(is) · winrate ${s.winrate != null ? s.winrate + '%' : '?'} ` +
+        `(${s.vitorias}/${s.total}) · <span style="color:${corLucro}">${s.lucro.toFixed(2)} unid.</span>` +
+      `</div>` +
+    `</div>`;
+  });
+  const linhas = [...linhasReais, ...linhasSimuladas].join('');
+  if (!linhas) {
+    cartaoEstrategias.innerHTML =
+      '<h3>Reversão (validada) vs Pullback/Bollinger (não validadas)</h3>' +
+      '<p>Sem operações suficientes ainda.</p>';
+  } else {
+    cartaoEstrategias.innerHTML =
+      '<h3>Reversão (validada) vs Pullback/Bollinger (não validadas)</h3>' + linhas;
+  }
+
+  const NOMES_BLOQUEIO = {
+    ordem_ja_aberta: 'já tinha ordem aberta',
+    entrada_atrasada: 'chegou atrasado na janela',
+    stop_diario: 'stop diário já batido',
+    meta_diaria_atingida: 'meta diária já batida',
+    payout_indisponivel: 'payout indisponível',
+    payout_abaixo_minimo: 'payout abaixo do mínimo',
+    mercado_fechado: 'mercado fechado',
+    otc_bloqueado_preco_sintetico: 'OTC bloqueado',
+    piso_banca_atingido: 'piso de banca atingido',
+  };
+  const funil = dados.funil;
+  const cartaoFunil = document.getElementById('cartao-funil');
+  if (!funil) {
+    cartaoFunil.innerHTML = '<h3>Funil de sinais hoje (reversão de vela)</h3><p>Sem dados ainda hoje.</p>';
+  } else {
+    const bloqueiosTexto = Object.keys(funil.bloqueios || {}).length
+      ? Object.entries(funil.bloqueios).map(([motivo, n]) =>
+          `${n}x ${escapar(NOMES_BLOQUEIO[motivo] || motivo)}`
+        ).join(', ')
+      : 'nenhum';
+    cartaoFunil.innerHTML =
+      '<h3>Funil de sinais hoje (reversão de vela)</h3>' +
+      `<div class="setup-linha">Aproximando (aviso, sem confirmar): <strong>${funil.aproximando}</strong></div>` +
+      `<div class="setup-linha">Confirmados (viraram tentativa de ordem): <strong>${funil.confirmados}</strong></div>` +
+      `<div class="setup-linha setup-validada">Executados (ordem real enviada): <strong>${funil.executados}</strong></div>` +
+      `<div class="setup-detalhe">Bloqueados: ${bloqueiosTexto}</div>`;
+  }
+}
+
+(async () => {
+  await carregarManifesto();
+  atualizar();
+  atualizarResumo();
+  setInterval(atualizar, 1000);
+  setInterval(atualizarResumo, 3000);
+})();
+</script>
+</body>
+</html>

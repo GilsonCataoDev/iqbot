@@ -1,0 +1,16 @@
+from typing import Protocol
+
+from .modelos import SnapshotMercado
+
+
+class MercadoExecutor(Protocol):
+    def iniciar(self) -> None: ...
+
+    def snapshot(self, ativo: str) -> SnapshotMercado: ...
+
+    def comprar(self, valor: float, ativo: str, direcao: str, expiracao_minutos: int) -> tuple[bool, object]: ...
+
+    def aguardar_resultado(self, id_ordem: object) -> object: ...
+
+    def fechar(self) -> None: ...
+

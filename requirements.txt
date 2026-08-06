@@ -1,0 +1,6 @@
+iqoptionapi==6.8.9.1
+numpy==2.5.1
+pandas==3.0.5
+requests==2.34.2
+websocket-client==0.56.0
+

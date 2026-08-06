@@ -1,0 +1,28 @@
+# Credenciais locais (NUNCA commitar)
+.env
+.env.bat
+.env.local
+credenciais.bat
+
+# Bancos de dados com histórico real/practice
+iqoption_m5/dados/
+*.sqlite3
+*.sqlite
+*.db
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+*.egg-info/
+dist/
+build/
+.venv/
+venv/
+env/
+
+# Outros
+graphify-out/
+*.log
