@@ -104,12 +104,20 @@ class MercadoIQ:
         abertos = {ativo: False for ativo in self.config.ativos}
         try:
             dados = self._api.get_all_init_v2()
-            turbo = dados.get("turbo", {}).get("actives", {}) if isinstance(dados, dict) else {}
-            if not turbo:
-                print(f" [mercado] get_all_init_v2 voltou sem 'turbo.actives'. Chaves recebidas: {list(dados.keys()) if isinstance(dados, dict) else type(dados)}")
+            if not isinstance(dados, dict):
+                print(f" [mercado] get_all_init_v2 retornou tipo inesperado: {type(dados)}")
+                dados = {}
+            # Busca em turbo e binary (OTC aparece em qualquer uma dependendo da hora)
+            secoes = {}
+            for secao in ("turbo", "binary"):
+                parte = dados.get(secao, {}).get("actives", {})
+                if isinstance(parte, dict):
+                    secoes.update(parte)
+            if not secoes:
+                print(f" [mercado] get_all_init_v2 sem actives. Chaves: {list(dados.keys())}")
             nomes_vistos = []
             resolvidos = set()
-            for chave, detalhe in turbo.items():
+            for chave, detalhe in secoes.items():
                 if not isinstance(detalhe, dict):
                     continue
                 nome = str(detalhe.get("name", "")).split(".", 1)[-1]
@@ -129,11 +137,18 @@ class MercadoIQ:
                     except (TypeError, ValueError):
                         pass
             faltando = [a for a in self.config.ativos if a not in resolvidos]
+            # OTC é sintético e opera 24/7 — se a API não retornou, assume aberto
+            for ativo_faltante in faltando:
+                if ativo_faltante.upper().endswith("-OTC"):
+                    abertos[ativo_faltante] = True
+                    resolvidos.add(ativo_faltante)
+                    print(f" [mercado] {ativo_faltante} nao encontrado na API, assumindo aberto (OTC 24/7)")
+            faltando = [a for a in self.config.ativos if a not in resolvidos]
             if faltando:
-                print(f" [mercado] ativos configurados mas NAO encontrados na resposta da IQ: {faltando}")
+                print(f" [mercado] ativos NAO encontrados na resposta da IQ: {faltando}")
                 for ativo_faltante in faltando:
                     parecidos = [n for n in nomes_vistos if ativo_faltante.split("-")[0] in n]
-                    print(f" [mercado] nomes parecidos com '{ativo_faltante}' na resposta: {parecidos or 'NENHUM'}")
+                    print(f" [mercado] nomes parecidos com '{ativo_faltante}': {parecidos or 'NENHUM'}")
         except Exception as erro:
             print(f" [mercado] falha ao consultar abertura turbo, marcando tudo como fechado: {erro!r}")
         return abertos
