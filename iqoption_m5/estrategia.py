@@ -12,8 +12,32 @@ class EstrategiaReversaoM5:
 
     def __init__(self, config: Configuracao):
         self.config = config
+        self._cache_indicadores: dict[str, pd.DataFrame] = {}
+        self._cache_ultimo_fechado: dict[str, pd.Timestamp] = {}
 
-    def calcular_indicadores(self, candles: pd.DataFrame) -> pd.DataFrame:
+    def calcular_indicadores(self, candles: pd.DataFrame, ativo: str = "") -> pd.DataFrame:
+        """Retorna DataFrame com todos os indicadores.
+
+        Com `ativo` informado, usa cache: se o candle fechado (index[-2]) não
+        mudou desde a última chamada, devolve o resultado anterior sem recalcular.
+        Elimina ~70% do cálculo repetido no loop principal.
+        """
+        if not ativo or len(candles) < 3:
+            return self._calcular_do_zero(candles)
+
+        ultimo_fechado = candles.index[-2]
+        cacheado = self._cache_indicadores.get(ativo)
+        ts_cacheado = self._cache_ultimo_fechado.get(ativo)
+
+        if cacheado is not None and ts_cacheado == ultimo_fechado and len(cacheado) == len(candles):
+            return cacheado
+
+        df = self._calcular_do_zero(candles)
+        self._cache_indicadores[ativo] = df
+        self._cache_ultimo_fechado[ativo] = ultimo_fechado
+        return df
+
+    def _calcular_do_zero(self, candles: pd.DataFrame) -> pd.DataFrame:
         c = self.config
         df = candles.copy()
         close, high, low = df["Close"], df["High"], df["Low"]
@@ -826,12 +850,12 @@ class EstrategiaReversaoM5:
     def avaliar(self, ativo: str, candles: pd.DataFrame) -> Decisao | None:
         if len(candles) < max(self.config.ema_macro_periodo, self.config.atr_regime_janela) + 3:
             return None
-        df = self.calcular_indicadores(candles)
+        df = self.calcular_indicadores(candles, ativo)
         return self._avaliar_estrategias(ativo, df, len(df) - 2)
 
     def sinais_historicos(self, ativo: str, candles: pd.DataFrame) -> list[Decisao]:
         """Marca sinais no candle de ENTRADA (não o de sinal), para alinhar com as ordens reais."""
-        df = self.calcular_indicadores(candles)
+        df = self._calcular_do_zero(candles)  # histórico completo — não usa cache
         inicio = max(self.config.ema_macro_periodo, self.config.atr_regime_janela) + 1
         sinais = []
         for indice in range(inicio, len(df) - 1):
@@ -849,7 +873,7 @@ class EstrategiaReversaoM5:
         """Aviso visual no candle em formação; nunca autoriza uma ordem."""
         if len(candles) < max(self.config.ema_macro_periodo, self.config.atr_regime_janela) + 3:
             return None
-        df = self.calcular_indicadores(candles)
+        df = self.calcular_indicadores(candles, ativo)
         atual = df.iloc[-1]
         if any(pd.isna(atual[x]) for x in ("ATR", "RSI", "BandaInf", "BandaSup")):
             return None

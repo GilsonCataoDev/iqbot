@@ -22,6 +22,7 @@ class MercadoIQ:
         self._api = None
         self._buffers: dict[str, pd.DataFrame] = {}
         self._lock_api = threading.RLock()
+        self._lock_buffers = threading.Lock()  # lock leve só para _buffers
         self._mercado_aberto: dict[str, bool] = {}
         self._payouts: dict[str, float | None] = {}
         self._ids_ativos: dict[str, int] = {}
@@ -210,11 +211,28 @@ class MercadoIQ:
         except Exception:
             pass
 
-    def _snapshot_uma_vez(self, ativo: str) -> SnapshotMercado:
+    def snapshot(self, ativo: str) -> SnapshotMercado:
+        """Lê candles e estado do mercado para um ativo.
+
+        Separa chamadas de rede (_lock_api) de atualizações de buffer
+        (_lock_buffers), para que comprar() e resultado_por_candle() não
+        bloqueiem a leitura dos outros ativos.
+        """
         if ativo not in self.config.ativos:
             raise ValueError(f"Ativo fora da configuração: {ativo}")
-        self._atualizar_cache_se_preciso()
-        bruto = self._api.get_realtime_candles(ativo, self.config.timeframe_segundos)
+
+        # Fase 1: chamadas de rede — _lock_api (pesado, exclui comprar/reconectar)
+        with self._lock_api:
+            try:
+                self._atualizar_cache_se_preciso()
+                bruto = self._api.get_realtime_candles(ativo, self.config.timeframe_segundos)
+                timestamp_servidor = int(self._api.get_server_timestamp())
+            except Exception as erro:
+                raise MercadoIndisponivel(f"Falha de rede para {ativo}: {erro}") from erro
+            mercado_aberto = self._mercado_aberto.get(ativo, False)
+            payout = self._payouts.get(ativo)
+
+        # Conversão de dados brutos (sem lock — só cria objetos Python locais)
         linhas = [
             {
                 "from": ts,
@@ -226,39 +244,47 @@ class MercadoIQ:
             }
             for ts, candle in bruto.items()
         ]
-        if linhas:
-            recentes = self._candles_para_df(linhas)
-            combinado = pd.concat([self._buffers[ativo], recentes])
-            combinado = combinado[~combinado.index.duplicated(keep="last")]
-            self._buffers[ativo] = combinado.sort_index().tail(self.config.limite_candles)
-        if ativo not in self._buffers or len(self._buffers[ativo]) < 3:
-            raise MercadoIndisponivel(f"Sem candles suficientes para {ativo}.")
-        timestamp_servidor = int(self._api.get_server_timestamp())
-        if self._mercado_aberto.get(ativo, False):
-            ultimo = pd.Timestamp(self._buffers[ativo].index[-1])
-            ultimo_epoch = int(ultimo.tz_localize("UTC").timestamp()) if ultimo.tzinfo is None else int(ultimo.timestamp())
-            if timestamp_servidor - ultimo_epoch > self.config.timeframe_segundos * 2:
-                raise MercadoIndisponivel(f"Stream de {ativo} está atrasado.")
+
+        # Fase 2: atualiza buffer — _lock_buffers (leve, não bloqueia a rede)
+        with self._lock_buffers:
+            if linhas:
+                recentes = self._candles_para_df(linhas)
+                combinado = pd.concat([self._buffers[ativo], recentes])
+                combinado = combinado[~combinado.index.duplicated(keep="last")]
+                self._buffers[ativo] = combinado.sort_index().tail(self.config.limite_candles)
+            if ativo not in self._buffers or len(self._buffers[ativo]) < 3:
+                raise MercadoIndisponivel(f"Sem candles suficientes para {ativo}.")
+            if mercado_aberto:
+                ultimo = pd.Timestamp(self._buffers[ativo].index[-1])
+                ultimo_epoch = (
+                    int(ultimo.tz_localize("UTC").timestamp())
+                    if ultimo.tzinfo is None
+                    else int(ultimo.timestamp())
+                )
+                if timestamp_servidor - ultimo_epoch > self.config.timeframe_segundos * 2:
+                    raise MercadoIndisponivel(f"Stream de {ativo} está atrasado.")
+            candles = self._buffers[ativo].copy()
+
         return SnapshotMercado(
             ativo=ativo,
-            candles=self._buffers[ativo].copy(),
-            payout=self._payouts.get(ativo),
-            mercado_aberto=self._mercado_aberto.get(ativo, False),
+            candles=candles,
+            payout=payout,
+            mercado_aberto=mercado_aberto,
             timestamp_servidor=timestamp_servidor,
         )
 
-    def snapshot(self, ativo: str) -> SnapshotMercado:
+    def reconectar_se_necessario(self) -> bool:
+        """Testa a conexão e reconecta se necessário. Thread-safe; pode rodar em background."""
         with self._lock_api:
             try:
-                return self._snapshot_uma_vez(ativo)
-            except Exception as primeiro_erro:
+                self._api.get_server_timestamp()
+                return True
+            except Exception:
                 try:
                     self._reconectar()
-                    return self._snapshot_uma_vez(ativo)
-                except Exception as segundo_erro:
-                    raise MercadoIndisponivel(
-                        f"Falha após reconexão ({primeiro_erro}; {segundo_erro})"
-                    ) from segundo_erro
+                    return True
+                except Exception:
+                    return False
 
     def comprar(self, valor: float, ativo: str, direcao: str, expiracao_minutos: int) -> tuple[bool, object]:
         with self._lock_api:
@@ -340,7 +366,7 @@ class MercadoIQ:
         alvo = pd.Timestamp(candle_hora)
         limite = time.monotonic() + timeout_segundos
         while time.monotonic() < limite:
-            with self._lock_api:
+            with self._lock_buffers:
                 buffer = self._buffers.get(ativo)
             if buffer is not None and alvo in buffer.index:
                 posicao = buffer.index.get_loc(alvo)

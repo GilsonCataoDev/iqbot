@@ -37,7 +37,7 @@ class Configuracao:
     timeframe_segundos: int = 300
     limite_candles: int = 120
     expiracao_minutos: int = 5
-    intervalo_loop_segundos: float = 1.0
+    intervalo_loop_segundos: float = 2.5
     entrada_max_segundos_no_candle: int = 45
     abrir_grafico: bool = True
     porta_grafico: int = 8767

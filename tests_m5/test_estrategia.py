@@ -26,7 +26,7 @@ class TestEstrategiaM5(unittest.TestCase):
             },
             index=idx,
         )
-        self.estrategia.calcular_indicadores = lambda candles: candles.copy()
+        self.estrategia.calcular_indicadores = lambda candles, ativo="": candles.copy()
 
     def test_call_exige_reentrada_confirmada(self):
         self.df.iloc[-3, self.df.columns.get_loc("Close")] = 98.0
@@ -51,7 +51,7 @@ class TestEstrategiaM5(unittest.TestCase):
         # outros setups (sr_rejeicao etc.) podem disparar no mesmo cenario.
         config_restrito = Configuracao(bollinger_aceitar_tendencia=False)
         estrategia_restrita = EstrategiaReversaoM5(config_restrito)
-        estrategia_restrita.calcular_indicadores = lambda candles: candles.copy()
+        estrategia_restrita.calcular_indicadores = lambda candles, ativo="": candles.copy()
         self.df.iloc[-3, self.df.columns.get_loc("Close")] = 98.0
         self.df.iloc[-3, self.df.columns.get_loc("RSI")] = 25.0
         self.df.iloc[-2, self.df.columns.get_loc("Close")] = 99.2
@@ -152,7 +152,7 @@ class TestEstrategiasOpcionais(unittest.TestCase):
         from iqoption_m5.config import Configuracao
         config = replace(Configuracao(), **flags)
         est = EstrategiaReversaoM5(config)
-        est.calcular_indicadores = lambda candles: candles.copy()
+        est.calcular_indicadores = lambda candles, ativo="": candles.copy()
         return est
 
     # ------------------------------------------------------------------ #

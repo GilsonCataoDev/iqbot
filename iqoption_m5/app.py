@@ -71,6 +71,24 @@ def main(config: Configuracao | None = None) -> None:
     ultimo_contexto_ia = {ativo: None for ativo in config.ativos}
     _lock_ia = threading.Lock()
 
+    # Throttles para evitar acúmulo de threads e I/O desnecessário
+    _ultima_ia_por_ativo: dict[str, float] = {}
+    _ultimo_grafico_por_ativo: dict[str, float] = {}
+
+    def _pode_chamar_ia(ativo: str) -> bool:
+        agora = time.time()
+        if agora - _ultima_ia_por_ativo.get(ativo, 0) > 30.0:
+            _ultima_ia_por_ativo[ativo] = agora
+            return True
+        return False
+
+    def _pode_atualizar_grafico(ativo: str) -> bool:
+        agora = time.time()
+        if agora - _ultimo_grafico_por_ativo.get(ativo, 0) > 3.0:
+            _ultimo_grafico_por_ativo[ativo] = agora
+            return True
+        return False
+
     print(f"IQ Option {config.rotulo_timeframe} — mercado normal e OTC")
     print(
         f"Conta={config.conta} | ordens={'ATIVAS' if config.executar_ordens else 'DESATIVADAS'} | "
@@ -121,7 +139,7 @@ def main(config: Configuracao | None = None) -> None:
 
     def _avaliar_ativo(ativo: str, snapshot, agora_utc: datetime) -> None:
         candle_fechado = snapshot.candles.index[-2]
-        indicadores = estrategia.calcular_indicadores(snapshot.candles)
+        indicadores = estrategia.calcular_indicadores(snapshot.candles, ativo)
 
         segundo_no_candle = snapshot.timestamp_servidor % config.timeframe_segundos
         segundos_restantes = config.timeframe_segundos - segundo_no_candle
@@ -170,17 +188,8 @@ def main(config: Configuracao | None = None) -> None:
                         print(
                             f"[{datetime.now():%H:%M:%S}] {ativo}: {setup_simulado} "
                             f"{alerta.direcao.upper()} @ {decisao_reversao.preco:.5f} | "
-                            f"par nao validado, simulando (sem dinheiro real)"
+                            f"par nao validado, ignorado (use backtest offline)"
                         )
-
-                        def _simular_reversao(av=ativo, d=decisao_reversao, pay=snapshot.payout or 0.0, setup=setup_simulado):
-                            timeout = config.expiracao_minutos * 60 + 90
-                            resultado = mercado.resultado_por_candle(av, d.direcao, d.preco, d.candle_hora, timeout)
-                            registro.registrar_simulacao(av, d.direcao, setup, d.candle_hora, d.preco, pay, resultado)
-                            if resultado:
-                                print(f"    [SIMULADO] {av} {setup}: resultado={resultado} (sem dinheiro real)")
-
-                        threading.Thread(target=_simular_reversao, daemon=True).start()
                     else:
                         setup_real = "reversao_confluencia" if alerta.confluencia else "reversao_candle"
                         decisao_reversao = replace(decisao_reversao, detalhes={**decisao_reversao.detalhes, "setup": setup_real})
@@ -225,21 +234,22 @@ def main(config: Configuracao | None = None) -> None:
                         alerta.instrucao_timing(segundos_restantes, config.timeframe_segundos, config.entrada_max_segundos_no_candle),
                     )
 
-                def _ia_alerta(av=ativo, al=alerta, ind=indicadores.copy(), nots=list(proximas_noticias)):
-                    try:
-                        ctx = ia_contexto(av, config.rotulo_timeframe, al, ind, nots)
-                        resultado = ia_analisar(ctx)
-                        if resultado:
-                            with _lock_ia:
-                                parecer_ia[av] = resultado
-                            print(f"[{datetime.now():%H:%M:%S}] [IA] {av}: {resultado.texto}")
-                            print(f"    [IA] direcao={resultado.direcao_sugerida or 'NEUTRO'} confianca={resultado.confianca}")
-                    except Exception as e:
-                        print(f"    [IA] erro: {e}")
+                if _pode_chamar_ia(ativo):
+                    def _ia_alerta(av=ativo, al=alerta, ind=indicadores.copy(), nots=list(proximas_noticias)):
+                        try:
+                            ctx = ia_contexto(av, config.rotulo_timeframe, al, ind, nots)
+                            resultado = ia_analisar(ctx)
+                            if resultado:
+                                with _lock_ia:
+                                    parecer_ia[av] = resultado
+                                print(f"[{datetime.now():%H:%M:%S}] [IA] {av}: {resultado.texto}")
+                                print(f"    [IA] direcao={resultado.direcao_sugerida or 'NEUTRO'} confianca={resultado.confianca}")
+                        except Exception as e:
+                            print(f"    [IA] erro: {e}")
 
-                threading.Thread(target=_ia_alerta, daemon=True).start()
+                    threading.Thread(target=_ia_alerta, daemon=True).start()
 
-        if grafico is not None:
+        if grafico is not None and _pode_atualizar_grafico(ativo):
             try:
                 if candle_historico_grafico[ativo] != candle_fechado:
                     sinais_historicos_cache[ativo] = estrategia.sinais_historicos(
@@ -298,7 +308,7 @@ def main(config: Configuracao | None = None) -> None:
             for campo in ("tipo", "direcao", "rsi", "tendencia_macro", "tendencia_micro",
                           "corpo_atr", "ema_posicao", "motivos", "sugestao_noticia")
         )
-        if chave_ctx != ultimo_contexto_ia[ativo]:
+        if chave_ctx != ultimo_contexto_ia[ativo] and _pode_chamar_ia(ativo):
             ultimo_contexto_ia[ativo] = chave_ctx
 
             def _ia_candle(av=ativo, ctx=ctx_candidato):
@@ -313,8 +323,6 @@ def main(config: Configuracao | None = None) -> None:
                     print(f"    [IA] erro: {e}")
 
             threading.Thread(target=_ia_candle, daemon=True).start()
-        else:
-            print(f"    [IA] contexto igual ao anterior, pulando chamada para {ativo}")
 
         status = "aberto" if snapshot.mercado_aberto else "fechado"
         payout = f"{snapshot.payout:.0%}" if snapshot.payout is not None else "indisponível"
@@ -374,18 +382,7 @@ def main(config: Configuracao | None = None) -> None:
                 and ia_atual.direcao_sugerida.lower() != decisao.direcao
             )
             if not par_validado:
-                def _simular(
-                    av=ativo, d=decisao, pay=snapshot.payout or 0.0,
-                    entrada_hora=pd.Timestamp(indicadores.index[-1]),
-                    entrada_preco=float(indicadores.iloc[-1]["Open"]),
-                    sn=setup_nome,
-                ):
-                    timeout = config.expiracao_minutos * 60 + 90
-                    resultado = mercado.resultado_por_candle(av, d.direcao, entrada_preco, entrada_hora, timeout)
-                    registro.registrar_simulacao(av, d.direcao, sn, entrada_hora, entrada_preco, pay, resultado)
-                    if resultado:
-                        print(f"    [SIMULADO] {av} {sn}: resultado={resultado} (par nao validado)")
-                threading.Thread(target=_simular, daemon=True).start()
+                print(f"    [{setup_nome}] par nao validado, ignorado (use backtest offline)")
             elif ia_discorda and not favorece_noticia:
                 print(
                     f"    [IA] BLOQUEOU [{setup_nome}]: IA sugere {ia_atual.direcao_sugerida} "
@@ -398,6 +395,7 @@ def main(config: Configuracao | None = None) -> None:
 
         ultima_explicacao[ativo] = todos_motivos
 
+    ciclo = 0
     try:
         while not risco.resumo().encerrado:
             if datetime.now().date() != dia_contagem_aproximando:
@@ -406,6 +404,11 @@ def main(config: Configuracao | None = None) -> None:
             ativos_toggle = grafico.ativos_ativos() if grafico else None
             agora_utc = datetime.now(timezone.utc)
             calendario.atualizar()
+
+            # Testa a conexão a cada 10 ciclos em background (não bloqueia o loop)
+            if ciclo % 10 == 0:
+                threading.Thread(target=mercado.reconectar_se_necessario, daemon=True).start()
+            ciclo += 1
 
             # Fase 1: snapshots sequenciais (API tem lock interno)
             snapshots: dict = {}
