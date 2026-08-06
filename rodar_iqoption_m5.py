@@ -36,4 +36,11 @@ if __name__ == "__main__":
     if argumentos.real:
         main(configuracao_real_m5())
     else:
-        main(configuracao_m1() if argumentos.m1 else Configuracao())
+        from dataclasses import replace
+        config_practice = replace(
+            configuracao_m1() if argumentos.m1 else Configuracao(),
+            engulfing_sr_ativo=True,
+            divergencia_rsi_ativo=True,
+            bollinger_squeeze_ativo=True,
+        )
+        main(config_practice)
