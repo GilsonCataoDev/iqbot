@@ -89,7 +89,8 @@ class GerenciadorRisco:
             return Autorizacao(False, "ativo_inconsistente")
         if not snapshot.mercado_aberto:
             return Autorizacao(False, "mercado_fechado")
-        if self.config.bloquear_otc_real and snapshot.ativo.upper().endswith("-OTC"):
+        if (self.config.bloquear_otc_real and self.config.conta == "REAL"
+                and snapshot.ativo.upper().endswith("-OTC")):
             return Autorizacao(False, "otc_bloqueado_preco_sintetico")
         if snapshot.payout is None and self.config.payout_minimo > 0:
             return Autorizacao(False, "payout_indisponivel")
