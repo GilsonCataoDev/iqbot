@@ -3,7 +3,7 @@ import time
 import winsound
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import replace
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import pandas as pd
 
@@ -409,11 +409,16 @@ def main(config: Configuracao | None = None) -> None:
 
             # Fase 1: snapshots sequenciais (API tem lock interno)
             snapshots: dict = {}
+            ts_servidor_ref: int | None = None   # timestamp_servidor do último snapshot
+            t_local_ref: float = time.time()      # tempo local no momento desse snapshot
             for ativo in config.ativos:
                 if ativos_toggle is not None and ativo not in ativos_toggle:
                     continue
                 try:
-                    snapshots[ativo] = mercado.snapshot(ativo)
+                    sn = mercado.snapshot(ativo)
+                    snapshots[ativo] = sn
+                    ts_servidor_ref = sn.timestamp_servidor
+                    t_local_ref = time.time()
                 except MercadoIndisponivel as e:
                     print(f"[{datetime.now():%H:%M:%S}] {ativo}: mercado indisponível ({e})")
 
@@ -426,14 +431,18 @@ def main(config: Configuracao | None = None) -> None:
                     except Exception as exc:
                         print(f"[{datetime.now():%H:%M:%S}] [worker] erro: {exc}")
 
-            # Sleep inteligente: acorda pouco antes do próximo candle fechar.
-            # Margem = tempo estimado para buscar todos os snapshots + folga.
-            # Isso elimina o delay de "loop dormindo enquanto o candle vira".
-            agora_epoch = time.time()
-            seg_no_candle = agora_epoch % config.timeframe_segundos
+            # Sleep inteligente: usa o relógio do servidor IQ Option para alinhar
+            # com o limite real de candle (evita entrada_atrasada por drift de clock).
+            if ts_servidor_ref is not None:
+                elapsed = time.time() - t_local_ref
+                seg_no_candle = (ts_servidor_ref + elapsed) % config.timeframe_segundos
+            else:
+                seg_no_candle = time.time() % config.timeframe_segundos
             seg_restantes = config.timeframe_segundos - seg_no_candle
             margem = len(config.ativos) * 0.45 + 1.0  # ~5.5s para 10 ativos
             sono = max(0.1, seg_restantes - margem)
+            proxima = datetime.now() + timedelta(seconds=sono)
+            print(f"[{datetime.now():%H:%M:%S}] aguardando próximo candle em {sono:.0f}s (acorda ~{proxima:%H:%M:%S})")
             time.sleep(sono)
     except KeyboardInterrupt:
         print("Interrupção solicitada. Aguardando eventual ordem aberta...")

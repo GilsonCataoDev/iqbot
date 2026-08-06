@@ -1,3 +1,5 @@
+from dataclasses import replace
+
 import numpy as np
 import pandas as pd
 
@@ -828,14 +830,19 @@ class EstrategiaReversaoM5:
         return self._avaliar_estrategias(ativo, df, len(df) - 2)
 
     def sinais_historicos(self, ativo: str, candles: pd.DataFrame) -> list[Decisao]:
-        """Marca sinais conhecidos no fechamento de cada candle, sem olhar o futuro."""
+        """Marca sinais no candle de ENTRADA (não o de sinal), para alinhar com as ordens reais."""
         df = self.calcular_indicadores(candles)
         inicio = max(self.config.ema_macro_periodo, self.config.atr_regime_janela) + 1
         sinais = []
         for indice in range(inicio, len(df) - 1):
             sinal = self._avaliar_estrategias(ativo, df, indice)
-            if sinal is not None:
-                sinais.append(sinal)
+            if sinal is None:
+                continue
+            setup = sinal.detalhes.get("setup", sinal.motivo)
+            # fibo_sr_retracao entra na vela do sinal; todas as outras na seguinte.
+            if setup != "fibo_sr_retracao" and indice + 1 < len(df):
+                sinal = replace(sinal, candle_hora=pd.Timestamp(df.index[indice + 1]))
+            sinais.append(sinal)
         return sinais
 
     def possivel_entrada(self, ativo: str, candles: pd.DataFrame) -> dict | None:

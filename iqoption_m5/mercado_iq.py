@@ -164,10 +164,23 @@ class MercadoIQ:
         novos_payouts = {}
         faltando_payout = []
         for ativo in self.config.ativos:
-            # Mesmo caso do "-op": em algumas contas o payout de pares reais
-            # só aparece sob a chave com sufixo, não a chave pura.
-            entrada = lucros.get(ativo) or lucros.get(f"{ativo}-op")
-            valor = entrada.get("turbo") if isinstance(entrada, dict) else None
+            # Tenta várias variações de chave:
+            # 1. chave exata ("USDJPY-OTC")
+            # 2. chave com "-op" ("EURUSD-op")
+            # 3. para OTC, base sem sufixo + "-op" ("USDJPY-op")
+            candidatos = [ativo, f"{ativo}-op"]
+            if ativo.upper().endswith("-OTC"):
+                base = ativo[:-4]
+                candidatos += [base, f"{base}-op"]
+            entrada = None
+            for chave in candidatos:
+                entrada = lucros.get(chave)
+                if entrada:
+                    break
+            # Ativos OTC usam chave "binary"; pares normais em turbo usam "turbo".
+            valor = None
+            if isinstance(entrada, dict):
+                valor = entrada.get("turbo") or entrada.get("binary")
             novos_payouts[ativo] = float(valor) if isinstance(valor, (int, float)) else None
             if novos_payouts[ativo] is None:
                 faltando_payout.append(ativo)
