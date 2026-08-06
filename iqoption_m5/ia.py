@@ -17,6 +17,9 @@ MAX_TOKENS_RESPOSTA = 400
 
 _bloqueado_ate = 0.0
 _lock_bloqueio = threading.Lock()
+# Permite apenas 1 chamada à API por vez. Chamadas concorrentes retornam None
+# imediatamente em vez de brigar pela cota e causar cascata de rate-limit.
+_sem_ia = threading.Semaphore(1)
 
 _HEADERS_BASE = {
     "Content-Type": "application/json",
@@ -85,57 +88,67 @@ Regras:
 
 def analisar(contexto: dict) -> ParecerIA | None:
     global _bloqueado_ate
-    agora = time.time()
-    if agora < _bloqueado_ate:
+    if time.time() < _bloqueado_ate:
         return None
 
-    print(f"    [IA] analisando {contexto.get('ativo', '?')}...")
-    try:
-        chave = _chave()
-    except RuntimeError:
-        print("    [IA] ERRO: chave Groq nao encontrada! Defina GROQ_API_KEY.")
-        return None
-
-    prompt = _montar_prompt(contexto)
-    headers = {**_HEADERS_BASE, "Authorization": f"Bearer {chave}"}
-    body = {
-        "model": MODELO,
-        "messages": [
-            {"role": "system", "content": "Analista tecnico de opcoes binarias. Responda SOMENTE com JSON valido, sem texto extra. Portugues."},
-            {"role": "user", "content": prompt},
-        ],
-        "temperature": 0.3,
-        "max_tokens": MAX_TOKENS_RESPOSTA,
-    }
-
-    try:
-        resp = _req.post(URL_GROQ, json=body, headers=headers, timeout=TIMEOUT_SEGUNDOS)
-    except _req.RequestException as e:
-        print(f"    [IA] erro de conexao: {e}")
-        return None
-
-    if resp.status_code == 429:
-        with _lock_bloqueio:
-            pausa = 300 if "tokens per day" in resp.text else 30
-            _bloqueado_ate = time.time() + pausa
-        print(f"    [IA] rate limit — pausando chamadas por {pausa}s")
-        return None
-
-    if resp.status_code != 200:
-        print(f"    [IA] HTTP {resp.status_code}: {resp.text[:200]}")
+    # Não bloqueia: se outra chamada já está em andamento, descarta esta.
+    if not _sem_ia.acquire(blocking=False):
         return None
 
     try:
-        dados = resp.json()
-        conteudo = dados["choices"][0]["message"]["content"].strip()
-    except (KeyError, IndexError, ValueError) as e:
-        print(f"    [IA] resposta invalida: {e}")
-        return None
+        # Re-verifica após adquirir — pode ter mudado enquanto esperava o lock.
+        if time.time() < _bloqueado_ate:
+            return None
 
-    resultado = _parsear_resposta(conteudo)
-    if resultado:
-        print(f"    [IA] OK: {resultado.texto}")
-    return resultado
+        print(f"    [IA] analisando {contexto.get('ativo', '?')}...")
+        try:
+            chave = _chave()
+        except RuntimeError:
+            print("    [IA] ERRO: chave Groq nao encontrada! Defina GROQ_API_KEY.")
+            return None
+
+        prompt = _montar_prompt(contexto)
+        headers = {**_HEADERS_BASE, "Authorization": f"Bearer {chave}"}
+        body = {
+            "model": MODELO,
+            "messages": [
+                {"role": "system", "content": "Analista tecnico de opcoes binarias. Responda SOMENTE com JSON valido, sem texto extra. Portugues."},
+                {"role": "user", "content": prompt},
+            ],
+            "temperature": 0.3,
+            "max_tokens": MAX_TOKENS_RESPOSTA,
+        }
+
+        try:
+            resp = _req.post(URL_GROQ, json=body, headers=headers, timeout=TIMEOUT_SEGUNDOS)
+        except _req.RequestException as e:
+            print(f"    [IA] erro de conexao: {e}")
+            return None
+
+        if resp.status_code == 429:
+            with _lock_bloqueio:
+                pausa = 300 if "tokens per day" in resp.text else 30
+                _bloqueado_ate = time.time() + pausa
+            print(f"    [IA] rate limit — pausando chamadas por {pausa}s")
+            return None
+
+        if resp.status_code != 200:
+            print(f"    [IA] HTTP {resp.status_code}: {resp.text[:200]}")
+            return None
+
+        try:
+            dados = resp.json()
+            conteudo = dados["choices"][0]["message"]["content"].strip()
+        except (KeyError, IndexError, ValueError) as e:
+            print(f"    [IA] resposta invalida: {e}")
+            return None
+
+        resultado = _parsear_resposta(conteudo)
+        if resultado:
+            print(f"    [IA] OK: {resultado.texto}")
+        return resultado
+    finally:
+        _sem_ia.release()
 
 
 def _parsear_resposta(conteudo: str) -> ParecerIA | None:
