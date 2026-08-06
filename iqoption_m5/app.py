@@ -3,6 +3,7 @@ import time
 import winsound
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
+from queue import Empty, Queue
 
 import pandas as pd
 
@@ -59,61 +60,23 @@ def main(config: Configuracao | None = None) -> None:
     grafico = GraficoM5(config) if config.abrir_grafico else None
     calendario = CalendarioEconomico(config.pasta_dados)
 
-    # --- Gráfico: dict latest-wins (sem fila, sem buildup) ---
-    _grafico_latest: dict[str, dict] = {}
-    _lock_grafico = threading.Lock()
+    # --- Worker do gráfico em thread dedicada (não bloqueia o loop) ---
+    grafico_fila: Queue = Queue()
     grafico_thread_viva = True
-
-    def _grafico_post(ativo: str, dados: dict) -> None:
-        with _lock_grafico:
-            _grafico_latest[ativo] = dados
 
     def _grafico_worker():
         while grafico_thread_viva:
-            time.sleep(0.08)
-            with _lock_grafico:
-                batch = dict(_grafico_latest)
-                _grafico_latest.clear()
-            for ativo_w, dados_w in batch.items():
-                try:
-                    if grafico is not None:
-                        grafico.atualizar(ativo_w, dados_w)
-                except Exception as e:
-                    print(f"[{datetime.now():%H:%M:%S}] [grafico] {ativo_w}: {e}")
-
-    def _grafico_updater():
-        """Atualiza o gráfico a cada 1s com dados do stream — sem esperar o ciclo principal."""
-        while grafico_thread_viva:
-            time.sleep(1.0)
-            if grafico is None:
+            try:
+                ativo, dados = grafico_fila.get(timeout=0.5)
+                if grafico is not None:
+                    grafico.atualizar(ativo, dados)
+            except Empty:
                 continue
-            for ativo_upd in config.ativos:
-                try:
-                    sn_upd = mercado.snapshot_leve(ativo_upd)
-                    if sn_upd is None:
-                        continue
-                    ind_upd = estrategia.calcular_indicadores(sn_upd.candles, ativo_upd)
-                    dados_upd = grafico.montar_dados(
-                        snapshot=sn_upd,
-                        indicadores=ind_upd,
-                        sinais=sinais_historicos_cache.get(ativo_upd, []),
-                        possivel=estrategia.possivel_entrada(ativo_upd, sn_upd.candles),
-                        operacoes=registro.operacoes_grafico(ativo_upd),
-                        desempenho=registro.resumo_desempenho(ativo_upd),
-                        desempenho_por_setup=registro.desempenho_por_setup(),
-                        desempenho_simulado_por_setup=registro.desempenho_simulado_por_setup(),
-                        funil={
-                            **registro.funil_reversao_hoje(),
-                            "aproximando": contagem_aproximando_hoje.get(ativo_upd, 0),
-                        },
-                    )
-                    _grafico_post(ativo_upd, dados_upd)
-                except Exception:
-                    pass
+            except Exception as e:
+                print(f"[{datetime.now():%H:%M:%S}] [grafico-worker] erro: {e}")
 
     if grafico is not None:
         threading.Thread(target=_grafico_worker, name="grafico-io", daemon=True).start()
-        threading.Thread(target=_grafico_updater, name="grafico-1s", daemon=True).start()
 
     ultimo_candle_processado = {ativo: None for ativo in config.ativos}
     candle_historico_grafico = {ativo: None for ativo in config.ativos}
@@ -364,9 +327,9 @@ def main(config: Configuracao | None = None) -> None:
                         "aproximando": contagem_aproximando_hoje.get(ativo, 0),
                     },
                 )
-                _grafico_post(ativo, dados_grafico)
+                grafico_fila.put((ativo, dados_grafico))
             except Exception as erro:
-                print(f"[{datetime.now():%H:%M:%S}] {ativo}: falha ao atualizar gráfico ({erro})")
+                print(f"[{datetime.now():%H:%M:%S}] {ativo}: falha ao enfileirar gráfico ({erro})")
 
         if ultimo_candle_processado[ativo] == candle_fechado:
             print(f"[{datetime.now():%H:%M:%S}] [FIM] {ativo}")
@@ -501,13 +464,7 @@ def main(config: Configuracao | None = None) -> None:
             agora_utc = datetime.now(timezone.utc)
             calendario.atualizar()
 
-            # Fase 0: refresh de cache UMA VEZ (payouts + abertura de mercado)
-            try:
-                mercado.preparar_ciclo()
-            except Exception as e_prep:
-                print(f"[{datetime.now():%H:%M:%S}] aviso: preparar_ciclo falhou ({e_prep})")
-
-            # Fase 1: snapshots sequenciais (sem cache refresh interno)
+            # Fase 1: snapshots sequenciais
             snapshots: dict = {}
             ts_servidor_ref: int | None = None
             t_local_ref: float = time.time()
@@ -547,17 +504,14 @@ def main(config: Configuracao | None = None) -> None:
 
             sono = max(3.0, sono)
 
-            _ultimo_aviso_sono = time.time()
             while sono > 0.5:
                 pedaco = min(10.0, sono)
                 time.sleep(pedaco)
                 sono -= pedaco
-                agora_sono = time.time()
-                if sono > 0.5 and agora_sono - _ultimo_aviso_sono >= 60.0:
-                    _ultimo_aviso_sono = agora_sono
+                if sono > 0.5:
                     print(
-                        f"[{datetime.now():%H:%M:%S}] dormindo, "
-                        f"faltam {sono:.0f}s"
+                        f"[{datetime.now():%H:%M:%S}] ... dormindo, "
+                        f"faltam {sono:.0f}s para próximo ciclo"
                     )
     except KeyboardInterrupt:
         print("Interrupção solicitada. Aguardando eventual ordem aberta...")

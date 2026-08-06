@@ -124,10 +124,10 @@ class MercadoIQ:
                     if candidato in abertos:
                         abertos[candidato] = aberto
                         resolvidos.add(candidato)
-                try:
-                    self._ids_ativos[candidato] = int(chave)
-                except (TypeError, ValueError):
-                    pass
+                    try:
+                        self._ids_ativos[candidato] = int(chave)
+                    except (TypeError, ValueError):
+                        pass
             faltando = [a for a in self.config.ativos if a not in resolvidos]
             if faltando:
                 print(f" [mercado] ativos configurados mas NAO encontrados na resposta da IQ: {faltando}")
@@ -148,12 +148,8 @@ class MercadoIQ:
         novos_payouts = {}
         faltando_payout = []
         for ativo in self.config.ativos:
-            candidatos_payout = [ativo, f"{ativo}-op"]
-            if ativo.upper().endswith("-OTC"):
-                base = ativo[:-4]
-                candidatos_payout += [base, f"{base}-op"]
-            entrada = next((lucros[k] for k in candidatos_payout if k in lucros and isinstance(lucros[k], dict)), None)
-            valor = (entrada.get("turbo") or entrada.get("binary")) if isinstance(entrada, dict) else None
+            entrada = lucros.get(ativo) or lucros.get(f"{ativo}-op")
+            valor = entrada.get("turbo") if isinstance(entrada, dict) else None
             novos_payouts[ativo] = float(valor) if isinstance(valor, (int, float)) else None
             if novos_payouts[ativo] is None:
                 faltando_payout.append(ativo)
@@ -183,48 +179,11 @@ class MercadoIQ:
         except Exception:
             pass
 
-    def preparar_ciclo(self) -> None:
-        """Atualiza cache de mercado UMA VEZ por ciclo, antes do loop de snapshots.
-        Mantém o cache refresh fora de cada snapshot individual para reduzir latência."""
-        with self._lock_api:
-            self._atualizar_cache_se_preciso()
-
-    def snapshot_leve(self, ativo: str) -> SnapshotMercado | None:
-        """Lê candle do stream sem refresh de cache — para o gráfico em tempo real.
-        Rápido: só lê estado do websocket, sem chamar get_server_timestamp."""
-        try:
-            with self._lock_api:
-                bruto = self._api.get_realtime_candles(ativo, self.config.timeframe_segundos)
-            linhas = [
-                {"from": ts, "open": c["open"], "close": c["close"],
-                 "min": c["min"], "max": c["max"], "volume": c.get("volume", 0)}
-                for ts, c in bruto.items()
-            ]
-            with self._lock_buffers:
-                if linhas and ativo in self._buffers:
-                    recentes = self._candles_para_df(linhas)
-                    combinado = pd.concat([self._buffers[ativo], recentes])
-                    combinado = combinado[~combinado.index.duplicated(keep="last")]
-                    self._buffers[ativo] = combinado.sort_index().tail(self.config.limite_candles)
-                buf = self._buffers.get(ativo)
-                if buf is None or len(buf) < 3:
-                    return None
-                buf_copia = buf.copy()
-            return SnapshotMercado(
-                ativo=ativo,
-                candles=buf_copia,
-                payout=self._payouts.get(ativo),
-                mercado_aberto=self._mercado_aberto.get(ativo, False),
-                timestamp_servidor=int(time.time()),
-            )
-        except Exception:
-            return None
-
     def _snapshot_uma_vez(self, ativo: str) -> SnapshotMercado:
         if ativo not in self.config.ativos:
             raise ValueError(f"Ativo fora da configuração: {ativo}")
+        self._atualizar_cache_se_preciso()
 
-        # Cache já atualizado por preparar_ciclo(). Aqui só candles + timestamp.
         with self._lock_api:
             bruto = self._api.get_realtime_candles(ativo, self.config.timeframe_segundos)
             timestamp_servidor = int(self._api.get_server_timestamp())
@@ -241,7 +200,6 @@ class MercadoIQ:
             for ts, candle in bruto.items()
         ]
 
-        # Atualização de buffers sob lock leve
         with self._lock_buffers:
             if linhas:
                 recentes = self._candles_para_df(linhas)
@@ -252,7 +210,6 @@ class MercadoIQ:
                 raise MercadoIndisponivel(f"Sem candles suficientes para {ativo}.")
             buffer_local = self._buffers[ativo].copy()
 
-        # Validação de atraso (fora do lock)
         if self._mercado_aberto.get(ativo, False):
             ultimo = pd.Timestamp(buffer_local.index[-1])
             ultimo_epoch = int(ultimo.tz_localize("UTC").timestamp()) if ultimo.tzinfo is None else int(ultimo.timestamp())
@@ -287,15 +244,66 @@ class MercadoIQ:
                     return False
 
     def comprar(self, valor: float, ativo: str, direcao: str, expiracao_minutos: int) -> tuple[bool, object]:
+        """Tenta comprar com retry e logging detalhado de diagnóstico."""
         with self._lock_api:
             id_fresco = self._ids_ativos.get(ativo)
-            if id_fresco is None:
-                return self._api.buy(valor, ativo, direcao, expiracao_minutos)
-            return self._comprar_com_id(valor, id_fresco, direcao, expiracao_minutos)
+            payout = self._payouts.get(ativo)
+            aberto = self._mercado_aberto.get(ativo, False)
+            print(f" [DIAG] {ativo}: id={id_fresco}, payout={payout}, aberto={aberto}, valor={valor}, exp={expiracao_minutos}")
+
+            # Tentativa 1: buyv3 com ID numérico (método original, mais confiável)
+            if id_fresco is not None:
+                print(f" [DIAG] {ativo}: tentando buyv3 com id={id_fresco}...")
+                try:
+                    resultado, id_ordem = self._comprar_com_id(valor, id_fresco, direcao, expiracao_minutos)
+                    if resultado:
+                        print(f" [DIAG] {ativo}: buyv3 SUCESSO id={id_ordem}")
+                        return True, id_ordem
+                    else:
+                        print(f" [DIAG] {ativo}: buyv3 recusado: {id_ordem}")
+                        if isinstance(id_ordem, str) and "not available" in id_ordem.lower():
+                            return False, id_ordem
+                except Exception as e:
+                    print(f" [DIAG] {ativo}: buyv3 ERRO: {e!r}")
+
+            # Tentativa 2: buy() oficial com string do ativo
+            print(f" [DIAG] {ativo}: tentando buy() oficial...")
+            try:
+                resultado, id_ordem = self._api.buy(valor, ativo, direcao, expiracao_minutos)
+                if resultado:
+                    print(f" [DIAG] {ativo}: buy() SUCESSO id={id_ordem}")
+                    return True, id_ordem
+                else:
+                    print(f" [DIAG] {ativo}: buy() recusado: {id_ordem}")
+            except Exception as e:
+                print(f" [DIAG] {ativo}: buy() ERRO: {e!r}")
+
+            # Tentativa 3: retry buyv3/buy após 1s
+            print(f" [DIAG] {ativo}: retry após 1s...")
+            time.sleep(1.0)
+            if id_fresco is not None:
+                try:
+                    resultado, id_ordem = self._comprar_com_id(valor, id_fresco, direcao, expiracao_minutos)
+                    if resultado:
+                        print(f" [DIAG] {ativo}: retry buyv3 SUCESSO id={id_ordem}")
+                        return True, id_ordem
+                except Exception:
+                    pass
+            try:
+                resultado, id_ordem = self._api.buy(valor, ativo, direcao, expiracao_minutos)
+                if resultado:
+                    print(f" [DIAG] {ativo}: retry buy() SUCESSO id={id_ordem}")
+                    return True, id_ordem
+                else:
+                    print(f" [DIAG] {ativo}: retry buy() recusado: {id_ordem}")
+                    return False, id_ordem
+            except Exception as e:
+                print(f" [DIAG] {ativo}: retry buy() ERRO: {e!r}")
+                return False, str(e)
 
     def _comprar_com_id(self, valor: float, id_ativo: int, direcao: str, expiracao_minutos: int) -> tuple[bool, object]:
         api_baixo_nivel = self._api.api
-        req_id = "buy"
+        req_id = f"buy_{int(time.time()*1000)}"
         api_baixo_nivel.buy_multi_option = {}
         api_baixo_nivel.result = None
         api_baixo_nivel.buyv3(valor, id_ativo, direcao, expiracao_minutos, req_id)
@@ -307,18 +315,14 @@ class MercadoIQ:
                 return False, info["message"]
             id_ordem = info.get("id")
             if time.monotonic() >= limite:
-                return False, None
+                return False, "timeout_buyv3"
             time.sleep(0.02)
         return api_baixo_nivel.result, api_baixo_nivel.buy_multi_option[req_id]["id"]
 
     def aguardar_resultado(self, id_ordem: object) -> object:
         if not self.config.confiar_resultado_automatico:
             return None
-        # Opção binária de N minutos não expira antes de (N*60 - 20)s.
-        # Consultar imediatamente acha ordens ANTIGAS com ID parecido → win falso.
-        espera_inicial = max(0, self.config.expiracao_minutos * 60 - 20)
-        time.sleep(espera_inicial)
-        limite = time.monotonic() + 120  # até 2min pós-expiração para aparecer
+        limite = time.monotonic() + self.config.expiracao_minutos * 60 + 90
         while time.monotonic() < limite:
             resultado = self.consultar_resultado(id_ordem, timeout_segundos=6.0)
             if resultado is not None:
@@ -334,6 +338,13 @@ class MercadoIQ:
         candle_hora,
         timeout_segundos: float,
     ) -> str | None:
+        """Verifica o resultado da opção binária no fechamento do candle de expiração.
+
+        A ordem é enviada na abertura do candle `candle_hora` e expira no fechamento
+        desse mesmo candle (5 min depois). Esperamos o próximo candle aparecer no
+        buffer como prova de que o candle de expiração já fechou, e usamos o Close
+        do próprio candle de expiração (não do seguinte).
+        """
         alvo = pd.Timestamp(candle_hora)
         limite = time.monotonic() + timeout_segundos
         while time.monotonic() < limite:
@@ -341,14 +352,20 @@ class MercadoIQ:
                 buffer = self._buffers.get(ativo)
             if buffer is not None and alvo in buffer.index:
                 posicao = buffer.index.get_loc(alvo)
-                if isinstance(posicao, int) and posicao < len(buffer.index) - 1:
-                    fechamento = float(buffer.iloc[posicao + 1]["Close"])
-                    if fechamento == preco_entrada:
-                        return "equal"
-                    subiu = fechamento > preco_entrada
-                    venceu = subiu if direcao == "call" else not subiu
-                    return "win" if venceu else "loss"
+                if isinstance(posicao, int):
+                    # Se existe um candle posterior, o candle 'alvo' já fechou
+                    if posicao < len(buffer.index) - 1:
+                        fechamento = float(buffer.iloc[posicao]["Close"])
+                        if fechamento == preco_entrada:
+                            return "equal"
+                        subiu = fechamento > preco_entrada
+                        venceu = subiu if direcao == "call" else not subiu
+                        print(f" [DIAG-RES] {ativo}: expiracao={alvo}, entrada={preco_entrada}, "
+                              f"fechamento={fechamento}, direcao={direcao}, resultado={'win' if venceu else 'loss'}")
+                        return "win" if venceu else "loss"
+                    # Se não existe posterior, o candle ainda está se formando
             time.sleep(2.0)
+        print(f" [DIAG-RES] {ativo}: timeout após {timeout_segundos}s esperando fechamento de {alvo}")
         return None
 
     _CAMPOS_CONFIRMA_OPCAO = ("active_id", "amount", "deposit", "win", "expired", "direction")

@@ -32,12 +32,6 @@ class ExecutorSeguro:
             return payout * valor if resultado else -valor
         if isinstance(resultado, (int, float)):
             lucro = float(resultado)
-            # Numa opcao binaria o lucro so pode ir de -valor (perda total)
-            # ate +valor*payout (vitoria maxima). Qualquer numero fora dessa
-            # faixa e garantido ser erro de parsing do histórico da IQ (viu
-            # dict errado, campo errado, etc) — nunca um resultado real.
-            # Tratar como indisponivel em vez de confiar cegamente evita que
-            # um bug de leitura vire uma "perda" de milhoes na banca.
             folga = max(valor * 0.05, 0.01)
             if not (-valor - folga <= lucro <= valor * payout + folga):
                 return None
@@ -73,17 +67,11 @@ class ExecutorSeguro:
 
     def _valor_da_entrada(self) -> float:
         if self.config.valor_percentual_banca > 0:
-            # Kelly fracionado: aposta escala com a banca, encolhendo
-            # sozinha se a banca cair (sem precisar de stop pra isso) e
-            # crescendo se a banca subir. Minimo pratico pra corretora nao
-            # recusar a ordem.
             banca_atual = self.risco.resumo().banca_atual
             return max(2.0, round(banca_atual * self.config.valor_percentual_banca, 2))
         base = self.config.valor_por_ordem
         if not self.config.alavancagem_pyramid:
             return base
-        # Pyramid: cresce so em cima de vitoria (nunca reduz por perda),
-        # e nunca passa do teto configurado.
         bonus = max(0.0, self.risco.resumo().ultimo_lucro)
         return min(base + bonus, self.config.alavancagem_maximo)
 
@@ -91,6 +79,11 @@ class ExecutorSeguro:
         valor = self._valor_da_entrada()
         payout = float(snapshot.payout)
         enviada_em = datetime.now()
+
+        # Diagnóstico completo antes de enviar
+        print(f" [EXEC] {decisao.ativo}: preparando ordem | direcao={decisao.direcao.upper()} | "
+              f"valor={valor} | exp={self.config.expiracao_minutos}min | payout={payout}")
+
         try:
             enviada, id_ordem = self.mercado.comprar(
                 valor,
@@ -107,7 +100,7 @@ class ExecutorSeguro:
         if not enviada:
             self.risco.cancelar_reserva()
             self.registro.registrar_falha(decisao, f"buy_recusado:{id_ordem}")
-            print(f">> {decisao.ativo}: IQ recusou a ordem ({id_ordem})")
+            print(f">> {decisao.ativo}: IQ recusou a ordem — ERRO BRUTO: {id_ordem}")
             return
 
         self.registro.registrar_abertura(id_ordem, decisao, valor, payout, enviada_em)
@@ -139,11 +132,6 @@ class ExecutorSeguro:
             lucro = None
 
         if lucro is None:
-            # A IQ nunca confirmou o resultado dentro da janela de espera.
-            # Tratamos como perda tecnica (mesmo criterio da recuperacao no
-            # restart): assumir a pior hipotese e liberar o monitor com
-            # seguranca, em vez de deixar a operacao com lucro nulo (o que
-            # subestimaria o risco real na banca).
             print(f">> {decisao.ativo}: resultado indisponivel pra ordem {id_ordem}; registrada como perda tecnica de {-valor:+.2f}")
             bruto = f"perda_tecnica_resultado_indisponivel:{bruto}"
             lucro = -valor
@@ -163,20 +151,20 @@ class ExecutorSeguro:
             self.registro.registrar_resultado(resultado)
         finally:
             self.risco.registrar_resultado(lucro)
-        resumo = self.risco.resumo()
-        print(
-            f">> {decisao.ativo}: resultado={bruto} | lucro={lucro} | "
-            f"sessão={resumo.lucro_sessao:+.2f}"
-        )
-        try:
-            if lucro is not None and lucro > 0:
-                winsound.Beep(1200, 150)
-                winsound.Beep(1500, 150)
-                winsound.Beep(1800, 300)
-            elif lucro is not None and lucro < 0:
-                winsound.Beep(400, 500)
-        except Exception:
-            pass
+            resumo = self.risco.resumo()
+            print(
+                f">> {decisao.ativo}: resultado={bruto} | lucro={lucro} | "
+                f"sessão={resumo.lucro_sessao:+.2f}"
+            )
+            try:
+                if lucro is not None and lucro > 0:
+                    winsound.Beep(1200, 150)
+                    winsound.Beep(1500, 150)
+                    winsound.Beep(1800, 300)
+                elif lucro is not None and lucro < 0:
+                    winsound.Beep(400, 500)
+            except Exception:
+                pass
 
     def aguardar_ordens(self) -> None:
         with self._lock:
