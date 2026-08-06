@@ -72,6 +72,14 @@ class Configuracao:
     macd_slow: int = 16
     macd_signal: int = 9
 
+    # Estratégias opcionais — desativadas por padrão até validação em PRACTICE
+    engulfing_sr_ativo: bool = False
+    divergencia_rsi_ativo: bool = False
+    bollinger_squeeze_ativo: bool = False
+    divergencia_rsi_janela_pivos: int = 5
+    bollinger_squeeze_percentil_janela: int = 20
+    bollinger_squeeze_min_corpo_atr: float = 0.5
+
     meta_diaria: float = 0.0  # 0 = desativado; se >0, encerra o dia ao atingir esse lucro
     payout_minimo: float = 0.75
     bloquear_otc_real: bool = True

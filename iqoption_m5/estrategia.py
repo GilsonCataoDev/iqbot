@@ -139,6 +139,20 @@ class EstrategiaReversaoM5:
                 resistencias.append(float(atual["High"]))
         return suportes, resistencias
 
+    def _fundos_swing(self, series: pd.Series, raio: int) -> list[int]:
+        arr = series.to_numpy()
+        return [
+            i for i in range(raio, len(arr) - raio)
+            if arr[i] == arr[i - raio : i + raio + 1].min()
+        ]
+
+    def _topos_swing(self, series: pd.Series, raio: int) -> list[int]:
+        arr = series.to_numpy()
+        return [
+            i for i in range(raio, len(arr) - raio)
+            if arr[i] == arr[i - raio : i + raio + 1].max()
+        ]
+
     def _zona_fibonacci(
         self, df: pd.DataFrame, indice_recuo: int, tendencia: str
     ) -> tuple[float, float] | None:
@@ -562,10 +576,208 @@ class EstrategiaReversaoM5:
 
         return None
 
+    def _avaliar_engulfing_sr(self, ativo: str, df: pd.DataFrame, indice: int) -> Decisao | None:
+        """Candle de absorção (engulfing) sobre pivô de S/R.
+
+        Edge: um candle que engole completamente o anterior diretamente em S/R
+        sinaliza absorção de toda a pressão direcional; winrate documentado >60%
+        em M5 Forex quando combinado com filtro de tendência macro.
+        """
+        c = self.config
+        if indice < 2 or indice >= len(df):
+            return None
+        if not self._atr_regime_valido(df, indice):
+            return None
+        mae = df.iloc[indice - 1]
+        eng = df.iloc[indice]
+        obrigatorias = ("Open", "High", "Low", "Close", "ATR", "TendenciaMacro")
+        if any(pd.isna(mae.get(col)) or pd.isna(eng.get(col)) for col in obrigatorias):
+            return None
+
+        atr = float(eng["ATR"])
+        tolerancia = c.pullback_tolerancia_atr * atr
+        tendencia = str(eng.get("TendenciaMacro", "lateral"))
+
+        inclinacao = eng.get("InclinacaoMacro")
+        if inclinacao is not None and not pd.isna(inclinacao):
+            if abs(float(inclinacao)) > c.pullback_slope_forte_multiplo_atr * atr:
+                return None
+
+        mae_o, mae_c = float(mae["Open"]), float(mae["Close"])
+        eng_o, eng_c = float(eng["Open"]), float(eng["Close"])
+        eng_low, eng_high = float(eng["Low"]), float(eng["High"])
+        suportes, resistencias = self._pivos(df, indice)
+
+        if (
+            mae_c < mae_o and eng_c > eng_o
+            and eng_o <= mae_c and eng_c >= mae_o
+            and tendencia in {"alta", "lateral"}
+            and suportes
+        ):
+            sr = min(suportes, key=lambda p: abs(p - eng_low))
+            if abs(sr - eng_low) <= tolerancia:
+                return Decisao(
+                    ativo=ativo, direcao="call", preco=eng_c,
+                    candle_hora=pd.Timestamp(df.index[indice]),
+                    motivo="engulfing_sr_m5",
+                    detalhes={"setup": "engulfing_sr", "nivel_sr": round(sr, 6),
+                              "tipo_sr": "suporte", "tendencia_macro": tendencia,
+                              "atr": round(atr, 6)},
+                )
+
+        if (
+            mae_c > mae_o and eng_c < eng_o
+            and eng_o >= mae_c and eng_c <= mae_o
+            and tendencia in {"baixa", "lateral"}
+            and resistencias
+        ):
+            sr = min(resistencias, key=lambda p: abs(p - eng_high))
+            if abs(sr - eng_high) <= tolerancia:
+                return Decisao(
+                    ativo=ativo, direcao="put", preco=eng_c,
+                    candle_hora=pd.Timestamp(df.index[indice]),
+                    motivo="engulfing_sr_m5",
+                    detalhes={"setup": "engulfing_sr", "nivel_sr": round(sr, 6),
+                              "tipo_sr": "resistencia", "tendencia_macro": tendencia,
+                              "atr": round(atr, 6)},
+                )
+        return None
+
+    def _avaliar_divergencia_rsi(self, ativo: str, df: pd.DataFrame, indice: int) -> Decisao | None:
+        """Divergência clássica entre fundos/topos de preço e RSI(14).
+
+        Edge: discordância de momentum (RSI) e preço indica exaustão; um dos sinais
+        de reversão mais robustos em AT, especialmente quando o RSI está em zona
+        extrema (<40 / >60) e o candle de confirmação fecha na direção correta.
+        """
+        c = self.config
+        raio = c.divergencia_rsi_janela_pivos
+        if indice < raio * 2 + 5 or indice >= len(df):
+            return None
+        if not self._atr_regime_valido(df, indice):
+            return None
+
+        conf = df.iloc[indice]
+        if any(pd.isna(conf.get(col)) for col in ("Open", "Close", "RSI", "ATR")):
+            return None
+
+        lookback = min(40, indice)
+        janela = df.iloc[indice - lookback : indice]
+        conf_close = float(conf["Close"])
+        conf_open = float(conf["Open"])
+        conf_rsi = float(conf["RSI"])
+
+        fundos = self._fundos_swing(janela["Low"], raio)
+        if len(fundos) >= 2:
+            f1, f2 = fundos[-2], fundos[-1]
+            if f2 - f1 >= 3:
+                rsi_f1 = float(janela.iloc[f1]["RSI"])
+                rsi_f2 = float(janela.iloc[f2]["RSI"])
+                if (
+                    not pd.isna(rsi_f1) and not pd.isna(rsi_f2)
+                    and float(janela.iloc[f2]["Low"]) < float(janela.iloc[f1]["Low"])
+                    and rsi_f2 > rsi_f1 and rsi_f2 < 40
+                    and conf_close > conf_open and conf_rsi > rsi_f2
+                ):
+                    return Decisao(
+                        ativo=ativo, direcao="call", preco=conf_close,
+                        candle_hora=pd.Timestamp(df.index[indice]),
+                        motivo="divergencia_rsi_m5",
+                        detalhes={"setup": "divergencia_rsi", "tipo": "bullish",
+                                  "rsi_pivo1": round(rsi_f1, 2), "rsi_pivo2": round(rsi_f2, 2),
+                                  "preco_pivo1": round(float(janela.iloc[f1]["Low"]), 6),
+                                  "preco_pivo2": round(float(janela.iloc[f2]["Low"]), 6),
+                                  "atr": round(float(conf["ATR"]), 6)},
+                    )
+
+        topos = self._topos_swing(janela["High"], raio)
+        if len(topos) >= 2:
+            t1, t2 = topos[-2], topos[-1]
+            if t2 - t1 >= 3:
+                rsi_t1 = float(janela.iloc[t1]["RSI"])
+                rsi_t2 = float(janela.iloc[t2]["RSI"])
+                if (
+                    not pd.isna(rsi_t1) and not pd.isna(rsi_t2)
+                    and float(janela.iloc[t2]["High"]) > float(janela.iloc[t1]["High"])
+                    and rsi_t2 < rsi_t1 and rsi_t2 > 60
+                    and conf_close < conf_open and conf_rsi < rsi_t2
+                ):
+                    return Decisao(
+                        ativo=ativo, direcao="put", preco=conf_close,
+                        candle_hora=pd.Timestamp(df.index[indice]),
+                        motivo="divergencia_rsi_m5",
+                        detalhes={"setup": "divergencia_rsi", "tipo": "bearish",
+                                  "rsi_pivo1": round(rsi_t1, 2), "rsi_pivo2": round(rsi_t2, 2),
+                                  "preco_pivo1": round(float(janela.iloc[t1]["High"]), 6),
+                                  "preco_pivo2": round(float(janela.iloc[t2]["High"]), 6),
+                                  "atr": round(float(conf["ATR"]), 6)},
+                    )
+        return None
+
+    def _avaliar_bollinger_squeeze(self, ativo: str, df: pd.DataFrame, indice: int) -> Decisao | None:
+        """Squeeze de Bollinger seguido de rompimento com corpo forte.
+
+        Edge: contração de volatilidade (squeeze) precede expansão direcional;
+        rompimento após squeeze tem probabilidade maior de movimento sustentado,
+        equilibrando o portfólio que é majoritariamente mean-reversion.
+        """
+        c = self.config
+        janela = c.bollinger_squeeze_percentil_janela
+        if indice < janela + 5 or indice >= len(df):
+            return None
+        if not self._atr_regime_valido(df, indice):
+            return None
+
+        vela = df.iloc[indice]
+        if any(pd.isna(vela.get(col)) for col in ("BandaSup", "BandaInf", "Close", "Open", "RSI", "ATR")):
+            return None
+
+        trecho = df.iloc[max(0, indice - janela) : indice + 1]
+        larguras = (trecho["BandaSup"] - trecho["BandaInf"]).to_numpy()
+        if len(larguras) < 2:
+            return None
+
+        largura_atual = float(larguras[-1])
+        percentil_20 = float(np.percentile(larguras[:-1], 20))
+        if largura_atual >= percentil_20:
+            return None
+
+        atr = float(vela["ATR"])
+        rsi = float(vela["RSI"])
+        close = float(vela["Close"])
+        open_ = float(vela["Open"])
+        corpo = abs(close - open_)
+
+        if (close > float(vela["BandaSup"])
+                and corpo >= c.bollinger_squeeze_min_corpo_atr * atr
+                and rsi > 50):
+            return Decisao(
+                ativo=ativo, direcao="call", preco=close,
+                candle_hora=pd.Timestamp(df.index[indice]),
+                motivo="bollinger_squeeze_m5",
+                detalhes={"setup": "bollinger_squeeze", "largura_bb": round(largura_atual, 6),
+                          "percentil_largura": round(percentil_20, 6), "rsi": round(rsi, 2),
+                          "atr": round(atr, 6)},
+            )
+
+        if (close < float(vela["BandaInf"])
+                and corpo >= c.bollinger_squeeze_min_corpo_atr * atr
+                and rsi < 50):
+            return Decisao(
+                ativo=ativo, direcao="put", preco=close,
+                candle_hora=pd.Timestamp(df.index[indice]),
+                motivo="bollinger_squeeze_m5",
+                detalhes={"setup": "bollinger_squeeze", "largura_bb": round(largura_atual, 6),
+                          "percentil_largura": round(percentil_20, 6), "rsi": round(rsi, 2),
+                          "atr": round(atr, 6)},
+            )
+        return None
+
     def _avaliar_todas_estrategias(
         self, ativo: str, df: pd.DataFrame, indice: int
     ) -> list[Decisao]:
         """Avalia cada estratégia de forma independente; retorna todas que dispararam."""
+        c = self.config
         resultado = []
         for fn in (
             self._avaliar_indicadores,
@@ -575,6 +787,19 @@ class EstrategiaReversaoM5:
             self._avaliar_fibo_sr_retracao,
             self._avaliar_macd,
         ):
+            try:
+                d = fn(ativo, df, indice)
+                if d is not None:
+                    resultado.append(d)
+            except Exception:
+                pass
+        for ativo_flag, fn in (
+            (c.engulfing_sr_ativo, self._avaliar_engulfing_sr),
+            (c.divergencia_rsi_ativo, self._avaliar_divergencia_rsi),
+            (c.bollinger_squeeze_ativo, self._avaliar_bollinger_squeeze),
+        ):
+            if not ativo_flag:
+                continue
             try:
                 d = fn(ativo, df, indice)
                 if d is not None:
