@@ -429,7 +429,7 @@ async function atualizar() {
       position: s.direcao === 'compra' ? 'belowBar' : 'aboveBar',
       color: s.status === 'bloqueado' ? '#9598a1' : (s.direcao === 'compra' ? '#26a69a' : '#ef5350'),
       shape: s.direcao === 'compra' ? 'arrowUp' : 'arrowDown',
-      text: `${s.direcao === 'compra' ? 'CALL' : 'PUT'}${s.status === 'bloqueado' ? ' BLOQUEADO' : ''}`,
+      text: `${s.setup ? '[' + s.setup + '] ' : ''}${s.direcao === 'compra' ? 'CALL' : 'PUT'}${s.status === 'bloqueado' ? ' BLOQUEADO' : ''}`,
     }));
     const temposConfluencia = new Set((dados.confluencias || []).map(c => c.time));
     const marcadoresPullback = (dados.pullbacks || [])

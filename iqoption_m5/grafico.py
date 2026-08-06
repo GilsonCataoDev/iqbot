@@ -219,6 +219,7 @@ class GraficoM5:
                 "preco": sinal.preco,
                 "status": sinal.detalhes.get("status_grafico", "confirmado"),
                 "fatores": list(sinal.detalhes.get("fatores", [])),
+                "setup": sinal.detalhes.get("setup", sinal.motivo),
             }
             if sinal.detalhes.get("setup") in ("pullback", "pullback_confluencia"):
                 pullbacks.append(item)

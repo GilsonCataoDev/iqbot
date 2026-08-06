@@ -326,78 +326,72 @@ def main(config: Configuracao | None = None) -> None:
                 f"mercado={status} payout={payout} candle={candle_fechado}"
             )
             return
-        decisao = decisoes_todas[0]
 
-        autorizacao = risco.avaliar(snapshot, decisao)
-        registro.registrar_decisao(decisao, snapshot, autorizacao)
-        motivos = explicar_decisao(decisao, indicadores)
-        ultima_explicacao[ativo] = motivos
-        print(
-            f"[{datetime.now():%H:%M:%S}] {ativo}: sinal {decisao.direcao.upper()} "
-            f"@ {decisao.preco:.5f} | risco={autorizacao.motivo}"
-        )
-        for motivo in motivos:
-            print(f"    - {motivo}")
         aviso_noticia = calendario.aviso(ativo, agora_utc)
-        if aviso_noticia:
-            print(f"    NOTÍCIA {aviso_noticia}")
-        elif e_sintetico(ativo):
-            print("    (ativo sintético: notícia econômica real não move esse preço)")
-
         confirmacao = calendario.confirmacao_recente(ativo, agora_utc)
-        favorece_noticia = confirmacao is not None and confirmacao["direcao"].lower() == decisao.direcao
-        if confirmacao:
-            concordancia = "A FAVOR" if favorece_noticia else "CONTRA"
-            print(
-                f"    NOTICIA CONFIRMADA {concordancia} do sinal: {confirmacao['titulo']} "
-                f"actual={confirmacao['actual']} forecast={confirmacao['forecast']} "
-                f"-> {confirmacao['direcao']}"
-            )
 
         with _lock_ia:
             ia_atual = parecer_ia.get(ativo)
-        ia_discorda = (
-            ia_atual is not None
-            and ia_atual.confianca != "baixa"
-            and ia_atual.direcao_sugerida is not None
-            and ia_atual.direcao_sugerida.lower() != decisao.direcao
-        )
-        par_validado_pullback = not config.pares_validados or ativo in config.pares_validados
-        if not par_validado_pullback:
-            print(f"    (par nao validado, simulando pullback/bollinger sem dinheiro real)")
+        par_validado = not config.pares_validados or ativo in config.pares_validados
 
-            def _simular(
-                av=ativo, d=decisao, pay=snapshot.payout or 0.0,
-                entrada_hora=pd.Timestamp(indicadores.index[-1]),
-                entrada_preco=float(indicadores.iloc[-1]["Open"]),
-            ):
-                setup = d.detalhes.get("setup", d.motivo)
-                timeout = config.expiracao_minutos * 60 + 90
-                resultado = mercado.resultado_por_candle(av, d.direcao, entrada_preco, entrada_hora, timeout)
-                registro.registrar_simulacao(av, d.direcao, setup, entrada_hora, entrada_preco, pay, resultado)
-                if resultado:
-                    print(f"    [SIMULADO] {av} {setup}: resultado={resultado} (sem dinheiro real)")
-
-            threading.Thread(target=_simular, daemon=True).start()
-        elif ia_discorda and not favorece_noticia:
+        todos_motivos: list[str] = []
+        for decisao in decisoes_todas:
+            setup_nome = decisao.detalhes.get("setup", decisao.motivo)
+            autorizacao = risco.avaliar(snapshot, decisao)
+            registro.registrar_decisao(decisao, snapshot, autorizacao)
+            motivos = explicar_decisao(decisao, indicadores)
+            todos_motivos.extend(motivos)
             print(
-                f"    [IA] BLOQUEOU a entrada: IA sugere {ia_atual.direcao_sugerida} "
-                f"({ia_atual.confianca}) contra o sinal {decisao.direcao.upper()}"
+                f"[{datetime.now():%H:%M:%S}] {ativo}: [{setup_nome}] {decisao.direcao.upper()} "
+                f"@ {decisao.preco:.5f} | risco={autorizacao.motivo}"
             )
-        elif autorizacao.permitida:
-            if ia_discorda and favorece_noticia:
-                print("    [IA] discordou mas a noticia confirmada a favor do sinal tem prioridade")
-            executor.executar(snapshot, decisao)
+            for motivo in motivos:
+                print(f"    - {motivo}")
+            if aviso_noticia:
+                print(f"    NOTÍCIA {aviso_noticia}")
+            elif e_sintetico(ativo):
+                print("    (ativo sintético: notícia econômica real não move esse preço)")
+            if confirmacao:
+                favorece_noticia = confirmacao["direcao"].lower() == decisao.direcao
+                concordancia = "A FAVOR" if favorece_noticia else "CONTRA"
+                print(
+                    f"    NOTICIA CONFIRMADA {concordancia} do sinal: {confirmacao['titulo']} "
+                    f"actual={confirmacao['actual']} forecast={confirmacao['forecast']} "
+                    f"-> {confirmacao['direcao']}"
+                )
+            else:
+                favorece_noticia = False
 
-        for d_sec in decisoes_todas[1:]:
-            def _simular_sec(av=ativo, d=d_sec, pay=snapshot.payout or 0.0):
-                setup = d.detalhes.get("setup", d.motivo)
-                timeout = config.expiracao_minutos * 60 + 90
-                resultado = mercado.resultado_por_candle(av, d.direcao, d.preco, d.candle_hora, timeout)
-                registro.registrar_simulacao(av, d.direcao, setup, d.candle_hora, d.preco, pay, resultado)
-                if resultado:
-                    print(f"    [SIMULADO] {av} {setup}: resultado={resultado} (secundária)")
-            threading.Thread(target=_simular_sec, daemon=True).start()
+            ia_discorda = (
+                ia_atual is not None
+                and ia_atual.confianca != "baixa"
+                and ia_atual.direcao_sugerida is not None
+                and ia_atual.direcao_sugerida.lower() != decisao.direcao
+            )
+            if not par_validado:
+                def _simular(
+                    av=ativo, d=decisao, pay=snapshot.payout or 0.0,
+                    entrada_hora=pd.Timestamp(indicadores.index[-1]),
+                    entrada_preco=float(indicadores.iloc[-1]["Open"]),
+                    sn=setup_nome,
+                ):
+                    timeout = config.expiracao_minutos * 60 + 90
+                    resultado = mercado.resultado_por_candle(av, d.direcao, entrada_preco, entrada_hora, timeout)
+                    registro.registrar_simulacao(av, d.direcao, sn, entrada_hora, entrada_preco, pay, resultado)
+                    if resultado:
+                        print(f"    [SIMULADO] {av} {sn}: resultado={resultado} (par nao validado)")
+                threading.Thread(target=_simular, daemon=True).start()
+            elif ia_discorda and not favorece_noticia:
+                print(
+                    f"    [IA] BLOQUEOU [{setup_nome}]: IA sugere {ia_atual.direcao_sugerida} "
+                    f"({ia_atual.confianca}) contra o sinal {decisao.direcao.upper()}"
+                )
+            elif autorizacao.permitida:
+                if ia_discorda and favorece_noticia:
+                    print("    [IA] discordou mas a noticia confirmada a favor do sinal tem prioridade")
+                executor.executar(snapshot, decisao)
+
+        ultima_explicacao[ativo] = todos_motivos
 
     try:
         while not risco.resumo().encerrado:

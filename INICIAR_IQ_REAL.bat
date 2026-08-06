@@ -2,10 +2,7 @@
 chcp 65001 >nul
 cd /d "%~dp0"
 title IQ Option M5 - REAL - DINHEIRO DE VERDADE
-:: Defina as variaveis abaixo ou exporte-as antes de rodar:
-:: set GROQ_API_KEY=sua_chave_groq
-:: set IQ_OPTION_EMAIL=seu@email.com
-:: set IQ_OPTION_SENHA=sua_senha
+if exist ".env.bat" call ".env.bat"
 if "%IQ_OPTION_EMAIL%"=="" (
     echo ERRO: IQ_OPTION_EMAIL nao definida. Defina a variavel de ambiente e tente novamente.
     pause >nul
