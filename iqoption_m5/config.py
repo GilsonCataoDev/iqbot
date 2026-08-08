@@ -29,7 +29,7 @@ class Configuracao:
     executar_estrategias_nao_validadas: bool = True  # pullback/bollinger; False = so registra, so reversao_candle executa
     pares_validados: tuple[str, ...] = ()  # vazio = todos os `ativos` podem executar; se preenchido, so esses arriscam dinheiro real
     confiar_resultado_automatico: bool = True  # False = sempre perda tecnica (historico da IQ ja mentiu "win")
-    verificar_resultado_por_candle: bool = False  # True = calcula resultado sozinho pelo candle, ignora historico da IQ
+    verificar_resultado_por_candle: bool = True  # True = calcula resultado pelo candle, não confia no historico da IQ
     valor_por_ordem: float = 1.0
     valor_percentual_banca: float = 0.0  # 0 = desativado; se >0, entrada = banca_atual * este percentual (ex: 0.03 = 3%)
     alavancagem_pyramid: bool = False  # proxima entrada = valor_por_ordem + lucro da ultima operacao (min 0)

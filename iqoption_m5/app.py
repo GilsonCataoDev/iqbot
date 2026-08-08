@@ -226,10 +226,10 @@ def main(config: Configuracao | None = None) -> None:
         segundo_no_candle = snapshot.timestamp_servidor % config.timeframe_segundos
         segundos_restantes = config.timeframe_segundos - segundo_no_candle
 
-        # Detecta lag de stream: dentro da janela de entrada, verifica se o buffer
-        # já atualizou index[-2] para o candle que acabou de fechar. Se ainda mostra
-        # o candle anterior, agenda retry em 5s para não avaliar dado desatualizado.
-        if segundo_no_candle < config.entrada_max_segundos_no_candle:
+        # Detecta lag de stream: só faz sentido quando o mercado está aberto.
+        # Mercado fechado tem candles de horas atrás no buffer — lag esperado,
+        # não stream lag. Risco já bloqueia como mercado_fechado nesses casos.
+        if segundo_no_candle < config.entrada_max_segundos_no_candle and snapshot.mercado_aberto:
             ts_inicio_atual = snapshot.timestamp_servidor - segundo_no_candle
             ts_fechado_esperado = ts_inicio_atual - config.timeframe_segundos
             cf = candle_fechado

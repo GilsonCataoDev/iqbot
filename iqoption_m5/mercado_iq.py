@@ -409,14 +409,14 @@ class MercadoIQ:
                 if isinstance(posicao, int):
                     # Se existe um candle posterior, o candle 'alvo' já fechou
                     if posicao < len(buffer.index) - 1:
-                        abertura = float(buffer.iloc[posicao]["Open"])
                         fechamento = float(buffer.iloc[posicao]["Close"])
-                        if fechamento == abertura:
+                        # Compara fechamento vs preco_entrada (resultado da opção binária),
+                        # não vs abertura do candle (que pode diferir do preço de entrada).
+                        if abs(fechamento - preco_entrada) < 1e-8:
                             return "equal"
-                        subiu = fechamento > abertura
-                        venceu = subiu if direcao == "call" else not subiu
-                        print(f" [DIAG-RES] {ativo}: expiracao={alvo}, sinal={preco_entrada:.5f}, "
-                              f"abertura={abertura:.5f}, fechamento={fechamento:.5f}, "
+                        venceu = (fechamento > preco_entrada) if direcao == "call" else (fechamento < preco_entrada)
+                        print(f" [DIAG-RES] {ativo}: expiracao={alvo}, entrada={preco_entrada:.5f}, "
+                              f"fechamento={fechamento:.5f}, "
                               f"direcao={direcao}, resultado={'win' if venceu else 'loss'}")
                         return "win" if venceu else "loss"
                     # Se não existe posterior, o candle ainda está se formando
