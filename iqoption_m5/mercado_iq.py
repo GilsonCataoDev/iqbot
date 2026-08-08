@@ -138,7 +138,15 @@ class MercadoIQ:
                     base = nome[: -len("-op")]
                     candidatos.add(base)
                     candidatos.add(f"{base}-OTC")
-                aberto = bool(detalhe.get("enabled", False)) and not bool(detalhe.get("is_suspended", False))
+                enabled = bool(detalhe.get("enabled", False))
+                is_otc_entry = nome.endswith("-op") or any(c.upper().endswith("-OTC") for c in candidatos)
+                # OTC: is_suspended é frequentemente incorreto — a IQ marca suspended
+                # quando o mercado regular equivalente está aberto, mas o OTC pode
+                # continuar disponível. Usa só enabled; a rejeição real vem do buyv3.
+                if is_otc_entry:
+                    aberto = enabled
+                else:
+                    aberto = enabled and not bool(detalhe.get("is_suspended", False))
                 for candidato in candidatos:
                     if candidato in abertos:
                         abertos[candidato] = aberto
