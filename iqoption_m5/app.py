@@ -483,8 +483,7 @@ def main(config: Configuracao | None = None) -> None:
 
         for decisao in decisoes_todas:
             setup_nome = decisao.detalhes.get("setup", decisao.motivo)
-            if setup_nome != "fibo_sr_retracao":
-                decisao = replace(decisao, candle_hora=proxima_vela)
+            decisao = replace(decisao, candle_hora=proxima_vela)
             autorizacao = risco.avaliar(snapshot, decisao)
             registro.registrar_decisao(decisao, snapshot, autorizacao)
             motivos = explicar_decisao(decisao, indicadores)

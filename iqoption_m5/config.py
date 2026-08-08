@@ -38,7 +38,7 @@ class Configuracao:
     limite_candles: int = 120
     expiracao_minutos: int = 5
     intervalo_loop_segundos: float = 2.5
-    entrada_max_segundos_no_candle: int = 45
+    entrada_max_segundos_no_candle: int = 200
     abrir_grafico: bool = True
     porta_grafico: int = 8767
     alerta_preco_tolerancia_atr: float = 0.25

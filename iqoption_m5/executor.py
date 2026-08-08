@@ -135,10 +135,17 @@ class ExecutorSeguro:
 
         try:
             if self.config.verificar_resultado_por_candle:
+                # Usa o preço corrente do tick (Close do candle formando) como referência
+                # de entrada — mais preciso que o preço teórico da estratégia quando a
+                # entrada ocorre no meio da vela (não apenas nos primeiros segundos).
+                try:
+                    preco_ref = float(snapshot.candles.iloc[-1]["Close"])
+                except Exception:
+                    preco_ref = decisao.preco
                 bruto = self.mercado.resultado_por_candle(
                     decisao.ativo,
                     decisao.direcao,
-                    decisao.preco,
+                    preco_ref,
                     decisao.candle_hora,
                     timeout_segundos=self.config.expiracao_minutos * 60 + 90,
                 )
