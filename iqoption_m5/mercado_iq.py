@@ -161,6 +161,10 @@ class MercadoIQ:
                 for ativo_faltante in faltando:
                     parecidos = [n for n in nomes_vistos if ativo_faltante.split("-")[0] in n]
                     print(f" [mercado] nomes parecidos com '{ativo_faltante}': {parecidos or 'NENHUM'}")
+            # OTC sintético é 24/7 — ignora is_suspended e enabled da API
+            for ativo in self.config.ativos:
+                if ativo.upper().endswith("-OTC"):
+                    abertos[ativo] = True
         except Exception as erro:
             print(f" [mercado] falha ao consultar abertura turbo, marcando tudo como fechado: {erro!r}")
         return abertos

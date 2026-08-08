@@ -96,13 +96,13 @@ class ExecutorSeguro:
                 self.config.expiracao_minutos,
             )
         except Exception as e:
-            self.risco.cancelar_reserva()
+            self.risco.cancelar_reserva(decisao.ativo)
             self.registro.registrar_falha(decisao, f"excecao_buy:{e}")
             print(f">> {decisao.ativo}: erro ao enviar ({e})")
             return
 
         if not enviada:
-            self.risco.cancelar_reserva()
+            self.risco.cancelar_reserva(decisao.ativo)
             self.registro.registrar_falha(decisao, f"buy_recusado:{id_ordem}")
             print(f">> {decisao.ativo}: IQ recusou a ordem — ERRO BRUTO: {id_ordem}")
             return
@@ -168,7 +168,7 @@ class ExecutorSeguro:
         try:
             self.registro.registrar_resultado(resultado)
         finally:
-            self.risco.registrar_resultado(lucro)
+            self.risco.registrar_resultado(lucro, decisao.ativo)
             resumo = self.risco.resumo()
             print(
                 f">> {decisao.ativo}: resultado={bruto} | lucro={lucro} | "

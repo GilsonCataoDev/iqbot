@@ -33,10 +33,10 @@ class GerenciadorRisco:
         self._lucro = estado.lucro_sessao
         self._lucro_total = estado.lucro_total
         self._ultimo_lucro = estado.ultimo_lucro
-        self._ordem_aberta = estado.ordem_pendente
         self._encerrado = estado.ordem_pendente
         self._motivo_encerramento = "operacao_pendente_banco" if estado.ordem_pendente else None
         self._cooldown_ate: float = 0.0
+        self._ordens_abertas: set[str] = set()
         # Drawdown: rastreia banca pico para calcular drawdown percentual
         self._banca_pico: float = max(config.banca_inicial + estado.lucro_total, config.banca_inicial)
         # Circuit breaker: bloqueia por tempo após N perdas seguidas
@@ -84,7 +84,7 @@ class GerenciadorRisco:
         dia = datetime.fromtimestamp(timestamp_servidor, tz=timezone.utc).date()
         if self._dia is None:
             self._dia = dia
-        elif dia != self._dia and not self._ordem_aberta:
+        elif dia != self._dia and not self._ordens_abertas:
             self._dia = dia
             self._enviadas = 0
             self._finalizadas = 0
@@ -141,7 +141,7 @@ class GerenciadorRisco:
         segundo_no_candle = snapshot.timestamp_servidor % self.config.timeframe_segundos
         if segundo_no_candle > self.config.entrada_max_segundos_no_candle:
             return Autorizacao(False, "entrada_atrasada")
-        if self._ordem_aberta:
+        if snapshot.ativo in self._ordens_abertas:
             return Autorizacao(False, "ordem_ja_aberta")
         if self.config.cooldown_pos_ordem_segundos > 0 and time.time() < self._cooldown_ate:
             return Autorizacao(False, "cooldown_pos_ordem")
@@ -173,19 +173,19 @@ class GerenciadorRisco:
         with self._lock:
             autorizacao = self._avaliar_sem_lock(snapshot, decisao)
             if autorizacao.permitida:
-                self._ordem_aberta = True
+                self._ordens_abertas.add(snapshot.ativo)
                 self._enviadas += 1
             return autorizacao
 
-    def cancelar_reserva(self) -> None:
+    def cancelar_reserva(self, ativo: str) -> None:
         with self._lock:
-            if self._ordem_aberta:
-                self._ordem_aberta = False
+            if ativo in self._ordens_abertas:
+                self._ordens_abertas.discard(ativo)
                 self._enviadas = max(0, self._enviadas - 1)
 
-    def registrar_resultado(self, lucro: float | None) -> None:
+    def registrar_resultado(self, lucro: float | None, ativo: str) -> None:
         with self._lock:
-            self._ordem_aberta = False
+            self._ordens_abertas.discard(ativo)
             if self.config.cooldown_pos_ordem_segundos > 0:
                 self._cooldown_ate = time.time() + self.config.cooldown_pos_ordem_segundos
             self._finalizadas += 1
@@ -234,7 +234,7 @@ class GerenciadorRisco:
                 lucro_total=self._lucro_total,
                 ultimo_lucro=self._ultimo_lucro,
                 banca_atual=self.config.banca_inicial + self._lucro_total,
-                ordem_aberta=self._ordem_aberta,
+                ordem_aberta=bool(self._ordens_abertas),
                 encerrado=self._encerrado,
                 motivo_encerramento=self._motivo_encerramento,
             )

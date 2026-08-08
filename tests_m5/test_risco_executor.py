@@ -74,7 +74,7 @@ class TestRiscoEExecutor(unittest.TestCase):
         self.assertAlmostEqual(executor._valor_da_entrada(), 3.0)
 
         risco.reservar(self.snapshot, self.decisao)
-        risco.registrar_resultado(50.0)  # banca sobe pra 150
+        risco.registrar_resultado(50.0, self.decisao.ativo)  # banca sobe pra 150
         self.assertAlmostEqual(executor._valor_da_entrada(), 4.5)
 
     def test_valor_percentual_banca_respeita_minimo_de_dois_reais(self):
@@ -104,12 +104,12 @@ class TestRiscoEExecutor(unittest.TestCase):
         risco = GerenciadorRisco(replace(self.config, meta_diaria=15.0))
 
         risco.reservar(self.snapshot, self.decisao)
-        risco.registrar_resultado(10.0)
+        risco.registrar_resultado(10.0, self.decisao.ativo)
         self.assertFalse(risco.resumo().encerrado)
         self.assertTrue(risco.avaliar(self.snapshot, self.decisao).permitida)
 
         risco.reservar(self.snapshot, self.decisao)
-        risco.registrar_resultado(5.0)
+        risco.registrar_resultado(5.0, self.decisao.ativo)
         resumo = risco.resumo()
         self.assertTrue(resumo.encerrado)
         self.assertEqual(resumo.motivo_encerramento, "meta_diaria_atingida")
@@ -118,14 +118,14 @@ class TestRiscoEExecutor(unittest.TestCase):
     def test_meta_diaria_desativada_por_padrao(self):
         risco = GerenciadorRisco(self.config)
         risco.reservar(self.snapshot, self.decisao)
-        risco.registrar_resultado(500.0)
+        risco.registrar_resultado(500.0, self.decisao.ativo)
         self.assertFalse(risco.resumo().encerrado)
 
     def test_perdas_consecutivas_nao_encerram_por_padrao(self):
         risco = GerenciadorRisco(self.config)
         for _ in range(10):
             self.assertTrue(risco.reservar(self.snapshot, self.decisao).permitida)
-            risco.registrar_resultado(-1.0)
+            risco.registrar_resultado(-1.0, self.decisao.ativo)
         resumo = risco.resumo()
         self.assertFalse(resumo.encerrado)
 
@@ -133,7 +133,7 @@ class TestRiscoEExecutor(unittest.TestCase):
         risco = GerenciadorRisco(self.config)
         for _ in range(2):
             self.assertTrue(risco.reservar(self.snapshot, self.decisao).permitida)
-            risco.registrar_resultado(-1.0)
+            risco.registrar_resultado(-1.0, self.decisao.ativo)
 
         resumo = risco.resumo()
 

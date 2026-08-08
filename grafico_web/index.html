@@ -5,69 +5,144 @@
 <title>IQ Option M5 — sinais ao vivo</title>
 <script src="https://unpkg.com/lightweight-charts@4.1.3/dist/lightweight-charts.standalone.production.js"></script>
 <style>
-  html, body { margin: 0; background: #131722; font-family: -apple-system, Arial, sans-serif; color: #d1d4dc; }
-  #barra { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; padding: 8px 12px; font-size: 13px; }
-  #ativo { background: #1e222d; color: #d1d4dc; border: 1px solid #363a45; border-radius: 4px; padding: 4px 8px; font-size: 13px; }
-  #status { flex: 1; min-width: 200px; }
-  #camadas { display: flex; gap: 12px; font-size: 12px; color: #9598a1; }
-  #camadas label { display: flex; align-items: center; gap: 4px; cursor: pointer; white-space: nowrap; }
+  :root {
+    --bg: #0d1117; --surface: #161b27; --surface2: #1c2233; --border: #222d42;
+    --text: #c9d1d9; --muted: #6e7989; --accent: #58a6ff;
+    --green: #3fb950; --red: #f85149; --yellow: #e3b341; --purple: #bc8cff;
+    --radius: 8px;
+  }
+  *, *::before, *::after { box-sizing: border-box; }
+  html, body { margin: 0; background: var(--bg); font-family: -apple-system, 'Segoe UI', Arial, sans-serif; color: var(--text); font-size: 13px; }
 
-  #resumo { display: flex; flex-wrap: wrap; gap: 8px; padding: 6px 12px; background: #0e1117; border-bottom: 1px solid #222633; }
-  .resumo-item { font-size: 12px; padding: 3px 8px; border-radius: 4px; background: #1e222d; cursor: pointer; border: 1px solid transparent; white-space: nowrap; }
-  .resumo-item:hover { border-color: #363a45; }
-  .resumo-item.ativo-selecionado { border-color: #ffd700; }
-  .resumo-item.ativo-desligado { opacity: 0.35; }
-  .toggle-ativo { margin-right: 4px; cursor: pointer; accent-color: #26a69a; }
+  /* ── Top bar ── */
+  #barra {
+    display: flex; flex-wrap: wrap; align-items: center; gap: 10px;
+    padding: 8px 16px; background: var(--surface); border-bottom: 1px solid var(--border);
+    position: sticky; top: 0; z-index: 10;
+  }
+  #barra-logo { font-weight: 700; font-size: 14px; color: var(--accent); letter-spacing: .02em; white-space: nowrap; }
+  #ativo {
+    background: var(--surface2); color: var(--text); border: 1px solid var(--border);
+    border-radius: 6px; padding: 5px 10px; font-size: 13px; cursor: pointer; outline: none;
+    transition: border-color .15s;
+  }
+  #ativo:focus { border-color: var(--accent); }
+  #status { flex: 1; min-width: 180px; color: var(--muted); }
+  #camadas { display: flex; gap: 14px; color: var(--muted); }
+  #camadas label { display: flex; align-items: center; gap: 5px; cursor: pointer; white-space: nowrap; user-select: none; }
+  #camadas input[type=checkbox] { accent-color: var(--accent); cursor: pointer; }
+
+  /* ── Asset strip ── */
+  #resumo {
+    display: flex; flex-wrap: wrap; gap: 6px; padding: 6px 16px;
+    background: var(--bg); border-bottom: 1px solid var(--border);
+  }
+  .resumo-item {
+    font-size: 11px; padding: 3px 10px; border-radius: 20px;
+    background: var(--surface2); cursor: pointer; border: 1px solid transparent;
+    white-space: nowrap; transition: border-color .15s, background .15s;
+  }
+  .resumo-item:hover { background: #243047; }
+  .resumo-item.ativo-selecionado { border-color: var(--yellow); color: var(--yellow); }
+  .resumo-item.ativo-desligado { opacity: 0.3; }
+  .toggle-ativo { margin-right: 4px; cursor: pointer; accent-color: var(--green); }
   .resumo-label { pointer-events: none; }
 
-  #chart-preco { width: 100%; height: 50vh; }
+  /* ── Charts ── */
+  #chart-preco  { width: 100%; height: 50vh; }
   #chart-volume { width: 100%; height: 10vh; }
-  #chart-rsi { width: 100%; height: 20vh; }
+  #chart-rsi    { width: 100%; height: 20vh; }
 
-  #legenda { display: flex; flex-wrap: wrap; gap: 14px; padding: 6px 12px; font-size: 11px; color: #9598a1; border-top: 1px solid #222633; }
+  /* ── Legend ── */
+  #legenda {
+    display: flex; flex-wrap: wrap; gap: 12px; padding: 6px 16px;
+    font-size: 11px; color: var(--muted); border-top: 1px solid var(--border);
+    background: var(--bg);
+  }
   #legenda span { display: flex; align-items: center; gap: 5px; white-space: nowrap; }
   .marca { display: inline-block; width: 10px; height: 10px; border-radius: 2px; }
 
-  #painel { display: flex; flex-wrap: wrap; gap: 10px; padding: 8px 12px; background: #0e1117; border-bottom: 1px solid #222633; }
-  .cartao { flex: 1; min-width: 280px; background: #161a25; border: 1px solid #222633; border-radius: 6px; padding: 8px 10px; }
-  .cartao h3 { margin: 0 0 6px; font-size: 12px; letter-spacing: .04em; text-transform: uppercase; color: #787b86; font-weight: 600; }
-  .cartao ul { margin: 0; padding-left: 16px; font-size: 12px; line-height: 1.55; }
-  .cartao p { margin: 0; font-size: 12px; color: #787b86; }
-  .cabecalho-alerta { font-size: 14px; font-weight: 700; margin-bottom: 4px; }
-  .selo-informativo { display: inline-block; margin-left: 8px; padding: 2px 6px; border-radius: 3px; background: rgba(120,123,134,0.2); color: #9598a1; font-size: 9px; letter-spacing: 0; text-transform: none; font-weight: 700; vertical-align: middle; }
-  .alerta-entrada { border-color: #ffd700; }
-  .alerta-aproximando { border-color: #e0b040; }
-  .rodape-alerta { margin-top: 6px; font-size: 11px; color: #9598a1; }
-  .nivel-entrada { margin-top: 6px; padding: 5px 7px; border-radius: 4px; background: #1b2733; font-size: 13px; }
+  /* ── Info panel ── */
+  #painel {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+    gap: 10px; padding: 12px 16px;
+    background: var(--bg); border-bottom: 1px solid var(--border);
+  }
+  .cartao {
+    background: var(--surface); border: 1px solid var(--border);
+    border-radius: var(--radius); padding: 10px 12px;
+    transition: border-color .2s;
+  }
+  .cartao:hover { border-color: #2d3b55; }
+  .cartao h3 {
+    margin: 0 0 8px; font-size: 10px; letter-spacing: .06em;
+    text-transform: uppercase; color: var(--muted); font-weight: 700;
+  }
+  .cartao ul { margin: 0; padding-left: 16px; font-size: 12px; line-height: 1.6; }
+  .cartao p { margin: 0; font-size: 12px; color: var(--muted); }
+
+  /* Alert card */
+  .cabecalho-alerta { font-size: 14px; font-weight: 700; margin-bottom: 6px; }
+  .selo-informativo {
+    display: inline-block; margin-left: 8px; padding: 2px 6px; border-radius: 4px;
+    background: rgba(110,121,137,0.18); color: var(--muted); font-size: 9px;
+    letter-spacing: 0; text-transform: none; font-weight: 700; vertical-align: middle;
+  }
+  .alerta-entrada { border-color: var(--yellow) !important; box-shadow: 0 0 0 1px rgba(227,179,65,.15); }
+  .alerta-aproximando { border-color: #c9973a !important; }
+  .rodape-alerta { margin-top: 6px; font-size: 11px; color: var(--muted); }
+  .nivel-entrada { margin-top: 8px; padding: 6px 8px; border-radius: 6px; background: var(--surface2); font-size: 13px; }
   .nivel-entrada .rodape-alerta { margin: 0; display: inline; }
-  .aviso-noticia { margin-top: 6px; padding: 4px 6px; border-radius: 4px; background: #3a2a12; color: #ffcc80; font-size: 11px; }
-  .instrucao-timing { margin: 8px 0; padding: 10px 12px; border-radius: 4px; font-size: 14px; line-height: 1.5; }
-  .tempo-restante { font-size: 12px; opacity: 0.8; }
-  .noticia-linha { font-size: 12px; padding: 4px 0; border-bottom: 1px solid #222633; }
-  .impacto-High { color: #ef5350; font-weight: 600; }
-  .impacto-Medium { color: #e0b040; }
-  .noticia-iminente { background: rgba(239,83,80,0.12); padding: 4px 6px; border-radius: 4px; margin: 2px 0; animation: piscar 1.5s ease-in-out infinite; }
-  @keyframes piscar { 0%,100% { opacity: 1; } 50% { opacity: 0.6; } }
-  .noticia-recente { background: rgba(224,176,64,0.12); padding: 4px 6px; border-radius: 4px; margin: 2px 0; }
-  .noticia-tag { display: block; font-size: 10px; font-weight: 700; color: #e0b040; margin-top: 2px; }
-  .noticia-discurso { border-left: 3px solid #ef5350; padding-left: 6px; }
-  .noticia-tag-discurso { color: #ef5350; }
+  .aviso-noticia { margin-top: 6px; padding: 5px 7px; border-radius: 5px; background: rgba(58,42,18,.8); color: #ffcc80; font-size: 11px; }
+  .instrucao-timing { margin: 8px 0; padding: 10px 12px; border-radius: 6px; font-size: 14px; line-height: 1.5; }
+  .tempo-restante { font-size: 11px; opacity: 0.75; }
+
+  /* News */
+  .noticia-linha { font-size: 12px; padding: 5px 0; border-bottom: 1px solid var(--border); }
+  .impacto-High { color: var(--red); font-weight: 600; }
+  .impacto-Medium { color: var(--yellow); }
+  .noticia-iminente { background: rgba(248,81,73,.1); padding: 4px 7px; border-radius: 5px; margin: 2px 0; animation: piscar 1.5s ease-in-out infinite; }
+  @keyframes piscar { 0%,100% { opacity: 1; } 50% { opacity: 0.55; } }
+  .noticia-recente { background: rgba(227,179,65,.08); padding: 4px 7px; border-radius: 5px; margin: 2px 0; }
+  .noticia-tag { display: block; font-size: 10px; font-weight: 700; color: var(--yellow); margin-top: 2px; }
+  .noticia-discurso { border-left: 3px solid var(--red); padding-left: 6px; }
+  .noticia-tag-discurso { color: var(--red); }
   .noticia-tempo { white-space: nowrap; font-weight: 600; }
   .noticia-cabecalho { display: flex; justify-content: space-between; gap: 10px; }
-  .noticia-detalhe { font-size: 11px; color: #9598a1; margin-top: 2px; }
-  .noticia-sugestao { font-size: 11px; margin-top: 2px; padding: 3px 6px; background: #1b2733; border-radius: 3px; }
-  .ia-resultado { margin-top: 6px; padding: 5px 8px; background: #1b2733; border-radius: 4px; font-size: 13px; }
-  .setup-linha { padding: 3px 0; border-bottom: 1px solid #1a1d28; font-size: 11px; }
+  .noticia-detalhe { font-size: 11px; color: var(--muted); margin-top: 2px; }
+  .noticia-sugestao { font-size: 11px; margin-top: 2px; padding: 3px 7px; background: var(--surface2); border-radius: 4px; }
+
+  /* AI */
+  .ia-resultado { margin-top: 6px; padding: 6px 8px; background: var(--surface2); border-radius: 6px; font-size: 13px; }
+  #cartao-ia { border-left: 3px solid var(--purple); }
+
+  /* Setup performance */
+  .setup-linha { padding: 4px 0; border-bottom: 1px solid #1a2035; font-size: 11px; }
   .setup-linha:last-child { border-bottom: none; }
-  .setup-validada { border-left: 3px solid #ffd700; padding-left: 6px; }
-  .setup-simulada { opacity: 0.8; }
-  .setup-detalhe { font-size: 10px; color: #9598a1; margin-top: 1px; }
-  #cartao-estrategias { max-height: 220px; overflow-y: auto; }
-  #cartao-ia { border-left: 3px solid #7c4dff; }
+  .setup-validada { border-left: 3px solid var(--yellow); padding-left: 6px; }
+  .setup-simulada { opacity: 0.75; }
+  .setup-detalhe { font-size: 10px; color: var(--muted); margin-top: 1px; }
+  #cartao-estrategias { max-height: 240px; overflow-y: auto; }
+
+  /* Stats card */
+  #cartao-stats { border-left: 3px solid var(--green); }
+  .stats-row {
+    display: flex; align-items: center; gap: 8px;
+    padding: 5px 0; border-bottom: 1px solid #1a2035; font-size: 12px;
+  }
+  .stats-row:last-child { border-bottom: none; }
+  .stats-label { color: var(--muted); font-size: 11px; font-weight: 600; letter-spacing: .03em; min-width: 48px; }
+  .stats-bar-wrap { flex: 1; height: 4px; background: #1c2233; border-radius: 2px; overflow: hidden; }
+  .stats-bar { height: 100%; border-radius: 2px; transition: width .4s ease; }
+  .stats-nums { font-size: 11px; white-space: nowrap; }
+  .win-color { color: var(--green); }
+  .loss-color { color: var(--red); }
 </style>
 </head>
 <body>
   <div id="barra">
+    <span id="barra-logo">IQ M5</span>
     <select id="ativo"><option>carregando...</option></select>
     <div id="status">Conectando...</div>
     <div id="camadas">
@@ -85,6 +160,7 @@
     <div class="cartao" id="cartao-ia"><h3>Opiniao da IA</h3><p>Aguardando sinal para analisar...</p></div>
     <div class="cartao" id="cartao-estrategias"><h3>Reversão (validada) vs Pullback/Bollinger (não validadas)</h3><p>Sem operações suficientes ainda.</p></div>
     <div class="cartao" id="cartao-funil"><h3>Funil de sinais hoje (reversão de vela)</h3><p>Sem dados ainda hoje.</p></div>
+    <div class="cartao" id="cartao-stats"><h3>Entradas hoje</h3><p>Sem dados ainda.</p></div>
   </div>
   <div id="chart-preco"></div>
   <div id="chart-volume"></div>
@@ -730,6 +806,31 @@ function renderizarPainel(dados) {
       `<div class="setup-linha">Confirmados (viraram tentativa de ordem): <strong>${funil.confirmados}</strong></div>` +
       `<div class="setup-linha setup-validada">Executados (ordem real enviada): <strong>${funil.executados}</strong></div>` +
       `<div class="setup-detalhe">Bloqueados: ${bloqueiosTexto}</div>`;
+  }
+
+  const stats = dados.statsGlobais;
+  const cartaoStats = document.getElementById('cartao-stats');
+  if (!stats || (stats.otc.entradas === 0 && stats.normal.entradas === 0)) {
+    cartaoStats.innerHTML = '<h3>Entradas hoje</h3><p>Sem entradas registradas ainda.</p>';
+  } else {
+    const fmtRow = (label, s) => {
+      if (s.entradas === 0) {
+        return `<div class="stats-row"><span class="stats-label">${label}</span><span style="color:var(--muted);font-size:11px">nenhuma</span></div>`;
+      }
+      const wr = s.winrate ?? 0;
+      const barColor = wr >= 60 ? 'var(--green)' : wr >= 45 ? 'var(--yellow)' : 'var(--red)';
+      const lucroStr = s.lucro >= 0 ? `+${s.lucro.toFixed(2)}` : s.lucro.toFixed(2);
+      const lucroClass = s.lucro >= 0 ? 'win-color' : 'loss-color';
+      return `<div class="stats-row">` +
+        `<span class="stats-label">${label}</span>` +
+        `<div class="stats-bar-wrap"><div class="stats-bar" style="width:${wr}%;background:${barColor}"></div></div>` +
+        `<span class="stats-nums">${s.wins}/${s.entradas} &nbsp;<strong style="color:${barColor}">${wr}%</strong> &nbsp;<span class="${lucroClass}">${lucroStr}</span></span>` +
+        `</div>`;
+    };
+    cartaoStats.innerHTML =
+      '<h3>Entradas hoje</h3>' +
+      fmtRow('OTC', stats.otc) +
+      fmtRow('Normal', stats.normal);
   }
 }
 

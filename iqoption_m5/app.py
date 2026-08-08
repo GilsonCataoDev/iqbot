@@ -381,6 +381,7 @@ def main(config: Configuracao | None = None) -> None:
                         **registro.funil_reversao_hoje(),
                         "aproximando": contagem_aproximando_hoje.get(ativo, 0),
                     },
+                    stats_globais=registro.stats_globais(),
                 )
                 grafico_fila.put((ativo, dados_grafico))
             except Exception as erro:
