@@ -89,42 +89,41 @@ def main(config: Configuracao | None = None) -> None:
                 print(f"[{datetime.now():%H:%M:%S}] [grafico-worker] erro: {e}")
 
     def _grafico_rt_worker():
-        """Atualiza candle em formação a cada 1s sem recalcular sinais/desempenho."""
+        """Atualiza só o candle em formação (OHLC) a cada 1s — sem recalcular indicadores."""
         while grafico_thread_viva:
             time.sleep(1.0)
             if grafico is None:
                 continue
-            ativos_ok = grafico.ativos_ativos()
             for ativo in config.ativos:
-                if ativos_ok is not None and ativo not in ativos_ok:
-                    continue
                 base = _cache_dados_rt.get(ativo)
                 if base is None:
                     continue  # aguarda primeira avaliação completa
                 try:
                     sn = mercado.snapshot(ativo)
-                    ind = estrategia.calcular_indicadores(sn.candles, ativo)
+                    ultima = sn.candles.iloc[-1]
                     conv = grafico._unix
+                    hora = conv(sn.candles.index[-1])
+                    novo = {
+                        "time": hora,
+                        "open":  float(ultima.Open),
+                        "high":  float(ultima.High),
+                        "low":   float(ultima.Low),
+                        "close": float(ultima.Close),
+                    }
+                    candles = list(base.get("candles", []))
+                    if not candles:
+                        continue
+                    if candles[-1]["time"] == hora:
+                        candles = candles[:-1] + [novo]
+                    elif hora > candles[-1]["time"]:
+                        candles = candles + [novo]
+                    else:
+                        continue  # dado mais antigo que o cache — ignora
                     grafico_fila.put((ativo, {
                         **base,
                         "atualizado_em": time.time(),
                         "mercadoAberto": bool(sn.mercado_aberto),
-                        "candles": [
-                            {"time": conv(i), "open": float(r.Open), "high": float(r.High),
-                             "low": float(r.Low), "close": float(r.Close)}
-                            for i, r in ind.iterrows()
-                        ],
-                        "volume": [
-                            {"time": conv(i), "value": float(r.Volume),
-                             "color": "#26a69a80" if r.Close >= r.Open else "#ef535080"}
-                            for i, r in ind.iterrows()
-                        ],
-                        "bandaSup":   grafico._serie(ind, "BandaSup",   conv),
-                        "bandaInf":   grafico._serie(ind, "BandaInf",   conv),
-                        "bandaMedia": grafico._serie(ind, "BandaMedia", conv),
-                        "emaMicro":   grafico._serie(ind, "EMA_Micro",  conv),
-                        "emaMacro":   grafico._serie(ind, "EMA_Macro",  conv),
-                        "rsi":        grafico._serie(ind, "RSI",        conv),
+                        "candles": candles,
                     }))
                 except Exception:
                     pass
