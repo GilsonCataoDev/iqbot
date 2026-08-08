@@ -215,6 +215,9 @@ def main(config: Configuracao | None = None) -> None:
             print(f"Gráfico indisponível ({erro}); o robô continuará protegido no terminal.")
             grafico = None
 
+    _retry_ativos: set[str] = set()
+    _MOTIVOS_SOFT = {"mercado_fechado", "payout_indisponivel"}
+
     def _avaliar_ativo(ativo: str, snapshot, agora_utc: datetime) -> None:
         print(f"[{datetime.now():%H:%M:%S}] [INICIO] {ativo}")
         candle_fechado = snapshot.candles.index[-2]
@@ -398,8 +401,6 @@ def main(config: Configuracao | None = None) -> None:
             print(f"[{datetime.now():%H:%M:%S}] [FIM] {ativo} (fora da janela, slot preservado)")
             return
 
-        ultimo_candle_processado[ativo] = candle_fechado
-
         ctx_candidato = ia_contexto(
             ativo, config.rotulo_timeframe, alerta, indicadores, list(proximas_noticias)
         )
@@ -440,6 +441,7 @@ def main(config: Configuracao | None = None) -> None:
         payout = f"{snapshot.payout:.0%}" if snapshot.payout is not None else "indisponível"
         decisoes_todas = estrategia.avaliar_todas(ativo, indicadores)
         if not decisoes_todas:
+            ultimo_candle_processado[ativo] = candle_fechado
             ultima_explicacao[ativo] = []
             print(
                 f"[{datetime.now():%H:%M:%S}] {ativo}: sem sinal | "
@@ -457,6 +459,9 @@ def main(config: Configuracao | None = None) -> None:
 
         proxima_vela = pd.Timestamp(indicadores.index[-1])
         todos_motivos: list[str] = []
+        houve_execucao = False
+        algum_bloqueio_definitivo = False  # qualquer coisa que não seja bloqueio temporário
+
         for decisao in decisoes_todas:
             setup_nome = decisao.detalhes.get("setup", decisao.motivo)
             if setup_nome != "fibo_sr_retracao":
@@ -494,17 +499,38 @@ def main(config: Configuracao | None = None) -> None:
             )
             if not par_validado:
                 print(f"    [{setup_nome}] par nao validado, ignorado (use backtest offline)")
+                algum_bloqueio_definitivo = True
             elif ia_discorda and not favorece_noticia:
                 print(
                     f"    [IA] BLOQUEOU [{setup_nome}]: IA sugere {ia_atual.direcao_sugerida} "
                     f"({ia_atual.confianca}) contra o sinal {decisao.direcao.upper()}"
                 )
+                algum_bloqueio_definitivo = True
             elif autorizacao.permitida:
                 if ia_discorda and favorece_noticia:
                     print(
                         "    [IA] discordou mas a noticia confirmada a favor do sinal tem prioridade"
                     )
                 executor.executar(snapshot, decisao)
+                houve_execucao = True
+            elif autorizacao.motivo not in _MOTIVOS_SOFT:
+                algum_bloqueio_definitivo = True
+
+        # Commit slot apenas quando a avaliação foi conclusiva.
+        # Se todos os bloqueios foram temporários (mercado_fechado/payout_indisponivel),
+        # não commita — o próximo tick reavalia dentro da janela.
+        if houve_execucao or algum_bloqueio_definitivo:
+            ultimo_candle_processado[ativo] = candle_fechado
+        else:
+            tempo_restante_janela = config.entrada_max_segundos_no_candle - segundo_no_candle
+            if tempo_restante_janela > 5:
+                _retry_ativos.add(ativo)
+                print(
+                    f"[{datetime.now():%H:%M:%S}] {ativo}: bloqueio temporário — "
+                    f"retry em ~5s (janela: {tempo_restante_janela:.0f}s restantes)"
+                )
+            else:
+                ultimo_candle_processado[ativo] = candle_fechado
 
         ultima_explicacao[ativo] = todos_motivos
         print(f"[{datetime.now():%H:%M:%S}] [FIM] {ativo}")
@@ -568,6 +594,12 @@ def main(config: Configuracao | None = None) -> None:
                 sono = seg_restantes - margem
             else:
                 sono = seg_restantes + 5.0
+
+            # Se algum ativo ficou bloqueado por razão temporária dentro da janela,
+            # acorda em 5s para retry sem esperar o próximo candle.
+            if _retry_ativos:
+                sono = min(sono, 5.0)
+            _retry_ativos.clear()
 
             sono = max(3.0, sono)
 
