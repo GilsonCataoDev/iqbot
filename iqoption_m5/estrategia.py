@@ -747,13 +747,14 @@ class EstrategiaReversaoM5:
     def _avaliar_todas_estrategias(
         self, ativo: str, df: pd.DataFrame, indice: int
     ) -> list[Decisao]:
+        # Setups de continuação/confirmação — avaliados no candle FECHADO.
+        # pin_bar_sr, sr_rejeicao e engulfing_sr foram movidos para
+        # avaliar_reversoes(), onde são avaliados no candle EM FORMAÇÃO.
         c = self.config
         resultado = []
         for fn in (
             self._avaliar_indicadores,
             self._avaliar_pullback_indicadores,
-            self._avaliar_pin_bar,
-            self._avaliar_sr_rejeicao,
             self._avaliar_fibo_sr_retracao,
             self._avaliar_macd,
         ):
@@ -764,7 +765,6 @@ class EstrategiaReversaoM5:
             except Exception:
                 pass
         for ativo_flag, fn in (
-            (c.engulfing_sr_ativo, self._avaliar_engulfing_sr),
             (c.divergencia_rsi_ativo, self._avaliar_divergencia_rsi),
             (c.bollinger_squeeze_ativo, self._avaliar_bollinger_squeeze),
         ):
@@ -772,6 +772,33 @@ class EstrategiaReversaoM5:
                 continue
             try:
                 d = fn(ativo, df, indice)
+                if d is not None:
+                    resultado.append(d)
+            except Exception:
+                pass
+        return resultado
+
+    def avaliar_reversoes(self, ativo: str, indicadores: pd.DataFrame) -> list[Decisao]:
+        """Setups de reversão avaliados no candle EM FORMAÇÃO (entrada na mesma vela).
+
+        sr_rejeicao: toca suporte/resistência intra-candle e já está voltando.
+        pin_bar_sr: pin bar no candle fechado, confirmação parcial no candle atual.
+        """
+        minimo = max(self.config.ema_macro_periodo, self.config.atr_regime_janela) + 3
+        if len(indicadores) < minimo:
+            return []
+        indice = len(indicadores) - 1  # candle em formação
+        resultado = []
+        for fn in (self._avaliar_sr_rejeicao, self._avaliar_pin_bar):
+            try:
+                d = fn(ativo, indicadores, indice)
+                if d is not None:
+                    resultado.append(d)
+            except Exception:
+                pass
+        if self.config.engulfing_sr_ativo:
+            try:
+                d = self._avaliar_engulfing_sr(ativo, indicadores, indice)
                 if d is not None:
                     resultado.append(d)
             except Exception:
@@ -801,9 +828,26 @@ class EstrategiaReversaoM5:
         inicio = max(self.config.ema_macro_periodo, self.config.atr_regime_janela) + 1
         sinais = []
         for indice in range(inicio, len(df) - 1):
+            # Continuação: candle fechado
             sinal = self._avaliar_estrategias(ativo, df, indice)
             if sinal is not None:
                 sinais.append(sinal)
+            # Reversão: mesmo índice (historicamente, cada candle já é "fechado",
+            # mas representamos o sinal como se fosse detectado naquele candle)
+            for fn in (self._avaliar_sr_rejeicao, self._avaliar_pin_bar):
+                try:
+                    d = fn(ativo, df, indice)
+                    if d is not None:
+                        sinais.append(d)
+                except Exception:
+                    pass
+            if self.config.engulfing_sr_ativo:
+                try:
+                    d = self._avaliar_engulfing_sr(ativo, df, indice)
+                    if d is not None:
+                        sinais.append(d)
+                except Exception:
+                    pass
         return sinais
 
     def possivel_entrada(self, ativo: str, candles: pd.DataFrame) -> dict | None:

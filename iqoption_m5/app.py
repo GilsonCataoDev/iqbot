@@ -460,15 +460,28 @@ def main(config: Configuracao | None = None) -> None:
 
         status = "aberto" if snapshot.mercado_aberto else "fechado"
         payout = f"{snapshot.payout:.0%}" if snapshot.payout is not None else "indisponível"
-        decisoes_todas = estrategia.avaliar_todas(ativo, indicadores)
+
+        # Continuação: avaliada no candle FECHADO (sinal confirmado no close)
+        decisoes_continuacao = estrategia.avaliar_todas(ativo, indicadores)
+        # Reversão: avaliada no candle EM FORMAÇÃO (entra na mesma vela que toca o nível)
+        decisoes_reversao = estrategia.avaliar_reversoes(ativo, indicadores)
+        decisoes_todas = decisoes_continuacao + decisoes_reversao
+
         if not decisoes_todas:
-            ultimo_candle_processado[ativo] = candle_fechado
             ultima_explicacao[ativo] = []
-            print(
-                f"[{datetime.now():%H:%M:%S}] {ativo}: sem sinal | "
-                f"mercado={status} payout={payout} candle={candle_fechado}"
-            )
-            print(f"[{datetime.now():%H:%M:%S}] [FIM] {ativo}")
+            dentro_da_janela = segundo_no_candle < config.entrada_max_segundos_no_candle
+            if dentro_da_janela and snapshot.mercado_aberto:
+                # Ainda dentro da janela — aguarda toque intra-candle de reversão.
+                # Não marca slot para não perder sinal que apareça nos próximos 5s.
+                _retry_ativos.add(ativo)
+                print(f"[{datetime.now():%H:%M:%S}] [FIM] {ativo}")
+            else:
+                ultimo_candle_processado[ativo] = candle_fechado
+                print(
+                    f"[{datetime.now():%H:%M:%S}] {ativo}: sem sinal | "
+                    f"mercado={status} payout={payout} candle={candle_fechado}"
+                )
+                print(f"[{datetime.now():%H:%M:%S}] [FIM] {ativo}")
             return
 
         aviso_noticia = calendario.aviso(ativo, agora_utc)
@@ -478,6 +491,8 @@ def main(config: Configuracao | None = None) -> None:
             ia_atual = parecer_ia.get(ativo)
         par_validado = not config.pares_validados or ativo in config.pares_validados
 
+        # Reversões entram na mesma vela em formação — candle_hora já aponta para
+        # indicadores.index[-1], que é o mesmo valor que proxima_vela abaixo.
         proxima_vela = pd.Timestamp(indicadores.index[-1])
         todos_motivos: list[str] = []
         houve_execucao = False
