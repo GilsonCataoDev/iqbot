@@ -119,8 +119,9 @@ class GerenciadorRisco:
         # 1. Kill switch (arquivo externo)
         if kill_switch_ativo():
             return Autorizacao(False, "kill_switch")
-        # 2. Horário bloqueado
-        if self._horario_bloqueado(snapshot.timestamp_servidor):
+        # 2. Horário bloqueado — OTC é sintético e opera 24/7, não se aplica
+        if (self._horario_bloqueado(snapshot.timestamp_servidor)
+                and not snapshot.ativo.upper().endswith("-OTC")):
             return Autorizacao(False, "horario_bloqueado")
         if self.config.conta not in ("PRACTICE", "REAL"):
             return Autorizacao(False, "conta_invalida")
