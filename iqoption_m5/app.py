@@ -72,20 +72,66 @@ def main(config: Configuracao | None = None) -> None:
     # --- Worker do gráfico em thread dedicada (não bloqueia o loop) ---
     grafico_fila: Queue = Queue()
     grafico_thread_viva = True
+    # Cache dos últimos dados completos por ativo (sinais, desempenho, alertas…)
+    # O worker RT reutiliza esses campos e só substitui os dependentes de preço.
+    _cache_dados_rt: dict[str, dict] = {}
 
     def _grafico_worker():
         while grafico_thread_viva:
             try:
                 ativo, dados = grafico_fila.get(timeout=0.5)
                 if grafico is not None:
+                    _cache_dados_rt[ativo] = dados
                     grafico.atualizar(ativo, dados)
             except Empty:
                 continue
             except Exception as e:
                 print(f"[{datetime.now():%H:%M:%S}] [grafico-worker] erro: {e}")
 
+    def _grafico_rt_worker():
+        """Atualiza candle em formação a cada 1s sem recalcular sinais/desempenho."""
+        while grafico_thread_viva:
+            time.sleep(1.0)
+            if grafico is None:
+                continue
+            ativos_ok = grafico.ativos_ativos()
+            for ativo in config.ativos:
+                if ativos_ok is not None and ativo not in ativos_ok:
+                    continue
+                base = _cache_dados_rt.get(ativo)
+                if base is None:
+                    continue  # aguarda primeira avaliação completa
+                try:
+                    sn = mercado.snapshot(ativo)
+                    ind = estrategia.calcular_indicadores(sn.candles, ativo)
+                    conv = grafico._unix
+                    grafico_fila.put((ativo, {
+                        **base,
+                        "atualizado_em": time.time(),
+                        "mercadoAberto": bool(sn.mercado_aberto),
+                        "candles": [
+                            {"time": conv(i), "open": float(r.Open), "high": float(r.High),
+                             "low": float(r.Low), "close": float(r.Close)}
+                            for i, r in ind.iterrows()
+                        ],
+                        "volume": [
+                            {"time": conv(i), "value": float(r.Volume),
+                             "color": "#26a69a80" if r.Close >= r.Open else "#ef535080"}
+                            for i, r in ind.iterrows()
+                        ],
+                        "bandaSup":   grafico._serie(ind, "BandaSup",   conv),
+                        "bandaInf":   grafico._serie(ind, "BandaInf",   conv),
+                        "bandaMedia": grafico._serie(ind, "BandaMedia", conv),
+                        "emaMicro":   grafico._serie(ind, "EMA_Micro",  conv),
+                        "emaMacro":   grafico._serie(ind, "EMA_Macro",  conv),
+                        "rsi":        grafico._serie(ind, "RSI",        conv),
+                    }))
+                except Exception:
+                    pass
+
     if grafico is not None:
-        threading.Thread(target=_grafico_worker, name="grafico-io", daemon=True).start()
+        threading.Thread(target=_grafico_worker,    name="grafico-io", daemon=True).start()
+        threading.Thread(target=_grafico_rt_worker, name="grafico-rt", daemon=True).start()
 
     ultimo_candle_processado = {ativo: None for ativo in config.ativos}
     candle_historico_grafico = {ativo: None for ativo in config.ativos}
