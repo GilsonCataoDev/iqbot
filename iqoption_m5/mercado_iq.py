@@ -360,7 +360,11 @@ class MercadoIQ:
     def aguardar_resultado(self, id_ordem: object) -> object:
         if not self.config.confiar_resultado_automatico:
             return None
-        limite = time.monotonic() + self.config.expiracao_minutos * 60 + 90
+        # Aguarda a maior parte do tempo de expiração antes de checar —
+        # a IQ retorna win="win" para opções ainda abertas, causando falso-positivo.
+        espera_inicial = max(0.0, self.config.expiracao_minutos * 60 - 30)
+        time.sleep(espera_inicial)
+        limite = time.monotonic() + 120
         while time.monotonic() < limite:
             resultado = self.consultar_resultado(id_ordem, timeout_segundos=6.0)
             if resultado is not None:
@@ -443,6 +447,10 @@ class MercadoIQ:
 
     @staticmethod
     def _extrair_lucro_historico(ordem: dict) -> object | None:
+        # Rejeita opções ainda abertas — a IQ pode retornar win="win" antes de expirar
+        status = str(ordem.get("status", "")).strip().lower()
+        if status in {"open", "pending", "in-progress", "in_progress", "active"}:
+            return None
         for chave in ("pnl_net", "net_profit"):
             if ordem.get(chave) is not None:
                 try:
