@@ -216,7 +216,9 @@ def main(config: Configuracao | None = None) -> None:
             grafico = None
 
     _retry_ativos: set[str] = set()
-    _MOTIVOS_SOFT = {"mercado_fechado", "payout_indisponivel"}
+    # mercado_fechado só é soft para OTC (pode reabrir em minutos por manutenção).
+    # Mercado normal fechado é definitivo — não há ponto em retentar por 200s.
+    _MOTIVOS_SOFT = {"payout_indisponivel"}
 
     def _avaliar_ativo(ativo: str, snapshot, agora_utc: datetime) -> None:
         print(f"[{datetime.now():%H:%M:%S}] [INICIO] {ativo}")
@@ -531,12 +533,15 @@ def main(config: Configuracao | None = None) -> None:
                     )
                 executor.executar(snapshot, decisao)
                 houve_execucao = True
+            elif autorizacao.motivo == "mercado_fechado" and e_sintetico(ativo):
+                # OTC fechado temporariamente (manutenção IQ) — retry dentro da janela
+                pass
             elif autorizacao.motivo not in _MOTIVOS_SOFT:
                 algum_bloqueio_definitivo = True
 
         # Commit slot apenas quando a avaliação foi conclusiva.
-        # Se todos os bloqueios foram temporários (mercado_fechado/payout_indisponivel),
-        # não commita — o próximo tick reavalia dentro da janela.
+        # Soft blocks (payout_indisponivel, mercado_fechado OTC): retry dentro da janela.
+        # Hard blocks (mercado normal fechado, IA, etc.): commit imediato.
         if houve_execucao or algum_bloqueio_definitivo:
             ultimo_candle_processado[ativo] = candle_fechado
         else:
