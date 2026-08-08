@@ -114,7 +114,7 @@ def main(config: Configuracao | None = None) -> None:
 
     def _pode_atualizar_grafico(ativo: str) -> bool:
         agora = time.time()
-        if agora - _ultimo_grafico_por_ativo.get(ativo, 0) > 3.0:
+        if agora - _ultimo_grafico_por_ativo.get(ativo, 0) > 1.0:
             _ultimo_grafico_por_ativo[ativo] = agora
             return True
         return False

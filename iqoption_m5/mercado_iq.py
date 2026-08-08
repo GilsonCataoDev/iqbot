@@ -185,7 +185,11 @@ class MercadoIQ:
                 if isinstance(candidato, dict):
                     entrada = candidato
                     break
-            valor = entrada.get("turbo") if isinstance(entrada, dict) else None
+            # Tenta "turbo" primeiro (opção de 5 min); fallback para "binary"
+            if isinstance(entrada, dict):
+                valor = entrada.get("turbo") if entrada.get("turbo") is not None else entrada.get("binary")
+            else:
+                valor = None
             novos_payouts[ativo] = float(valor) if isinstance(valor, (int, float)) else None
             if novos_payouts[ativo] is None:
                 faltando_payout.append(ativo)
