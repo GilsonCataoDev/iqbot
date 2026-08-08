@@ -1,7 +1,7 @@
 import json
 import threading
 import time
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 
 from .config import Configuracao
@@ -81,7 +81,7 @@ class GerenciadorRisco:
             self._motivo_encerramento = "piso_banca_atingido"
 
     def _atualizar_dia(self, timestamp_servidor: int) -> None:
-        dia = datetime.fromtimestamp(timestamp_servidor).date()
+        dia = datetime.fromtimestamp(timestamp_servidor, tz=timezone.utc).date()
         if self._dia is None:
             self._dia = dia
         elif dia != self._dia and not self._ordem_aberta:
@@ -99,7 +99,7 @@ class GerenciadorRisco:
         if cfg is None:
             return False
         (h_ini, m_ini), (h_fim, m_fim) = cfg
-        dt = datetime.utcfromtimestamp(timestamp_servidor)
+        dt = datetime.fromtimestamp(timestamp_servidor, tz=timezone.utc)
         minuto_atual = dt.hour * 60 + dt.minute
         minuto_ini = h_ini * 60 + m_ini
         minuto_fim = h_fim * 60 + m_fim

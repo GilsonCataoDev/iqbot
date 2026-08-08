@@ -1,7 +1,11 @@
 import threading
 import time
-import winsound
 from dataclasses import replace
+
+try:
+    import winsound
+except ImportError:
+    winsound = None  # type: ignore[assignment]
 from datetime import datetime, timedelta, timezone
 from queue import Empty, Queue
 
@@ -23,12 +27,17 @@ except ImportError:
 
 
 def _alerta_sonoro(tipo: str) -> None:
-    if tipo == "entrada":
-        winsound.Beep(1000, 500)
-        winsound.Beep(1200, 300)
-        winsound.Beep(1400, 300)
-    else:
-        winsound.Beep(800, 400)
+    if winsound is None:
+        return
+    try:
+        if tipo == "entrada":
+            winsound.Beep(1000, 500)
+            winsound.Beep(1200, 300)
+            winsound.Beep(1400, 300)
+        else:
+            winsound.Beep(800, 400)
+    except Exception:
+        pass
 
 
 def _notificar_desktop(titulo: str, mensagem: str) -> None:
@@ -334,6 +343,15 @@ def main(config: Configuracao | None = None) -> None:
         if ultimo_candle_processado[ativo] == candle_fechado:
             print(f"[{datetime.now():%H:%M:%S}] [FIM] {ativo}")
             return
+
+        # Fora da janela de entrada o risco bloquearia qualquer ordem por
+        # 'entrada_atrasada'. Se marcarmos o candle como processado aqui, o
+        # próximo tick (já no candle seguinte) vai avaliar o candle recém-fechado
+        # em vez do candle cujo sinal ainda estava pendente — entrada uma vela atrasada.
+        if segundo_no_candle > config.entrada_max_segundos_no_candle:
+            print(f"[{datetime.now():%H:%M:%S}] [FIM] {ativo} (fora da janela, slot preservado)")
+            return
+
         ultimo_candle_processado[ativo] = candle_fechado
 
         ctx_candidato = ia_contexto(

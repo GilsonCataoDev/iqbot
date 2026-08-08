@@ -1,6 +1,10 @@
 import threading
-import winsound
 from datetime import datetime
+
+try:
+    import winsound
+except ImportError:
+    winsound = None  # type: ignore[assignment]
 
 from .config import Configuracao
 from .interfaces import MercadoExecutor

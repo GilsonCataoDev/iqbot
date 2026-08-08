@@ -51,6 +51,17 @@ class MercadoIQ:
         if not conectado:
             raise MercadoIndisponivel(f"Falha ao conectar na IQ Option: {motivo}")
         api.change_balance(self.config.conta)
+        # A troca de saldo é assíncrona (WebSocket). Aguarda e tenta confirmar.
+        time.sleep(0.8)
+        try:
+            modo = str(api.get_balance_mode()).upper()
+            if self.config.conta.upper() not in modo:
+                print(
+                    f" [WARN] change_balance({self.config.conta!r}) pode não ter surtido efeito "
+                    f"(modo atual: {modo!r}). Verifique antes de operar dinheiro real."
+                )
+        except Exception:
+            pass
         return api
 
     @staticmethod
@@ -140,9 +151,10 @@ class MercadoIQ:
             # OTC é sintético e opera 24/7 — se a API não retornou, assume aberto
             for ativo_faltante in faltando:
                 if ativo_faltante.upper().endswith("-OTC"):
-                    abertos[ativo_faltante] = True
+                    ultimo_estado = self._mercado_aberto.get(ativo_faltante, True)
+                    abertos[ativo_faltante] = ultimo_estado
                     resolvidos.add(ativo_faltante)
-                    print(f" [mercado] {ativo_faltante} nao encontrado na API, assumindo aberto (OTC 24/7)")
+                    print(f" [mercado] {ativo_faltante} ausente na resposta, mantendo estado anterior: {'aberto' if ultimo_estado else 'fechado'}")
             faltando = [a for a in self.config.ativos if a not in resolvidos]
             if faltando:
                 print(f" [mercado] ativos NAO encontrados na resposta da IQ: {faltando}")
@@ -293,9 +305,10 @@ class MercadoIQ:
             except Exception as e:
                 print(f" [DIAG] {ativo}: buy() ERRO: {e!r}")
 
-            # Tentativa 3: retry buyv3/buy após 1s
-            print(f" [DIAG] {ativo}: retry após 1s...")
-            time.sleep(1.0)
+        # Tentativa 3: lock liberado durante o sleep para não bloquear snapshots
+        print(f" [DIAG] {ativo}: retry após 1s...")
+        time.sleep(1.0)
+        with self._lock_api:
             if id_fresco is not None:
                 try:
                     resultado, id_ordem = self._comprar_com_id(valor, id_fresco, direcao, expiracao_minutos)
@@ -370,13 +383,15 @@ class MercadoIQ:
                 if isinstance(posicao, int):
                     # Se existe um candle posterior, o candle 'alvo' já fechou
                     if posicao < len(buffer.index) - 1:
+                        abertura = float(buffer.iloc[posicao]["Open"])
                         fechamento = float(buffer.iloc[posicao]["Close"])
-                        if fechamento == preco_entrada:
+                        if fechamento == abertura:
                             return "equal"
-                        subiu = fechamento > preco_entrada
+                        subiu = fechamento > abertura
                         venceu = subiu if direcao == "call" else not subiu
-                        print(f" [DIAG-RES] {ativo}: expiracao={alvo}, entrada={preco_entrada}, "
-                              f"fechamento={fechamento}, direcao={direcao}, resultado={'win' if venceu else 'loss'}")
+                        print(f" [DIAG-RES] {ativo}: expiracao={alvo}, sinal={preco_entrada:.5f}, "
+                              f"abertura={abertura:.5f}, fechamento={fechamento:.5f}, "
+                              f"direcao={direcao}, resultado={'win' if venceu else 'loss'}")
                         return "win" if venceu else "loss"
                     # Se não existe posterior, o candle ainda está se formando
             time.sleep(2.0)
@@ -434,7 +449,7 @@ class MercadoIQ:
     ) -> object | None:
         api_baixo_nivel = self._api.api
         api_baixo_nivel.get_options_v2_data = None
-        api_baixo_nivel.get_options_v2(100, "binary,turbo")
+        api_baixo_nivel.get_options_v2(500, "binary,turbo")
         limite = time.monotonic() + timeout_segundos
         while api_baixo_nivel.get_options_v2_data is None:
             if time.monotonic() >= limite:
