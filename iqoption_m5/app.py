@@ -226,6 +226,25 @@ def main(config: Configuracao | None = None) -> None:
         segundo_no_candle = snapshot.timestamp_servidor % config.timeframe_segundos
         segundos_restantes = config.timeframe_segundos - segundo_no_candle
 
+        # Detecta lag de stream: dentro da janela de entrada, verifica se o buffer
+        # já atualizou index[-2] para o candle que acabou de fechar. Se ainda mostra
+        # o candle anterior, agenda retry em 5s para não avaliar dado desatualizado.
+        if segundo_no_candle < config.entrada_max_segundos_no_candle:
+            ts_inicio_atual = snapshot.timestamp_servidor - segundo_no_candle
+            ts_fechado_esperado = ts_inicio_atual - config.timeframe_segundos
+            cf = candle_fechado
+            ts_fechado_real = int(
+                (cf if cf.tzinfo else cf.tz_localize("UTC")).timestamp()
+            )
+            if ts_fechado_real < ts_fechado_esperado - 1:
+                lag = ts_fechado_esperado - ts_fechado_real
+                print(
+                    f"[{datetime.now():%H:%M:%S}] {ativo}: buffer desatualizado "
+                    f"({lag}s atrás) — retry em 5s"
+                )
+                _retry_ativos.add(ativo)
+                return
+
         proximas_noticias = []
         for evento in calendario.proximos(ativo, agora_utc, horas=8)[:6]:
             item = {
