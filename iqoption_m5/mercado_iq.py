@@ -175,7 +175,16 @@ class MercadoIQ:
         novos_payouts = {}
         faltando_payout = []
         for ativo in self.config.ativos:
-            entrada = lucros.get(ativo) or lucros.get(f"{ativo}-op")
+            # Para OTC (ex: "EURUSD-OTC") a API retorna a chave como "EURUSD-op".
+            # Tentamos: nome-exato → base+"-op" → base → nome+"-op" → variantes lowercase.
+            base = ativo[:-4] if ativo.upper().endswith("-OTC") else ativo
+            entrada = None
+            for chave in (ativo, f"{base}-op", base, f"{ativo}-op",
+                          ativo.lower(), f"{base.lower()}-op", base.lower()):
+                candidato = lucros.get(chave)
+                if isinstance(candidato, dict):
+                    entrada = candidato
+                    break
             valor = entrada.get("turbo") if isinstance(entrada, dict) else None
             novos_payouts[ativo] = float(valor) if isinstance(valor, (int, float)) else None
             if novos_payouts[ativo] is None:
@@ -183,7 +192,8 @@ class MercadoIQ:
         if faltando_payout and lucros:
             print(f" [mercado] payout indisponivel pra: {faltando_payout}")
             for ativo_faltante in faltando_payout:
-                parecidos = [k for k in lucros.keys() if ativo_faltante.split("-")[0] in k]
+                busca = ativo_faltante.split("-")[0].lower()
+                parecidos = [k for k in lucros.keys() if busca in k.lower()]
                 print(f" [mercado] chaves de payout parecidas com '{ativo_faltante}': {parecidos or 'NENHUM'}")
         self._mercado_aberto = novos_abertos
         self._payouts = novos_payouts
