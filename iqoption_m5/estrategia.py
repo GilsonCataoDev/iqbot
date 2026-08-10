@@ -1,8 +1,28 @@
+import logging
+
 import numpy as np
 import pandas as pd
 
 from .config import Configuracao
 from .modelos import Decisao
+
+logger = logging.getLogger(__name__)
+
+PRIORIDADE_SETUP: dict[str, int] = {
+    "pullback_confluencia":   1,
+    "fibo_sr_retracao":       2,
+    "reversao_confluencia":   3,
+    "reversao_bollinger_rsi": 4,
+    "sr_rejeicao":            5,
+    "engulfing_sr":           6,
+    "pin_bar_sr":             7,
+    "pullback":               8,
+    "bollinger_squeeze":      9,
+    "divergencia_rsi":       10,
+    "macd_crossover":        11,
+    "reversao_candle":       12,
+}
+_PRIORIDADE_DEFAULT = 99
 
 
 class EstrategiaReversaoM5:
@@ -12,6 +32,8 @@ class EstrategiaReversaoM5:
         self.config = config
         self._cache_indicadores: dict[str, pd.DataFrame] = {}
         self._cache_ultimo_fechado: dict[str, pd.Timestamp] = {}
+        self._erros_consecutivos: dict[str, int] = {}
+        self._estrategias_desativadas: set[str] = set()
 
     def calcular_indicadores(self, candles: pd.DataFrame, ativo: str = "") -> pd.DataFrame:
         if not ativo or len(candles) < 3:
@@ -758,24 +780,54 @@ class EstrategiaReversaoM5:
             self._avaliar_fibo_sr_retracao,
             self._avaliar_macd,
         ):
+            nome = fn.__name__
+            if nome in self._estrategias_desativadas:
+                continue
             try:
                 d = fn(ativo, df, indice)
                 if d is not None:
                     resultado.append(d)
-            except Exception:
-                pass
+                self._erros_consecutivos[nome] = 0
+            except Exception as exc:
+                n = self._erros_consecutivos.get(nome, 0) + 1
+                self._erros_consecutivos[nome] = n
+                if n == 1:
+                    logger.warning("[%s] erro #%d: %s", nome, n, exc)
+                elif n == 2:
+                    logger.warning("[%s] erro #%d (consecutivo): %s", nome, n, exc)
+                elif n >= 3:
+                    logger.error(
+                        "[%s] desativada após %d erros consecutivos. Reinicie o processo para reativar.",
+                        nome, n,
+                    )
+                    self._estrategias_desativadas.add(nome)
         for ativo_flag, fn in (
             (c.divergencia_rsi_ativo, self._avaliar_divergencia_rsi),
             (c.bollinger_squeeze_ativo, self._avaliar_bollinger_squeeze),
         ):
             if not ativo_flag:
                 continue
+            nome = fn.__name__
+            if nome in self._estrategias_desativadas:
+                continue
             try:
                 d = fn(ativo, df, indice)
                 if d is not None:
                     resultado.append(d)
-            except Exception:
-                pass
+                self._erros_consecutivos[nome] = 0
+            except Exception as exc:
+                n = self._erros_consecutivos.get(nome, 0) + 1
+                self._erros_consecutivos[nome] = n
+                if n == 1:
+                    logger.warning("[%s] erro #%d: %s", nome, n, exc)
+                elif n == 2:
+                    logger.warning("[%s] erro #%d (consecutivo): %s", nome, n, exc)
+                elif n >= 3:
+                    logger.error(
+                        "[%s] desativada após %d erros consecutivos. Reinicie o processo para reativar.",
+                        nome, n,
+                    )
+                    self._estrategias_desativadas.add(nome)
         return resultado
 
     def avaliar_reversoes(self, ativo: str, indicadores: pd.DataFrame) -> list[Decisao]:
@@ -790,26 +842,63 @@ class EstrategiaReversaoM5:
         indice = len(indicadores) - 1  # candle em formação
         resultado = []
         for fn in (self._avaliar_sr_rejeicao, self._avaliar_pin_bar):
+            nome = fn.__name__
+            if nome in self._estrategias_desativadas:
+                continue
             try:
                 d = fn(ativo, indicadores, indice)
                 if d is not None:
                     resultado.append(d)
-            except Exception:
-                pass
+                self._erros_consecutivos[nome] = 0
+            except Exception as exc:
+                n = self._erros_consecutivos.get(nome, 0) + 1
+                self._erros_consecutivos[nome] = n
+                if n == 1:
+                    logger.warning("[%s] erro #%d: %s", nome, n, exc)
+                elif n == 2:
+                    logger.warning("[%s] erro #%d (consecutivo): %s", nome, n, exc)
+                elif n >= 3:
+                    logger.error(
+                        "[%s] desativada após %d erros consecutivos. Reinicie o processo para reativar.",
+                        nome, n,
+                    )
+                    self._estrategias_desativadas.add(nome)
         if self.config.engulfing_sr_ativo:
-            try:
-                d = self._avaliar_engulfing_sr(ativo, indicadores, indice)
-                if d is not None:
-                    resultado.append(d)
-            except Exception:
-                pass
+            nome = self._avaliar_engulfing_sr.__name__
+            if nome not in self._estrategias_desativadas:
+                try:
+                    d = self._avaliar_engulfing_sr(ativo, indicadores, indice)
+                    if d is not None:
+                        resultado.append(d)
+                    self._erros_consecutivos[nome] = 0
+                except Exception as exc:
+                    n = self._erros_consecutivos.get(nome, 0) + 1
+                    self._erros_consecutivos[nome] = n
+                    if n == 1:
+                        logger.warning("[%s] erro #%d: %s", nome, n, exc)
+                    elif n == 2:
+                        logger.warning("[%s] erro #%d (consecutivo): %s", nome, n, exc)
+                    elif n >= 3:
+                        logger.error(
+                            "[%s] desativada após %d erros consecutivos. Reinicie o processo para reativar.",
+                            nome, n,
+                        )
+                        self._estrategias_desativadas.add(nome)
         return resultado
 
     def _avaliar_estrategias(
         self, ativo: str, df: pd.DataFrame, indice_confirmacao: int
     ) -> Decisao | None:
         todas = self._avaliar_todas_estrategias(ativo, df, indice_confirmacao)
-        return todas[0] if todas else None
+        if not todas:
+            return None
+        return min(
+            todas,
+            key=lambda d: (
+                PRIORIDADE_SETUP.get(d.detalhes.get("setup", ""), _PRIORIDADE_DEFAULT),
+                d.candle_hora,
+            ),
+        )
 
     def avaliar_todas(self, ativo: str, indicadores: pd.DataFrame) -> list[Decisao]:
         minimo = max(self.config.ema_macro_periodo, self.config.atr_regime_janela) + 3

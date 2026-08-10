@@ -28,6 +28,11 @@ def analisar_argumentos():
         action="store_true",
         help="escolhe filtros no treino e mede no período escondido (detecta garimpo)",
     )
+    parser.add_argument(
+        "--walkforward",
+        action="store_true",
+        help="usa validação walk-forward com múltiplas janelas em vez de divisão 70/30 única",
+    )
     return parser.parse_args()
 
 
@@ -65,6 +70,14 @@ def main() -> None:
 
     if argumentos.validar and not df.empty:
         backtest.validar_fora_da_amostra(df, argumentos.payout)
+
+    if argumentos.walkforward and not df.empty:
+        resultado = backtest.validar_walk_forward(df, payout=argumentos.payout)
+        print(
+            f"Walk-forward: {resultado['janelas']} janelas, "
+            f"{resultado['acima_breakeven']} acima do breakeven, "
+            + (f"WR médio={resultado['wr_medio']:.1%}" if resultado['wr_medio'] else "sem dados")
+        )
 
     if not df.empty:
         destino = config.pasta_dados / "backtest_operacoes.csv"

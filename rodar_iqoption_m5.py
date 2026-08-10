@@ -1,9 +1,12 @@
 """Inicia o monitor. Use --m1 para candles de 1 minuto em vez de M5."""
 
 import argparse
+import logging
 
 from iqoption_m5.app import main
 from iqoption_m5.config import Configuracao, configuracao_m1, configuracao_real_m5
+
+logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 
 
 def analisar_argumentos():

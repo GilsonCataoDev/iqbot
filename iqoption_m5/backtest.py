@@ -354,6 +354,59 @@ def validar_fora_da_amostra(df: pd.DataFrame, payout: float, fracao_treino: floa
 
 
 # ---------------------------------------------------------------------------
+# Validação walk-forward com múltiplas janelas
+# ---------------------------------------------------------------------------
+def validar_walk_forward(
+    df: pd.DataFrame,
+    payout: float,
+    janela_treino: int = 500,
+    passo: int = 250,
+    minimo: int = 30,
+) -> dict:
+    """Desliza janelas treino/teste sobre df.
+
+    Filtra com dados de treino (_escolher_horas), mede no período de teste seguinte
+    (_resumir). Retorna métricas agregadas e quantas janelas ficaram acima do breakeven.
+    """
+    ordenado = df.sort_values("hora_entrada").reset_index(drop=True)
+    resultados = []
+    inicio = 0
+    while inicio + janela_treino + minimo <= len(ordenado):
+        treino = ordenado.iloc[inicio : inicio + janela_treino]
+        teste  = ordenado.iloc[inicio + janela_treino : inicio + janela_treino + passo]
+        if len(teste) < minimo:
+            break
+        # Escolhe filtro de horas boas observadas apenas no treino
+        horas_boas = _escolher_horas(treino, payout)
+        # Aplica o filtro no teste (sem filtro se nenhuma hora sobreviveu)
+        teste_filtrado = (
+            teste[teste["hora_dia"].isin(horas_boas)] if horas_boas else teste
+        )
+        resumo = _resumir(teste_filtrado, payout)
+        metricas = {
+            "winrate": resumo["acerto_pct"] / 100 if resumo["operacoes"] > 0 else None,
+            "lucro_liquido": resumo["lucro_unidades"] if resumo["operacoes"] > 0 else None,
+        }
+        resultados.append(metricas)
+        inicio += passo
+
+    if not resultados:
+        return {"janelas": 0, "acima_breakeven": 0, "wr_medio": None, "lucro_medio": None}
+
+    wr_values  = [r["winrate"]       for r in resultados if r.get("winrate")       is not None]
+    luc_values = [r["lucro_liquido"] for r in resultados if r.get("lucro_liquido") is not None]
+    be = 1 / (1 + payout) if payout > 0 else 0.5
+    acima = sum(1 for wr in wr_values if wr >= be)
+
+    return {
+        "janelas":         len(resultados),
+        "acima_breakeven": acima,
+        "wr_medio":        sum(wr_values)  / len(wr_values)  if wr_values  else None,
+        "lucro_medio":     sum(luc_values) / len(luc_values) if luc_values else None,
+    }
+
+
+# ---------------------------------------------------------------------------
 # Backtest realista com custos reais
 # ---------------------------------------------------------------------------
 @dataclass(frozen=True)

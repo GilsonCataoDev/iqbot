@@ -422,6 +422,17 @@ def main(config: Configuracao | None = None) -> None:
             print(f"[{datetime.now():%H:%M:%S}] [FIM] {ativo} (fora da janela, slot preservado)")
             return
 
+        # Corte por expiração: não entra se restar menos que o mínimo até o próximo mark de 5min.
+        # Evita entradas tardias (ex: mercado_fechado retrying por 2min) onde a opção expira quase imediatamente.
+        segundos_ate_expiracao = config.timeframe_segundos - segundo_no_candle
+        if segundos_ate_expiracao < config.min_segundos_ate_expiracao:
+            ultimo_candle_processado[ativo] = candle_fechado
+            print(
+                f"[{datetime.now():%H:%M:%S}] [FIM] {ativo} "
+                f"(tarde demais: {segundos_ate_expiracao:.0f}s até expiração, mín {config.min_segundos_ate_expiracao}s)"
+            )
+            return
+
         ctx_candidato = ia_contexto(
             ativo, config.rotulo_timeframe, alerta, indicadores, list(proximas_noticias)
         )
@@ -542,6 +553,23 @@ def main(config: Configuracao | None = None) -> None:
                 )
                 algum_bloqueio_definitivo = True
             elif autorizacao.permitida:
+                # Marcação: reversões só entram se o preço ainda está próximo do nível de S/R.
+                # Evita entrada tardia quando OTC reabre mas o preço já se afastou do gatilho.
+                _reversoes = ("sr_rejeicao", "pin_bar_sr", "engulfing_sr")
+                if setup_nome in _reversoes:
+                    _nivel_ref = decisao.detalhes.get("nivel_sr") or decisao.preco
+                    _preco_atual = float(indicadores.iloc[-1]["Close"])
+                    _atr = decisao.detalhes.get("atr", 0)
+                    _distancia = abs(_preco_atual - _nivel_ref)
+                    _limite = config.marcacao_tolerancia_atr * _atr
+                    if _atr > 0 and _distancia > _limite:
+                        print(
+                            f"    [{setup_nome}] marcação inválida: preço={_preco_atual:.5f} "
+                            f"nível={_nivel_ref:.5f} dist={_distancia:.5f} "
+                            f"máx={_limite:.5f} ({config.marcacao_tolerancia_atr}×ATR) — cancelado"
+                        )
+                        algum_bloqueio_definitivo = True
+                        continue
                 if ia_discorda and favorece_noticia:
                     print(
                         "    [IA] discordou mas a noticia confirmada a favor do sinal tem prioridade"
