@@ -154,3 +154,6 @@ else:
     tardios = sum(1 for a in atrasos if a > 15000)
     print(f"  média={media:.0f}ms  p95={p95}ms  tardios(>15s)={tardios}/{len(atrasos)}")
 print()
+
+input("
+Pressione Enter para fechar...")
