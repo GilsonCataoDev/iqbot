@@ -119,6 +119,12 @@ class Configuracao:
     # --- Watchdog ---
     watchdog_timeout_minutos: float = 15.0  # alerta se nenhum ativo processado em X minutos
 
+    # --- Retry mercado fechado (OTC) ---
+    max_retry_mercado_fechado_segundos: float = 30.0  # desiste de retry de OTC fechado após N segundos; 0=sem limite
+
+    # --- Keepalive WebSocket ---
+    keepalive_intervalo_segundos: float = 30.0  # ping periódico para manter WebSocket ativo; 0=desativado
+
     pasta_dados: Path = Path(__file__).resolve().parent / "dados"
 
     @property

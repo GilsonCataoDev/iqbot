@@ -71,6 +71,8 @@ class RegistroSQLite:
                     payout REAL NOT NULL,
                     setup TEXT NOT NULL DEFAULT 'desconhecido',
                     preco_entrada REAL,
+                    hora_sinal TEXT,
+                    atraso_envio_ms INTEGER,
                     lucro REAL,
                     resultado_bruto TEXT,
                     status TEXT NOT NULL
@@ -109,6 +111,10 @@ class RegistroSQLite:
                 )
             if "preco_entrada" not in colunas_operacoes:
                 db.execute("ALTER TABLE operacoes ADD COLUMN preco_entrada REAL")
+            if "hora_sinal" not in colunas_operacoes:
+                db.execute("ALTER TABLE operacoes ADD COLUMN hora_sinal TEXT")
+            if "atraso_envio_ms" not in colunas_operacoes:
+                db.execute("ALTER TABLE operacoes ADD COLUMN atraso_envio_ms INTEGER")
 
     def registrar_decisao(
         self,
@@ -147,16 +153,26 @@ class RegistroSQLite:
         payout: float,
         enviada_em: datetime,
     ) -> None:
+        hora_sinal = decisao.candle_hora.isoformat()
+        atraso_envio_ms = max(
+            0,
+            int(
+                (enviada_em - decisao.candle_hora.to_pydatetime().replace(tzinfo=None)).total_seconds()
+                * 1000
+            ),
+        )
         with self._lock, self._sessao() as db:
             db.execute(
                 """
                 INSERT OR REPLACE INTO operacoes (
-                    id_ordem, ativo, direcao, enviada_em, valor, payout, setup, preco_entrada, status
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'aberta')
+                    id_ordem, ativo, direcao, enviada_em, valor, payout, setup, preco_entrada,
+                    hora_sinal, atraso_envio_ms, status
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'aberta')
                 """,
                 (
                     str(id_ordem), decisao.ativo, decisao.direcao, enviada_em.isoformat(),
                     valor, payout, decisao.detalhes.get("setup", "desconhecido"), decisao.preco,
+                    hora_sinal, atraso_envio_ms,
                 ),
             )
 

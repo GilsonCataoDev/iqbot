@@ -255,10 +255,34 @@ def main(config: Configuracao | None = None) -> None:
         daemon=True,
     ).start()
 
+    # Keepalive WebSocket — mantém a conexão ativa entre ciclos longos (Melhoria C)
+    _keepalive_ativo = threading.Event()
+    _keepalive_ativo.set()
+
+    def _keepalive(api_ref, intervalo: float = 30.0) -> None:
+        while _keepalive_ativo.is_set():
+            time.sleep(intervalo)
+            if not _keepalive_ativo.is_set():
+                break
+            try:
+                api_ref.get_server_timestamp()
+            except Exception as exc:
+                print(f"[{datetime.now():%H:%M:%S}] [KEEPALIVE] falha: {exc}")
+
+    if config.keepalive_intervalo_segundos > 0:
+        threading.Thread(
+            target=_keepalive,
+            args=(mercado._api, config.keepalive_intervalo_segundos),
+            name="keepalive",
+            daemon=True,
+        ).start()
+
     _retry_ativos: set[str] = set()
     # mercado_fechado só é soft para OTC (pode reabrir em minutos por manutenção).
     # Mercado normal fechado é definitivo — não há ponto em retentar por 200s.
     _MOTIVOS_SOFT = {"payout_indisponivel"}
+    # Rastreia o início do 1º retry de mercado_fechado por ativo (Melhoria B)
+    _retry_mercado_fechado_inicio: dict[str, float] = {}
 
     def _avaliar_ativo(ativo: str, snapshot, agora_utc: datetime) -> None:
         print(f"[{datetime.now():%H:%M:%S}] [INICIO] {ativo}")
@@ -666,11 +690,23 @@ def main(config: Configuracao | None = None) -> None:
                     )
                 executor.executar(snapshot, decisao)
                 houve_execucao = True
+                _retry_mercado_fechado_inicio.pop(ativo, None)
                 if config.cooldown_pos_ordem_por_ativo_candles > 0:
                     _cooldown_ativo[ativo] = snapshot.timestamp_servidor
             elif autorizacao.motivo == "mercado_fechado" and e_sintetico(ativo):
                 # OTC fechado temporariamente (manutenção IQ) — retry dentro da janela
-                pass
+                if config.max_retry_mercado_fechado_segundos > 0:
+                    _inicio = _retry_mercado_fechado_inicio.setdefault(
+                        ativo, float(snapshot.timestamp_servidor)
+                    )
+                    elapsed = float(snapshot.timestamp_servidor) - _inicio
+                    if elapsed > config.max_retry_mercado_fechado_segundos:
+                        print(
+                            f"    [{setup_nome}] mercado_fechado: limite de "
+                            f"{config.max_retry_mercado_fechado_segundos:.0f}s atingido — desistindo"
+                        )
+                        algum_bloqueio_definitivo = True
+                        _retry_mercado_fechado_inicio.pop(ativo, None)
             elif autorizacao.motivo not in _MOTIVOS_SOFT:
                 algum_bloqueio_definitivo = True
 
@@ -774,6 +810,7 @@ def main(config: Configuracao | None = None) -> None:
     except KeyboardInterrupt:
         print("Interrupção solicitada. Aguardando eventual ordem aberta...")
     finally:
+        _keepalive_ativo.clear()
         grafico_thread_viva = False
         executor.aguardar_ordens()
         mercado.fechar()
