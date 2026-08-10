@@ -70,6 +70,7 @@ class RegistroSQLite:
                     valor REAL NOT NULL,
                     payout REAL NOT NULL,
                     setup TEXT NOT NULL DEFAULT 'desconhecido',
+                    preco_entrada REAL,
                     lucro REAL,
                     resultado_bruto TEXT,
                     status TEXT NOT NULL
@@ -106,6 +107,8 @@ class RegistroSQLite:
                 db.execute(
                     "ALTER TABLE operacoes ADD COLUMN setup TEXT NOT NULL DEFAULT 'desconhecido'"
                 )
+            if "preco_entrada" not in colunas_operacoes:
+                db.execute("ALTER TABLE operacoes ADD COLUMN preco_entrada REAL")
 
     def registrar_decisao(
         self,
@@ -148,12 +151,12 @@ class RegistroSQLite:
             db.execute(
                 """
                 INSERT OR REPLACE INTO operacoes (
-                    id_ordem, ativo, direcao, enviada_em, valor, payout, setup, status
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, 'aberta')
+                    id_ordem, ativo, direcao, enviada_em, valor, payout, setup, preco_entrada, status
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'aberta')
                 """,
                 (
                     str(id_ordem), decisao.ativo, decisao.direcao, enviada_em.isoformat(),
-                    valor, payout, decisao.detalhes.get("setup", "desconhecido"),
+                    valor, payout, decisao.detalhes.get("setup", "desconhecido"), decisao.preco,
                 ),
             )
 
@@ -277,7 +280,7 @@ class RegistroSQLite:
         with self._lock, self._sessao() as db:
             linhas = db.execute(
                 """
-                SELECT enviada_em, direcao, lucro, status
+                SELECT enviada_em, direcao, lucro, status, setup, preco_entrada
                 FROM operacoes
                 WHERE ativo=? AND status IN ('aberta', 'finalizada')
                 ORDER BY enviada_em DESC LIMIT ?
@@ -290,8 +293,10 @@ class RegistroSQLite:
                 "direcao": direcao,
                 "lucro": None if lucro is None else float(lucro),
                 "status": status,
+                "setup": setup or "desconhecido",
+                "preco": None if preco_entrada is None else float(preco_entrada),
             }
-            for enviada_em, direcao, lucro, status in reversed(linhas)
+            for enviada_em, direcao, lucro, status, setup, preco_entrada in reversed(linhas)
         ]
 
     def resumo_desempenho(self, ativo: str, limite: int = 200) -> dict:

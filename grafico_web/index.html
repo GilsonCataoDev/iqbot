@@ -544,13 +544,34 @@ async function atualizar() {
         ? `ENTRAR AGORA ${dados.alerta.direcao.toUpperCase()}`
         : `AGUARDAR ${dados.alerta.direcao.toUpperCase()}`,
     }] : [];
-    const marcadoresReais = (dados.operacoesReais || []).map(o => ({
-      time: o.time,
-      position: o.direcao === 'call' ? 'belowBar' : 'aboveBar',
-      color: o.aberta ? '#42a5f5' : (o.vitoria ? '#00e676' : '#ff1744'),
-      shape: 'circle',
-      text: o.aberta ? 'PRACTICE ABERTA' : `PRACTICE ${o.vitoria ? 'GANHOU' : 'PERDEU'}`,
-    }));
+    const marcadoresReais = (dados.operacoesReais || []).map(o => {
+      const setupLabel = o.setup ? `[${o.setup}] ` : '';
+      const precoLabel = o.preco != null ? ` @ ${o.preco.toFixed(5)}` : '';
+      const dirLabel = o.direcao === 'call' ? 'CALL' : 'PUT';
+      let texto;
+      if (o.aberta) texto = `${setupLabel}${dirLabel}${precoLabel} — ABERTA`;
+      else texto = `${setupLabel}${dirLabel}${precoLabel} — ${o.vitoria ? 'GANHOU' : 'PERDEU'}`;
+      return {
+        time: o.time,
+        position: o.direcao === 'call' ? 'belowBar' : 'aboveBar',
+        color: o.aberta ? '#42a5f5' : (o.vitoria ? '#00e676' : '#ff1744'),
+        shape: o.aberta ? 'square' : (o.vitoria ? 'arrowUp' : 'arrowDown'),
+        text: texto,
+      };
+    });
+
+    // Linha de preço de entrada para operação aberta (fica visível enquanto não fechar)
+    const opAberta = (dados.operacoesReais || []).find(o => o.aberta && o.preco != null);
+    if (opAberta) {
+      serieCandle.createPriceLine({
+        price: opAberta.preco,
+        color: '#42a5f5',
+        lineWidth: 1,
+        lineStyle: 2, // pontilhada
+        axisLabelVisible: true,
+        title: `entrada ${opAberta.direcao === 'call' ? 'CALL' : 'PUT'} [${opAberta.setup || ''}]`,
+      });
+    }
 
     const marcadores = [...marcadoresSinal, ...marcadoresPullback, ...marcadoresConfluencia,
       ...marcadoresAlerta, ...marcadoresReversao, ...marcadoresReais].sort((a, b) => a.time - b.time);
