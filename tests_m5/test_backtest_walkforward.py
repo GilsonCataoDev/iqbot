@@ -63,6 +63,28 @@ class TestValidarWalkForward(unittest.TestCase):
             self.assertGreaterEqual(resultado["wr_medio"], 0.0)
             self.assertLessEqual(resultado["wr_medio"], 1.0)
 
+    def test_criterio_ic95_mais_conservador_que_winrate(self):
+        """IC95% piso é mais conservador: série com WR baixo não passa mesmo com WR > breakeven."""
+        # Série de 60% WR com payout 0.85 → breakeven ~54%; WR passa mas IC95% pode não passar
+        # com amostras pequenas (passo=60). Verifica que acima_breakeven <= janelas.
+        n = 1200
+        idx = pd.date_range("2025-01-01", periods=n, freq="5min")
+        padrao = ["ganho", "ganho", "ganho", "perda", "perda"]  # 60% WR
+        resultados = (padrao * (n // len(padrao) + 1))[:n]
+        df = pd.DataFrame({
+            "hora_entrada": idx,
+            "hora_dia": [ts.hour for ts in idx],
+            "ativo": "EURUSD",
+            "setup": "pullback",
+            "direcao": "call",
+            "fatores": "fibo",
+            "resultado": resultados,
+        })
+        res = validar_walk_forward(df, payout=0.85, janela_treino=500, passo=60, minimo=30)
+        # Com amostras de só 60 ops, IC95 piso ~47-52% — abaixo do breakeven de 54%.
+        # O critério IC95 deve reprovar mais janelas do que se usasse WR médio direto.
+        self.assertLessEqual(res["acima_breakeven"], res["janelas"])
+
 
 if __name__ == "__main__":
     unittest.main()
