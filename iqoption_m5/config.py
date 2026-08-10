@@ -92,6 +92,9 @@ class Configuracao:
     parar_por_perdas: bool = False
     parar_por_prejuizo: bool = False
     cooldown_pos_ordem_segundos: float = 0.0  # 0 = desligado; >0 = bloqueia nova entrada por N segundos após resultado
+    cooldown_pos_ordem_por_ativo_candles: int = 0  # 0 = desligado; >0 = bloqueia N candles após ordem no mesmo ativo
+    filtro_candle_entrada_atr: float = 0.0  # 0 = desligado; >0 = cancela se candle N+1 abre > N×ATR contra o sinal
+    bloquear_noticia_alto_impacto: bool = False  # bloqueia entrada em janela de notícia HIGH (ativos reais)
 
     # --- Horário bloqueado (UTC) ---
     # Evita operar em janelas de baixa liquidez / mercado OTC suspenso.

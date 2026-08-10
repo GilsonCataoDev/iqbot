@@ -1,3 +1,4 @@
+import math
 import threading
 import time
 from dataclasses import replace
@@ -162,6 +163,7 @@ def main(config: Configuracao | None = None) -> None:
         threading.Thread(target=_grafico_rt_worker, name="grafico-rt", daemon=True).start()
 
     ultimo_candle_processado = {ativo: None for ativo in config.ativos}
+    _cooldown_ativo: dict[str, float] = {}  # ativo -> unix timestamp da última ordem executada
     candle_historico_grafico = {ativo: None for ativo in config.ativos}
     sinais_historicos_cache = {ativo: [] for ativo in config.ativos}
     ultimo_alerta_avisado = {ativo: None for ativo in config.ativos}
@@ -331,7 +333,13 @@ def main(config: Configuracao | None = None) -> None:
                         f"{alerta.direcao.upper()} @ {decisao_reversao.preco:.5f} | "
                         f"risco={autorizacao_reversao.motivo}"
                     )
-                    if autorizacao_reversao.permitida:
+                    _seg_ate_exp = config.timeframe_segundos - segundo_no_candle
+                    if _seg_ate_exp < config.min_segundos_ate_expiracao:
+                        print(
+                            f"    [{setup_real}] tarde demais: "
+                            f"{_seg_ate_exp:.0f}s até expiração — cancelado"
+                        )
+                    elif autorizacao_reversao.permitida:
                         executor.executar(snapshot, decisao_reversao)
 
             marca = (alerta.hora, alerta.tipo, alerta.direcao)
@@ -542,6 +550,18 @@ def main(config: Configuracao | None = None) -> None:
 
         # Reversões entram na mesma vela em formação — candle_hora já aponta para
         # indicadores.index[-1], que é o mesmo valor que proxima_vela abaixo.
+        if config.cooldown_pos_ordem_por_ativo_candles > 0 and ativo in _cooldown_ativo:
+            _elapsed = snapshot.timestamp_servidor - _cooldown_ativo[ativo]
+            _required = config.cooldown_pos_ordem_por_ativo_candles * config.timeframe_segundos
+            if _elapsed < _required:
+                _restantes = math.ceil((_required - _elapsed) / config.timeframe_segundos)
+                ultimo_candle_processado[ativo] = candle_fechado
+                print(
+                    f"[{datetime.now():%H:%M:%S}] [FIM] {ativo} "
+                    f"(cooldown: {_restantes} candle(s) restante(s))"
+                )
+                return
+
         proxima_vela = pd.Timestamp(indicadores.index[-1])
         todos_motivos: list[str] = []
         houve_execucao = False
@@ -591,20 +611,52 @@ def main(config: Configuracao | None = None) -> None:
                 )
                 algum_bloqueio_definitivo = True
             elif autorizacao.permitida:
-                # Marcação: reversões só entram se o preço ainda está próximo do nível de S/R.
-                # Evita entrada tardia quando OTC reabre mas o preço já se afastou do gatilho.
-                _reversoes = ("sr_rejeicao", "pin_bar_sr", "engulfing_sr")
-                if setup_nome in _reversoes:
-                    _nivel_ref = decisao.detalhes.get("nivel_sr") or decisao.preco
-                    _preco_atual = float(indicadores.iloc[-1]["Close"])
-                    _atr = decisao.detalhes.get("atr", 0)
-                    _distancia = abs(_preco_atual - _nivel_ref)
-                    _limite = config.marcacao_tolerancia_atr * _atr
-                    if _atr > 0 and _distancia > _limite:
+                # Marcação universal: valida proximidade do preço ao nível que gerou o sinal.
+                # Para reversões usa nivel_sr; para continuação usa o preço do sinal (Close(N)).
+                _nivel_ref = (
+                    decisao.detalhes.get("nivel_sr")
+                    or decisao.detalhes.get("nivel_fib")
+                    or decisao.preco
+                )
+                _preco_atual = float(indicadores.iloc[-1]["Close"])
+                _atr = decisao.detalhes.get("atr", 0)
+                _distancia = abs(_preco_atual - _nivel_ref)
+                _limite_marcacao = config.marcacao_tolerancia_atr * _atr
+                if _atr > 0 and _distancia > _limite_marcacao:
+                    print(
+                        f"    [{setup_nome}] marcação inválida: preço={_preco_atual:.5f} "
+                        f"nível={_nivel_ref:.5f} dist={_distancia:.5f} "
+                        f"máx={_limite_marcacao:.5f} ({config.marcacao_tolerancia_atr}×ATR) — cancelado"
+                    )
+                    algum_bloqueio_definitivo = True
+                    continue
+                # Filtro de candle de entrada: cancela se N+1 abriu contra a direção do sinal.
+                if config.filtro_candle_entrada_atr > 0 and _atr > 0:
+                    _open_entrada = float(indicadores.iloc[-1]["Open"])
+                    _close_sinal = float(indicadores.iloc[-2]["Close"])
+                    _delta = _open_entrada - _close_sinal
+                    _limite_filtro = config.filtro_candle_entrada_atr * _atr
+                    _contra_direcao = (
+                        (decisao.direcao == "call" and _delta < -_limite_filtro)
+                        or (decisao.direcao == "put" and _delta > _limite_filtro)
+                    )
+                    if _contra_direcao:
                         print(
-                            f"    [{setup_nome}] marcação inválida: preço={_preco_atual:.5f} "
-                            f"nível={_nivel_ref:.5f} dist={_distancia:.5f} "
-                            f"máx={_limite:.5f} ({config.marcacao_tolerancia_atr}×ATR) — cancelado"
+                            f"    [{setup_nome}] filtro de abertura: candle abriu contra "
+                            f"a direção (delta={_delta:.5f}, lim={_limite_filtro:.5f}) — cancelado"
+                        )
+                        algum_bloqueio_definitivo = True
+                        continue
+                # Bloqueio por notícia de alto impacto (apenas ativos reais; OTC ignora).
+                if config.bloquear_noticia_alto_impacto and not e_sintetico(ativo):
+                    _noticias_high = [
+                        e for e in calendario.janela_de_risco(ativo, agora_utc)
+                        if e.impacto == "High"
+                    ]
+                    if _noticias_high:
+                        print(
+                            f"    [{setup_nome}] notícia HIGH impacto: "
+                            f"{_noticias_high[0].titulo} — cancelado"
                         )
                         algum_bloqueio_definitivo = True
                         continue
@@ -614,6 +666,8 @@ def main(config: Configuracao | None = None) -> None:
                     )
                 executor.executar(snapshot, decisao)
                 houve_execucao = True
+                if config.cooldown_pos_ordem_por_ativo_candles > 0:
+                    _cooldown_ativo[ativo] = snapshot.timestamp_servidor
             elif autorizacao.motivo == "mercado_fechado" and e_sintetico(ativo):
                 # OTC fechado temporariamente (manutenção IQ) — retry dentro da janela
                 pass
