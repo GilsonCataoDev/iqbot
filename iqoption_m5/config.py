@@ -190,6 +190,53 @@ def configuracao_m1(base: Configuracao | None = None) -> Configuracao:
     )
 
 
+def configuracao_scalping_60(base: Configuracao | None = None) -> Configuracao:
+    """Perfil scalping para banca inicial de R$60 em conta REAL.
+
+    Entrada fixa de R$1 (≈1.7% da banca), stop diário −R$6, meta +R$5.
+    Apenas os 5 pares com melhor desempenho observado (WR ≥ 55% na amostra).
+    Proteções extras: circuit breaker, cooldown por ativo, filtro de abertura,
+    bloqueio de notícia HIGH.
+    """
+    return replace(
+        base or Configuracao(),
+        email=os.environ.get("IQ_OPTION_EMAIL", ""),
+        senha=os.environ.get("IQ_OPTION_SENHA", ""),
+        conta="REAL",
+        confirmo_conta_real=True,
+        ativos=(
+            "EURUSD",
+            "GBPUSD",
+            "EURGBP",
+            "EURUSD-OTC",
+            "EURGBP-OTC",
+        ),
+        pares_validados=(),
+        bloquear_otc_real=False,
+        banca_inicial=60.0,
+        piso_banca=40.0,
+        valor_por_ordem=1.0,
+        valor_percentual_banca=0.0,
+        stop_diario=-6.0,
+        meta_diaria=5.0,
+        parar_por_prejuizo=True,
+        max_operacoes_dia=20,
+        max_perdas_consecutivas=9999,
+        drawdown_maximo_percentual=0.20,
+        circuit_breaker_max_perdas=3,
+        circuit_breaker_cooldown_minutos=60,
+        cooldown_pos_ordem_por_ativo_candles=2,
+        filtro_candle_entrada_atr=0.3,
+        bloquear_noticia_alto_impacto=True,
+        alavancagem_pyramid=False,
+        alavancagem_maximo=0.0,
+        executar_estrategias_nao_validadas=True,
+        confiar_resultado_automatico=False,
+        verificar_resultado_por_candle=True,
+        porta_grafico=8770,
+    )
+
+
 def configuracao_real_m5(base: Configuracao | None = None) -> Configuracao:
     """Perfil conta real — todos os ativos operam de verdade.
 

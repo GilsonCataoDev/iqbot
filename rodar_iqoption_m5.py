@@ -4,7 +4,7 @@ import argparse
 import logging
 
 from iqoption_m5.app import main
-from iqoption_m5.config import Configuracao, configuracao_m1, configuracao_real_m5
+from iqoption_m5.config import Configuracao, configuracao_m1, configuracao_real_m5, configuracao_scalping_60
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 
@@ -22,21 +22,28 @@ def analisar_argumentos():
         help="opera com DINHEIRO REAL (R$2/entrada, max 5/dia, stop R$10/dia, piso R$25). Exige --confirmo.",
     )
     parser.add_argument(
+        "--scalping",
+        action="store_true",
+        help="perfil scalping R$60 real: R$1/entrada, stop −R$6/dia, 5 pares selecionados. Exige --confirmo.",
+    )
+    parser.add_argument(
         "--confirmo",
         action="store_true",
-        help="confirmação explícita exigida junto com --real",
+        help="confirmação explícita exigida junto com --real ou --scalping",
     )
     return parser.parse_args()
 
 
 if __name__ == "__main__":
     argumentos = analisar_argumentos()
-    if argumentos.real and not argumentos.confirmo:
+    if (argumentos.real or argumentos.scalping) and not argumentos.confirmo:
         raise SystemExit(
-            "Pra operar com dinheiro real, rode com --real --confirmo (os dois juntos). "
-            "Isso existe de propósito, pra ninguém ligar --real sem querer."
+            "Pra operar com dinheiro real, rode com --real --confirmo ou --scalping --confirmo. "
+            "Isso existe de propósito, pra ninguém ligar sem querer."
         )
-    if argumentos.real:
+    if argumentos.scalping:
+        main(configuracao_scalping_60())
+    elif argumentos.real:
         main(configuracao_real_m5())
     else:
         from dataclasses import replace
