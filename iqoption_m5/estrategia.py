@@ -322,6 +322,8 @@ class EstrategiaReversaoM5:
 
         zona = contexto["zona_fib"]
         setup = "pullback_confluencia" if len(contexto["fatores"]) >= 2 else "pullback"
+        if setup == "pullback" and not self.config.pullback_ativo:
+            return None
         return Decisao(
             ativo=ativo,
             direcao=contexto["direcao"],
@@ -841,7 +843,10 @@ class EstrategiaReversaoM5:
             return []
         indice = len(indicadores) - 1  # candle em formação
         resultado = []
-        for fn in (self._avaliar_sr_rejeicao, self._avaliar_pin_bar):
+        fns_reversao = [self._avaliar_sr_rejeicao]
+        if self.config.pin_bar_sr_ativo:
+            fns_reversao.append(self._avaliar_pin_bar)
+        for fn in fns_reversao:
             nome = fn.__name__
             if nome in self._estrategias_desativadas:
                 continue
@@ -923,7 +928,10 @@ class EstrategiaReversaoM5:
                 sinais.append(sinal)
             # Reversão: mesmo índice (historicamente, cada candle já é "fechado",
             # mas representamos o sinal como se fosse detectado naquele candle)
-            for fn in (self._avaliar_sr_rejeicao, self._avaliar_pin_bar):
+            fns_rev = [self._avaliar_sr_rejeicao]
+            if self.config.pin_bar_sr_ativo:
+                fns_rev.append(self._avaliar_pin_bar)
+            for fn in fns_rev:
                 try:
                     d = fn(ativo, df, indice)
                     if d is not None:

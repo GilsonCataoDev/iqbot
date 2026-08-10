@@ -78,6 +78,8 @@ class Configuracao:
     engulfing_sr_ativo: bool = False
     divergencia_rsi_ativo: bool = False
     bollinger_squeeze_ativo: bool = False
+    pin_bar_sr_ativo: bool = False  # False = nunca entra em pin_bar_sr
+    pullback_ativo: bool = False    # False = bloqueia pullback isolado (pullback_confluencia continua)
     divergencia_rsi_janela_pivos: int = 5
     bollinger_squeeze_percentil_janela: int = 20
     bollinger_squeeze_min_corpo_atr: float = 0.5
