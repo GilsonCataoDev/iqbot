@@ -116,7 +116,7 @@ else:
         setup_s = op["setup"] or "?"
         print(f"  {op['enviada_em'][11:19]}  {op['ativo']:<20} {op['direcao'].upper():<5} {setup_s:<25} {res_s}{timing_s}")
         for f in flags:
-            print(f"             ⚠ {f}")
+            print(f"             [!] {f}")
 
 # ─── BLOQUEIOS ───
 bloqueios = [d for d in decisoes if d["permitida"] == 0]
@@ -143,7 +143,7 @@ print()
 
 # ─── ATRASO DE ENVIO ───
 atrasos = [o["atraso_envio_ms"] for o in ops if o["atraso_envio_ms"] is not None]
-print(f"ATRASO DE ENVIO (sinal→ordem) — {len(atrasos)} op(s) com dado:")
+print(f"ATRASO DE ENVIO (sinal->ordem) -- {len(atrasos)} op(s) com dado:")
 if not atrasos:
     print("  sem dados (coluna hora_sinal/atraso_envio_ms ausente ou banco antigo)")
 else:
@@ -155,5 +155,4 @@ else:
     print(f"  média={media:.0f}ms  p95={p95}ms  tardios(>15s)={tardios}/{len(atrasos)}")
 print()
 
-input("
-Pressione Enter para fechar...")
+input("Pressione Enter para fechar...")
