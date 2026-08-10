@@ -224,6 +224,7 @@ const serieCandle = chartPreco.addCandlestickSeries({
   upColor: '#26a69a', downColor: '#ef5350',
   borderVisible: false, wickUpColor: '#26a69a', wickDownColor: '#ef5350',
 });
+let _linhaEntradaAtiva = null; // referência à linha de entrada em aberto
 const serieBandaSup = chartPreco.addLineSeries({ color: '#787b86', lineWidth: 1, lineStyle: LightweightCharts.LineStyle.Dashed });
 const serieBandaInf = chartPreco.addLineSeries({ color: '#787b86', lineWidth: 1, lineStyle: LightweightCharts.LineStyle.Dashed });
 const serieBandaMedia = chartPreco.addLineSeries({ color: '#787b86', lineWidth: 1, lineStyle: LightweightCharts.LineStyle.Dotted });
@@ -560,14 +561,18 @@ async function atualizar() {
       };
     });
 
-    // Linha de preço de entrada para operação aberta (fica visível enquanto não fechar)
+    // Linha de preço de entrada — remove a anterior antes de criar uma nova
+    if (_linhaEntradaAtiva) {
+      serieCandle.removePriceLine(_linhaEntradaAtiva);
+      _linhaEntradaAtiva = null;
+    }
     const opAberta = (dados.operacoesReais || []).find(o => o.aberta && o.preco != null);
     if (opAberta) {
-      serieCandle.createPriceLine({
+      _linhaEntradaAtiva = serieCandle.createPriceLine({
         price: opAberta.preco,
         color: '#42a5f5',
         lineWidth: 1,
-        lineStyle: 2, // pontilhada
+        lineStyle: 2,
         axisLabelVisible: true,
         title: `entrada ${opAberta.direcao === 'call' ? 'CALL' : 'PUT'} [${opAberta.setup || ''}]`,
       });
