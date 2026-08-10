@@ -33,6 +33,11 @@ def analisar_argumentos():
         action="store_true",
         help="usa validação walk-forward com múltiplas janelas em vez de divisão 70/30 única",
     )
+    parser.add_argument(
+        "--comparar-real",
+        action="store_true",
+        help="compara winrate simulado com resultados reais gravados no SQLite da conta PRACTICE",
+    )
     return parser.parse_args()
 
 
@@ -73,11 +78,25 @@ def main() -> None:
 
     if argumentos.walkforward and not df.empty:
         resultado = backtest.validar_walk_forward(df, payout=argumentos.payout)
+        janelas = resultado["janelas"]
+        acima = resultado["acima_breakeven"]
         print(
-            f"Walk-forward: {resultado['janelas']} janelas, "
-            f"{resultado['acima_breakeven']} acima do breakeven, "
-            + (f"WR médio={resultado['wr_medio']:.1%}" if resultado['wr_medio'] else "sem dados")
+            f"Walk-forward: {janelas} janelas, "
+            f"{acima} acima do breakeven (IC95 piso > breakeven), "
+            + (f"WR médio={resultado['wr_medio']:.1%}" if resultado["wr_medio"] else "sem dados")
         )
+        if janelas > 0:
+            print(
+                f"[Multiplicidade walk-forward] {janelas} janela(s) avaliadas, "
+                f"{acima} de {janelas} com piso do IC95% acima do breakeven. "
+                "Critério: piso do IC95% > breakeven (conservador). "
+                "Resultado só é robusto se a maioria das janelas passar."
+            )
+
+    if argumentos.comparar_real:
+        db_path = str(config.banco_sqlite)
+        resultado_real = backtest.comparar_simulado_vs_real(db_path, argumentos.payout)
+        backtest.imprimir_comparacao(resultado_real, argumentos.payout)
 
     if not df.empty:
         destino = config.pasta_dados / "backtest_operacoes.csv"

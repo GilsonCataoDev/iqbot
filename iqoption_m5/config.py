@@ -111,6 +111,9 @@ class Configuracao:
     # --- Slippage monitor ---
     slippage_alerta_pips: float = 0.0003  # alerta se |exec - sinal| > este valor
 
+    # --- Watchdog ---
+    watchdog_timeout_minutos: float = 15.0  # alerta se nenhum ativo processado em X minutos
+
     pasta_dados: Path = Path(__file__).resolve().parent / "dados"
 
     @property

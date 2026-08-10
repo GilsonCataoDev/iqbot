@@ -421,6 +421,46 @@ class RegistroSQLite:
                  preco_sinal, preco_execucao, slippage_pips),
             )
 
+    def resumo_slippage(self, limite: int = 500) -> dict:
+        """Retorna média e desvio padrão do slippage (em pips) por ativo.
+
+        Calcula o desvio padrão em Python porque o SQLite padrão não tem
+        função STDDEV nativa. Usa o mesmo campo `slippage_pips` gravado
+        por `registrar_slippage` — que é a diferença absoluta entre o preço
+        do sinal (fechamento do candle anterior) e o preço real do candle
+        no momento da execução.
+
+        Limitação: `preco_execucao` é o Open do candle corrente disponível
+        no snapshot no momento da ordem, não o preço de fill da IQ Option
+        (a iqoptionapi não expõe o preço de preenchimento da opção binária).
+        """
+        import math as _math
+        with self._lock, self._sessao() as db:
+            linhas = db.execute(
+                "SELECT ativo, slippage_pips FROM slippage ORDER BY id DESC LIMIT ?",
+                (limite,),
+            ).fetchall()
+
+        por_ativo: dict[str, list[float]] = {}
+        for ativo, pip in linhas:
+            por_ativo.setdefault(ativo, []).append(float(pip))
+
+        resultado: dict[str, dict] = {}
+        for ativo, valores in por_ativo.items():
+            n = len(valores)
+            media = sum(valores) / n
+            if n > 1:
+                variancia = sum((v - media) ** 2 for v in valores) / (n - 1)
+                desvio = _math.sqrt(variancia)
+            else:
+                desvio = 0.0
+            resultado[ativo] = {
+                "n": n,
+                "media_pips": round(media, 6),
+                "desvio_pips": round(desvio, 6),
+            }
+        return resultado
+
     def slippage_medio(self, ativo: str | None = None, limite: int = 200) -> float | None:
         with self._lock, self._sessao() as db:
             if ativo:

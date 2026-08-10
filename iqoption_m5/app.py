@@ -26,6 +26,35 @@ except ImportError:
     _notificacao = None
 
 
+# ---------------------------------------------------------------------------
+# Watchdog — detecta travamento ou desconexão do loop principal
+# ---------------------------------------------------------------------------
+_ultimo_heartbeat: float = time.time()
+_lock_heartbeat = threading.Lock()
+
+
+def _atualizar_heartbeat() -> None:
+    global _ultimo_heartbeat
+    with _lock_heartbeat:
+        _ultimo_heartbeat = time.time()
+
+
+def _watchdog(config) -> None:  # type: ignore[no-untyped-def]
+    """Thread daemon que avisa se o loop principal parou de processar ativos."""
+    while True:
+        time.sleep(60)
+        with _lock_heartbeat:
+            desde = time.time() - _ultimo_heartbeat
+        limite = config.watchdog_timeout_minutos * 60
+        if desde > limite:
+            print(
+                f"[WATCHDOG] ALERTA: nenhum ativo processado há {desde/60:.1f} min "
+                f"(limite: {config.watchdog_timeout_minutos} min). "
+                "Verifique conexão ou trave do processo."
+            )
+
+
+# ---------------------------------------------------------------------------
 def _alerta_sonoro(tipo: str) -> None:
     if winsound is None:
         return
@@ -214,6 +243,15 @@ def main(config: Configuracao | None = None) -> None:
         except Exception as erro:
             print(f"Gráfico indisponível ({erro}); o robô continuará protegido no terminal.")
             grafico = None
+
+    # Inicia watchdog antes do loop principal — detecta trava/desconexão silenciosa.
+    _atualizar_heartbeat()  # define timestamp inicial
+    threading.Thread(
+        target=_watchdog,
+        args=(config,),
+        name="watchdog",
+        daemon=True,
+    ).start()
 
     _retry_ativos: set[str] = set()
     # mercado_fechado só é soft para OTC (pode reabrir em minutos por manutenção).
@@ -642,6 +680,7 @@ def main(config: Configuracao | None = None) -> None:
             for av, sn in snapshots.items():
                 try:
                     _avaliar_ativo(av, sn, agora_utc)
+                    _atualizar_heartbeat()  # ativo processado com sucesso — watchdog reset
                 except Exception as exc:
                     print(f"[{datetime.now():%H:%M:%S}] {av}: erro na avaliação: {exc}")
 

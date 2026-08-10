@@ -16,6 +16,7 @@ nome, e vice-versa. Leia sempre as linhas separadamente.
 """
 
 import math
+import sqlite3
 import time
 from dataclasses import dataclass
 
@@ -259,6 +260,140 @@ def imprimir_relatorio(df: pd.DataFrame, payout: float) -> None:
         if not ruins.empty:
             horas = ", ".join(f"{int(hora)}h" for hora in sorted(ruins.index))
             print(f"\nHoras abaixo do breakeven (candidatas a bloqueio): {horas}")
+
+    # --- Multiplicidade (data snooping) ---
+    n_estrategias = df["setup"].nunique() if not df.empty else 0
+    if n_estrategias > 0:
+        alpha_ajustado = 0.05 / n_estrategias
+        print(f"\n[Multiplicidade] {n_estrategias} estratégia(s) testadas.")
+        print(f"  Bonferroni: limiar de significância ajustado para α={alpha_ajustado:.4f} (em vez de 0.05).")
+        print(f"  Interprete winrates próximos ao breakeven com ceticismo — podem ser ruído.")
+
+
+# ---------------------------------------------------------------------------
+# Comparação simulado vs real
+# ---------------------------------------------------------------------------
+def comparar_simulado_vs_real(db_path: str, payout: float) -> dict:
+    """Lê operações reais da tabela operacoes (resultado_bruto in win/loss/equal)
+    e calcula WR e lucro real por setup. Retorna dict com métricas reais
+    para comparar com resultados de backtest.
+
+    O critério de win/loss usa a coluna `lucro` (> 0 = win, < 0 = loss, = 0 = empate),
+    que é o mesmo cálculo que o executor já faz ao registrar o resultado.
+    """
+    conn = sqlite3.connect(db_path, timeout=10)
+    try:
+        linhas = conn.execute(
+            """
+            SELECT setup, lucro FROM operacoes
+            WHERE status='finalizada' AND lucro IS NOT NULL
+              AND setup != 'correcao_manual'
+            ORDER BY enviada_em ASC
+            """
+        ).fetchall()
+    finally:
+        conn.close()
+
+    por_setup: dict[str, dict] = {}
+    total_wins = 0
+    total_losses = 0
+    total_empates = 0
+    total_lucro = 0.0
+
+    for setup, lucro in linhas:
+        lucro_f = float(lucro)
+        item = por_setup.setdefault(
+            setup,
+            {"operacoes": 0, "wins": 0, "losses": 0, "empates": 0, "lucro_total": 0.0},
+        )
+        item["operacoes"] += 1
+        item["lucro_total"] += lucro_f
+        total_lucro += lucro_f
+        if lucro_f > 0:
+            item["wins"] += 1
+            total_wins += 1
+        elif lucro_f < 0:
+            item["losses"] += 1
+            total_losses += 1
+        else:
+            item["empates"] += 1
+            total_empates += 1
+
+    for item in por_setup.values():
+        decididas = item["wins"] + item["losses"]
+        item["winrate"] = round(item["wins"] / decididas, 4) if decididas > 0 else 0.0
+        ic_inf, ic_sup = intervalo_wilson(item["wins"], decididas)
+        item["ic95_min"] = round(ic_inf, 4)
+        item["ic95_max"] = round(ic_sup, 4)
+        item["lucro_total"] = round(item["lucro_total"], 2)
+
+    total_ops = total_wins + total_losses + total_empates
+    decididas_global = total_wins + total_losses
+    wr_global = round(total_wins / decididas_global, 4) if decididas_global > 0 else 0.0
+    ic_inf_g, ic_sup_g = intervalo_wilson(total_wins, decididas_global)
+
+    return {
+        "por_setup": por_setup,
+        "global": {
+            "operacoes": total_ops,
+            "wins": total_wins,
+            "losses": total_losses,
+            "empates": total_empates,
+            "winrate": wr_global,
+            "ic95_min": round(ic_inf_g, 4),
+            "ic95_max": round(ic_sup_g, 4),
+            "lucro_total": round(total_lucro, 2),
+        },
+    }
+
+
+def imprimir_comparacao(resultado_real: dict, payout: float) -> None:
+    """Imprime tabela legível com métricas reais por setup.
+
+    Se dados de simulação não estiverem disponíveis, imprime só o real.
+    """
+    be = breakeven(payout)
+    global_r = resultado_real["global"]
+    por_setup = resultado_real["por_setup"]
+
+    print(f"\n=== Real (conta PRACTICE) — comparação simulado vs real ===")
+    print(f"Payout: {payout:.1%} | Breakeven: {be:.1%}")
+
+    if global_r["operacoes"] == 0:
+        print("  (sem operações finalizadas no banco)")
+        return
+
+    print(
+        f"\nGlobal: {global_r['operacoes']} ops | "
+        f"WR={global_r['winrate']:.1%} | "
+        f"IC95=[{global_r['ic95_min']:.1%}, {global_r['ic95_max']:.1%}] | "
+        f"Lucro={global_r['lucro_total']:+.2f}"
+    )
+
+    if por_setup:
+        linhas = []
+        for setup, item in sorted(por_setup.items()):
+            linhas.append({
+                "setup": setup,
+                "ops": item["operacoes"],
+                "wins": item["wins"],
+                "losses": item["losses"],
+                "winrate": f"{item['winrate']:.1%}",
+                "ic95": f"[{item['ic95_min']:.1%}, {item['ic95_max']:.1%}]",
+                "lucro": f"{item['lucro_total']:+.2f}",
+            })
+        tabela = pd.DataFrame(linhas).set_index("setup")
+        print(f"\nPor setup:\n{tabela.to_string()}")
+
+    if global_r["winrate"] < be:
+        print(
+            f"\n  ATENCAO: WR real ({global_r['winrate']:.1%}) abaixo do breakeven "
+            f"({be:.1%}) — modelo pode precisar de calibração."
+        )
+    else:
+        print(
+            f"\n  WR real ({global_r['winrate']:.1%}) acima do breakeven ({be:.1%})."
+        )
 
 
 # ---------------------------------------------------------------------------
