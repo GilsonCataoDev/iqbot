@@ -194,10 +194,12 @@ def simular(
 def para_dataframe(operacoes: list[Operacao]) -> pd.DataFrame:
     if not operacoes:
         return pd.DataFrame(
-            columns=["ativo", "direcao", "setup", "fatores", "hora_entrada", "resultado", "hora_dia"]
+            columns=["ativo", "direcao", "setup", "fatores", "hora_entrada",
+                     "resultado", "hora_dia", "tipo_ativo"]
         )
     df = pd.DataFrame([vars(operacao) for operacao in operacoes])
     df["hora_dia"] = pd.to_datetime(df["hora_entrada"]).dt.hour
+    df["tipo_ativo"] = df["ativo"].apply(lambda a: "OTC" if "-OTC" in str(a) else "normal")
     return df
 
 
@@ -258,12 +260,15 @@ def imprimir_relatorio(df: pd.DataFrame, payout: float) -> None:
         print("\nVeredito: inconclusivo, o IC95% ainda cruza o breakeven. Falta amostra.")
 
     for coluna, titulo, minimo in (
+        ("tipo_ativo", "OTC vs normal", 1),
         ("ativo", "Por ativo", 1),
         ("setup", "Por estratégia", 1),
         ("direcao", "Por direção", 1),
         ("fatores", "Por fatores de confluência", 1),
         ("hora_dia", "Por hora do dia (UTC)", 10),
     ):
+        if coluna not in df.columns:
+            continue
         tabela = tabela_por(df, coluna, payout, minimo)
         print(f"\n=== {titulo} ===")
         if tabela.empty:
@@ -424,19 +429,41 @@ def imprimir_relatorio_latencia(
 # ---------------------------------------------------------------------------
 # Comparação simulado vs real
 # ---------------------------------------------------------------------------
-def comparar_simulado_vs_real(db_path: str, payout: float) -> dict:
-    """Lê operações reais da tabela operacoes (resultado_bruto in win/loss/equal)
-    e calcula WR e lucro real por setup. Retorna dict com métricas reais
-    para comparar com resultados de backtest.
+def _novo_bucket() -> dict:
+    return {"operacoes": 0, "wins": 0, "losses": 0, "empates": 0, "lucro_total": 0.0}
 
-    O critério de win/loss usa a coluna `lucro` (> 0 = win, < 0 = loss, = 0 = empate),
-    que é o mesmo cálculo que o executor já faz ao registrar o resultado.
+
+def _acumular(bucket: dict, lucro_f: float) -> None:
+    bucket["operacoes"] += 1
+    bucket["lucro_total"] += lucro_f
+    if lucro_f > 0:
+        bucket["wins"] += 1
+    elif lucro_f < 0:
+        bucket["losses"] += 1
+    else:
+        bucket["empates"] += 1
+
+
+def _finalizar_bucket(bucket: dict) -> None:
+    decididas = bucket["wins"] + bucket["losses"]
+    bucket["winrate"] = round(bucket["wins"] / decididas, 4) if decididas > 0 else 0.0
+    ic_inf, ic_sup = intervalo_wilson(bucket["wins"], decididas)
+    bucket["ic95_min"] = round(ic_inf, 4)
+    bucket["ic95_max"] = round(ic_sup, 4)
+    bucket["lucro_total"] = round(bucket["lucro_total"], 2)
+
+
+def comparar_simulado_vs_real(db_path: str, payout: float) -> dict:
+    """Lê operações reais da tabela operacoes e calcula WR e lucro real.
+
+    Retorna métricas globais, por setup e por tipo de ativo (OTC vs normal).
+    O critério de win/loss usa a coluna `lucro` (> 0 = win, < 0 = loss, = 0 = empate).
     """
     conn = sqlite3.connect(db_path, timeout=10)
     try:
         linhas = conn.execute(
             """
-            SELECT setup, lucro FROM operacoes
+            SELECT ativo, setup, lucro FROM operacoes
             WHERE status='finalizada' AND lucro IS NOT NULL
               AND setup != 'correcao_manual'
             ORDER BY enviada_em ASC
@@ -446,66 +473,48 @@ def comparar_simulado_vs_real(db_path: str, payout: float) -> dict:
         conn.close()
 
     por_setup: dict[str, dict] = {}
-    total_wins = 0
-    total_losses = 0
-    total_empates = 0
-    total_lucro = 0.0
+    por_tipo: dict[str, dict] = {}
+    global_b = _novo_bucket()
 
-    for setup, lucro in linhas:
+    for ativo, setup, lucro in linhas:
         lucro_f = float(lucro)
-        item = por_setup.setdefault(
-            setup,
-            {"operacoes": 0, "wins": 0, "losses": 0, "empates": 0, "lucro_total": 0.0},
-        )
-        item["operacoes"] += 1
-        item["lucro_total"] += lucro_f
-        total_lucro += lucro_f
-        if lucro_f > 0:
-            item["wins"] += 1
-            total_wins += 1
-        elif lucro_f < 0:
-            item["losses"] += 1
-            total_losses += 1
-        else:
-            item["empates"] += 1
-            total_empates += 1
+        tipo = "OTC" if "-OTC" in str(ativo) else "normal"
 
-    for item in por_setup.values():
-        decididas = item["wins"] + item["losses"]
-        item["winrate"] = round(item["wins"] / decididas, 4) if decididas > 0 else 0.0
-        ic_inf, ic_sup = intervalo_wilson(item["wins"], decididas)
-        item["ic95_min"] = round(ic_inf, 4)
-        item["ic95_max"] = round(ic_sup, 4)
-        item["lucro_total"] = round(item["lucro_total"], 2)
+        _acumular(por_setup.setdefault(setup, _novo_bucket()), lucro_f)
+        _acumular(por_tipo.setdefault(tipo, _novo_bucket()), lucro_f)
+        _acumular(global_b, lucro_f)
 
-    total_ops = total_wins + total_losses + total_empates
-    decididas_global = total_wins + total_losses
-    wr_global = round(total_wins / decididas_global, 4) if decididas_global > 0 else 0.0
-    ic_inf_g, ic_sup_g = intervalo_wilson(total_wins, decididas_global)
+    for b in list(por_setup.values()) + list(por_tipo.values()) + [global_b]:
+        _finalizar_bucket(b)
 
     return {
         "por_setup": por_setup,
-        "global": {
-            "operacoes": total_ops,
-            "wins": total_wins,
-            "losses": total_losses,
-            "empates": total_empates,
-            "winrate": wr_global,
-            "ic95_min": round(ic_inf_g, 4),
-            "ic95_max": round(ic_sup_g, 4),
-            "lucro_total": round(total_lucro, 2),
-        },
+        "por_tipo_ativo": por_tipo,
+        "global": global_b,
     }
 
 
-def imprimir_comparacao(resultado_real: dict, payout: float) -> None:
-    """Imprime tabela legível com métricas reais por setup.
+def _linhas_tabela_bucket(agrupamento: dict[str, dict], chave: str) -> list[dict]:
+    linhas = []
+    for nome, item in sorted(agrupamento.items()):
+        linhas.append({
+            chave: nome,
+            "ops": item["operacoes"],
+            "wins": item["wins"],
+            "losses": item["losses"],
+            "winrate": f"{item['winrate']:.1%}",
+            "ic95": f"[{item['ic95_min']:.1%}, {item['ic95_max']:.1%}]",
+            "lucro": f"{item['lucro_total']:+.2f}",
+        })
+    return linhas
 
-    Se dados de simulação não estiverem disponíveis, imprime só o real.
-    """
+
+def imprimir_comparacao(resultado_real: dict, payout: float) -> None:
+    """Imprime tabela legível com métricas reais por setup e por tipo (OTC vs normal)."""
     be = breakeven(payout)
     global_r = resultado_real["global"]
     por_setup = resultado_real["por_setup"]
+    por_tipo = resultado_real.get("por_tipo_ativo", {})
 
     print(f"\n=== Real (conta PRACTICE) — comparação simulado vs real ===")
     print(f"Payout: {payout:.1%} | Breakeven: {be:.1%}")
@@ -521,20 +530,15 @@ def imprimir_comparacao(resultado_real: dict, payout: float) -> None:
         f"Lucro={global_r['lucro_total']:+.2f}"
     )
 
+    if por_tipo:
+        linhas = _linhas_tabela_bucket(por_tipo, "tipo_ativo")
+        if linhas:
+            print(f"\nOTC vs normal:\n{pd.DataFrame(linhas).set_index('tipo_ativo').to_string()}")
+
     if por_setup:
-        linhas = []
-        for setup, item in sorted(por_setup.items()):
-            linhas.append({
-                "setup": setup,
-                "ops": item["operacoes"],
-                "wins": item["wins"],
-                "losses": item["losses"],
-                "winrate": f"{item['winrate']:.1%}",
-                "ic95": f"[{item['ic95_min']:.1%}, {item['ic95_max']:.1%}]",
-                "lucro": f"{item['lucro_total']:+.2f}",
-            })
-        tabela = pd.DataFrame(linhas).set_index("setup")
-        print(f"\nPor setup:\n{tabela.to_string()}")
+        linhas = _linhas_tabela_bucket(por_setup, "setup")
+        if linhas:
+            print(f"\nPor setup:\n{pd.DataFrame(linhas).set_index('setup').to_string()}")
 
     if global_r["winrate"] < be:
         print(
