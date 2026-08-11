@@ -155,4 +155,36 @@ else:
     print(f"  média={media:.0f}ms  p95={p95}ms  tardios(>15s)={tardios}/{len(atrasos)}")
 print()
 
+# ─── PRÉ-ALERTAS: TAXA DE CONVERSÃO ───
+conn2 = sqlite3.connect(DB)
+conn2.row_factory = sqlite3.Row
+try:
+    pre_rows = conn2.execute("""
+        SELECT ativo, setup, direcao,
+               COUNT(*) AS pre_alertas,
+               SUM(converteu) AS convertidos,
+               ROUND(AVG(converteu) * 100.0, 1) AS taxa_pct,
+               ROUND(AVG(segundo_no_candle), 1) AS segundo_medio
+        FROM pre_alertas
+        GROUP BY ativo, setup, direcao
+        ORDER BY taxa_pct DESC, pre_alertas DESC
+    """).fetchall()
+except Exception:
+    pre_rows = []
+conn2.close()
+
+print(f"PRE-ALERTAS (historico completo, {len(pre_rows)} grupos):")
+if not pre_rows:
+    print("  sem dados (tabela pre_alertas vazia ou banco antigo)")
+else:
+    header = f"  {'ativo':<20} {'setup':<22} {'dir':<5} {'alertas':>7} {'conv':>5} {'taxa%':>6} {'seg_med':>7}"
+    print(header)
+    print("  " + "-" * (len(header) - 2))
+    for r in pre_rows:
+        print(
+            f"  {r['ativo']:<20} {r['setup']:<22} {r['direcao']:<5} "
+            f"{r['pre_alertas']:>7} {r['convertidos']:>5} {r['taxa_pct']:>6} {r['segundo_medio']:>7}"
+        )
+print()
+
 input("Pressione Enter para fechar...")

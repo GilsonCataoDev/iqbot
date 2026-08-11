@@ -479,12 +479,33 @@ def main(config: Configuracao | None = None) -> None:
                             registro.registrar_latencia(_lat_rev)
                         except Exception as _e_lat:
                             print(f"    [lat] falha ao persistir: {_e_lat}")
+                        try:
+                            registro.marcar_conversao_pre_alerta(
+                                ativo=ativo,
+                                direcao=alerta.direcao,
+                                ts_unix=snapshot.timestamp_servidor,
+                                janela_s=config.timeframe_segundos,
+                            )
+                        except Exception as _e_conv:
+                            print(f"    [conversao_pa] falha ao atualizar: {_e_conv}")
 
             marca = (alerta.hora, alerta.tipo, alerta.direcao)
             if ultimo_alerta_avisado[ativo] != marca:
                 ultimo_alerta_avisado[ativo] = marca
                 if alerta.tipo == "aproximando":
                     contagem_aproximando_hoje[ativo] = contagem_aproximando_hoje.get(ativo, 0) + 1
+                    _setup_alerta = "reversao_confluencia" if alerta.confluencia else "reversao_candle"
+                    try:
+                        registro.registrar_pre_alerta(
+                            ativo=ativo,
+                            direcao=alerta.direcao,
+                            nivel_sr=alerta.preco,
+                            setup=_setup_alerta,
+                            segundo_no_candle=segundo_no_candle,
+                            ts_unix=snapshot.timestamp_servidor,
+                        )
+                    except Exception as _e_pa:
+                        print(f"    [pre_alerta] falha ao persistir: {_e_pa}")
                 print(f"[{datetime.now():%H:%M:%S}] {alerta.resumo()}")
                 for motivo in alerta.motivos:
                     print(f"    - {motivo}")

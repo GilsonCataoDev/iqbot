@@ -123,6 +123,18 @@ class RegistroSQLite:
                     offset_servidor_s REAL,
                     registrado_em TEXT NOT NULL
                 );
+
+                CREATE TABLE IF NOT EXISTS pre_alertas (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    registrado_em TEXT NOT NULL,
+                    ativo TEXT NOT NULL,
+                    direcao TEXT NOT NULL,
+                    nivel_sr REAL NOT NULL,
+                    setup TEXT NOT NULL,
+                    segundo_no_candle INTEGER NOT NULL,
+                    ts_unix INTEGER NOT NULL,
+                    converteu INTEGER NOT NULL DEFAULT 0
+                );
                 """
             )
             colunas_operacoes = {
@@ -167,6 +179,86 @@ class RegistroSQLite:
                 """,
                 {**d, "id_ordem": id_ordem, "registrado_em": datetime.now().isoformat()},
             )
+
+    def registrar_pre_alerta(
+        self,
+        ativo: str,
+        direcao: str,
+        nivel_sr: float,
+        setup: str,
+        segundo_no_candle: int,
+        ts_unix: int,
+    ) -> None:
+        """Persiste um pré-alerta (tipo='aproximando') para análise de conversão."""
+        with self._lock, self._sessao() as db:
+            db.execute(
+                """
+                INSERT INTO pre_alertas
+                    (registrado_em, ativo, direcao, nivel_sr, setup,
+                     segundo_no_candle, ts_unix, converteu)
+                VALUES (?, ?, ?, ?, ?, ?, ?, 0)
+                """,
+                (
+                    datetime.now().isoformat(),
+                    ativo, direcao, nivel_sr, setup,
+                    segundo_no_candle, ts_unix,
+                ),
+            )
+
+    def marcar_conversao_pre_alerta(
+        self,
+        ativo: str,
+        direcao: str,
+        ts_unix: int,
+        janela_s: int = 300,
+    ) -> None:
+        """Marca o pré-alerta mais recente de (ativo, direcao) dentro de janela_s como
+        convertido — chamado quando o alerta vira uma entrada executada."""
+        ts_inicio = ts_unix - janela_s
+        with self._lock, self._sessao() as db:
+            db.execute(
+                """
+                UPDATE pre_alertas
+                   SET converteu = 1
+                 WHERE ativo = ?
+                   AND direcao = ?
+                   AND ts_unix >= ?
+                   AND ts_unix <= ?
+                   AND converteu = 0
+                   AND id = (
+                       SELECT MAX(id) FROM pre_alertas
+                        WHERE ativo = ?
+                          AND direcao = ?
+                          AND ts_unix >= ?
+                          AND ts_unix <= ?
+                          AND converteu = 0
+                   )
+                """,
+                (ativo, direcao, ts_inicio, ts_unix,
+                 ativo, direcao, ts_inicio, ts_unix),
+            )
+
+    def taxa_conversao_pre_alertas(self) -> list[dict]:
+        """Retorna estatísticas de conversão de pré-alertas agrupadas por ativo e setup."""
+        with self._sessao() as db:
+            linhas = db.execute(
+                """
+                SELECT
+                    ativo,
+                    setup,
+                    direcao,
+                    COUNT(*) AS pre_alertas,
+                    SUM(converteu) AS convertidos,
+                    ROUND(AVG(converteu) * 100.0, 1) AS taxa_pct,
+                    ROUND(AVG(segundo_no_candle), 1) AS segundo_medio
+                FROM pre_alertas
+                GROUP BY ativo, setup, direcao
+                ORDER BY taxa_pct DESC, pre_alertas DESC
+                """
+            ).fetchall()
+        colunas = ["ativo", "setup", "direcao", "pre_alertas",
+                   "convertidos", "taxa_pct", "segundo_medio"]
+        return [dict(zip(colunas, linha)) for linha in linhas]
 
     def registrar_decisao(
         self,
