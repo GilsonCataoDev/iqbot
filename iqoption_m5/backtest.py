@@ -25,6 +25,23 @@ import pandas as pd
 from .config import Configuracao
 from .estrategia import EstrategiaReversaoM5
 
+# Atrasos padrão (segundos) para a simulação de latência
+ATRASOS_PADRAO_S: list[int] = [0, 1, 3, 5, 10, 15, 30]
+
+# Sessões de mercado (UTC): (nome, hora_inicio_incl, hora_fim_excl)
+_SESSOES_UTC = [
+    ("asia",   0,  8),
+    ("london", 7, 16),
+    ("us",    13, 21),
+]
+
+
+def _classificar_sessao(hora_utc: int) -> str:
+    for nome, ini, fim in _SESSOES_UTC:
+        if ini <= hora_utc < fim:
+            return nome
+    return "off"
+
 MAX_CANDLES_POR_CHAMADA = 1000  # limite da API da IQ Option
 
 
@@ -268,6 +285,140 @@ def imprimir_relatorio(df: pd.DataFrame, payout: float) -> None:
         print(f"\n[Multiplicidade] {n_estrategias} estratégia(s) testadas.")
         print(f"  Bonferroni: limiar de significância ajustado para α={alpha_ajustado:.4f} (em vez de 0.05).")
         print(f"  Interprete winrates próximos ao breakeven com ceticismo — podem ser ruído.")
+
+
+# ---------------------------------------------------------------------------
+# Simulação de latência
+# ---------------------------------------------------------------------------
+def simular_com_latencia(
+    operacoes: list[Operacao],
+    payout: float,
+    atrasos_s: list[int] | None = None,
+    timeframe_s: int = 300,
+    max_age_s: float = 30.0,
+) -> pd.DataFrame:
+    """Retorna impacto de diferentes atrasos de entrada na estratégia.
+
+    Para cada atraso simulado calcula quantos sinais seriam bloqueados e
+    qual seria o resultado entre os que passaram. Como não há dados tick,
+    o WR dos sinais que passam é idêntico ao do cenário sem atraso —
+    a tabela mostra principalmente a sensibilidade ao threshold max_age_s.
+
+    Args:
+        operacoes: lista produzida por simular().
+        payout: payout do corretor (ex: 0.85).
+        atrasos_s: lista de atrasos em segundos a testar.
+        timeframe_s: duração do candle em segundos (300 para M5).
+        max_age_s: tempo máximo de vida do sinal antes de ser descartado.
+
+    Returns:
+        DataFrame indexado por atraso_s com colunas:
+        sinais_totais, bloq_expiracao, bloq_candle, operacoes, empates,
+        acerto_pct, ic95_min_pct, ic95_max_pct, lucro_unidades,
+        taxa_retorno_pct.
+    """
+    if atrasos_s is None:
+        atrasos_s = ATRASOS_PADRAO_S
+    df = para_dataframe(operacoes)
+    if df.empty:
+        return pd.DataFrame()
+
+    total = len(df)
+    linhas = []
+    for atraso in atrasos_s:
+        # sinal expirou antes do envio?
+        bloq_exp = total if atraso >= max_age_s else 0
+        # janela do candle expirou?
+        bloq_can = total if atraso >= timeframe_s else 0
+        bloq = max(bloq_exp, bloq_can)
+
+        df_neg = df if bloq == 0 else df.iloc[0:0]
+        resumo = _resumir(df_neg, payout)
+        lucro = resumo["lucro_unidades"]
+        taxa_retorno = round(lucro / total * 100, 2) if total > 0 else 0.0
+
+        linhas.append({
+            "atraso_s":        atraso,
+            "sinais_totais":   total,
+            "bloq_expiracao":  bloq_exp,
+            "bloq_candle":     bloq_can,
+            "operacoes":       resumo["operacoes"],
+            "empates":         resumo["empates"],
+            "acerto_pct":      resumo["acerto_pct"],
+            "ic95_min_pct":    resumo["ic95_min_pct"],
+            "ic95_max_pct":    resumo["ic95_max_pct"],
+            "lucro_unidades":  lucro,
+            "taxa_retorno_pct": taxa_retorno,
+        })
+
+    return pd.DataFrame(linhas).set_index("atraso_s")
+
+
+def imprimir_relatorio_latencia(
+    operacoes: list[Operacao],
+    payout: float,
+    atrasos_s: list[int] | None = None,
+    timeframe_s: int = 300,
+    max_age_s: float = 30.0,
+) -> None:
+    """Imprime tabela de sensibilidade a latência e breakdowns agrupados."""
+    df_ops = para_dataframe(operacoes)
+    if df_ops.empty:
+        print("Nenhuma operação para análise de latência.")
+        return
+
+    df_ops["sessao"] = df_ops["hora_dia"].map(_classificar_sessao)
+    be = breakeven(payout)
+
+    print(
+        f"\n=== Simulação de latência de entrada "
+        f"(max_age={max_age_s:.0f}s | janela_candle={timeframe_s}s | payout={payout:.1%}) ==="
+    )
+    print(
+        "Nota: sem dados tick, WR é idêntico para todos os atrasos abaixo do threshold.\n"
+    )
+
+    resultado = simular_com_latencia(operacoes, payout, atrasos_s, timeframe_s, max_age_s)
+    print(resultado.to_string())
+
+    # Identifica o maior atraso que ainda permite operar
+    atrasos_ok = [
+        a for a in (atrasos_s or ATRASOS_PADRAO_S)
+        if a < max_age_s and a < timeframe_s
+    ]
+    print(
+        f"\nLimiar atual (max_age_s={max_age_s:.0f}s): sinais expiram se latência >= {max_age_s:.0f}s."
+    )
+    if atrasos_ok:
+        print(f"Atrasos viáveis com configuração atual: {atrasos_ok} segundos.")
+    else:
+        print("Nenhum atraso da lista e viável com a configuração atual.")
+
+    # Breakdowns para o cenário sem atraso (linha de base)
+    print("\n--- Breakdowns (cenário sem atraso, linha de base) ---")
+    for coluna, titulo, minimo in (
+        ("ativo",    "Por ativo",    1),
+        ("setup",    "Por estratégia", 1),
+        ("direcao",  "Por direção",  1),
+        ("hora_dia", "Por hora UTC", 5),
+        ("sessao",   "Por sessão",   1),
+    ):
+        if coluna not in df_ops.columns:
+            continue
+        tabela = tabela_por(df_ops, coluna, payout, minimo=minimo)
+        print(f"\n  {titulo}:")
+        if tabela.empty:
+            print(f"  (sem grupos com >= {minimo} operações)")
+        else:
+            print(tabela.to_string())
+
+    # Horas abaixo do breakeven
+    tabela_h = tabela_por(df_ops, "hora_dia", payout, minimo=5)
+    if not tabela_h.empty:
+        ruins = tabela_h[tabela_h["acerto_pct"] / 100 < be]
+        if not ruins.empty:
+            horas = ", ".join(f"{int(h)}h" for h in sorted(ruins.index))
+            print(f"\nHoras abaixo do breakeven ({be:.1%}): {horas}")
 
 
 # ---------------------------------------------------------------------------
