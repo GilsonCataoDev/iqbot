@@ -305,6 +305,14 @@ class EstrategiaReversaoM5:
         if not self.config.pullback_rsi_min <= rsi <= self.config.pullback_rsi_max:
             return None
 
+        # §9: filtro RSI no candle de recuo (deve estar em zona extrema)
+        if self.config.pullback_recuo_rsi_filtro and not pd.isna(recuo.get("RSI")):
+            rsi_recuo = float(recuo["RSI"])
+            if contexto["direcao"] == "call" and rsi_recuo >= self.config.rsi_sobrevendido:
+                return None
+            if contexto["direcao"] == "put" and rsi_recuo <= self.config.rsi_sobrecomprado:
+                return None
+
         if contexto["direcao"] == "call":
             confirmou = (
                 confirmacao["Close"] > confirmacao["Open"]
@@ -319,6 +327,12 @@ class EstrategiaReversaoM5:
             )
         if not confirmou:
             return None
+
+        # §9: filtro de corpo mínimo no candle de confirmação
+        if self.config.pullback_confirmacao_corpo_atr > 0:
+            corpo_conf = abs(float(confirmacao["Close"]) - float(confirmacao["Open"]))
+            if corpo_conf < self.config.pullback_confirmacao_corpo_atr * float(confirmacao["ATR"]):
+                return None
 
         zona = contexto["zona_fib"]
         setup = "pullback_confluencia" if len(contexto["fatores"]) >= 2 else "pullback"
@@ -453,6 +467,15 @@ class EstrategiaReversaoM5:
         if amplitude <= 0:
             return None
 
+        # §8: filtro de corpo mínimo (ambas direções)
+        if self.config.sr_rejeicao_corpo_min_atr > 0:
+            corpo = abs(v_close - v_open)
+            if corpo < self.config.sr_rejeicao_corpo_min_atr * atr:
+                return None
+
+        _rsi_val = vela.get("RSI")
+        _rsi_ok = _rsi_val is not None and not pd.isna(_rsi_val)
+
         meio = (v_high + v_low) / 2.0
         tendencia = str(vela.get("TendenciaMacro", "lateral"))
         suportes, resistencias = self._pivos(df, indice)
@@ -465,6 +488,13 @@ class EstrategiaReversaoM5:
                 and v_close > meio
                 and (v_close > v_open or mecha_inf >= 0.35)
             ):
+                # §8: exige RSI sobrevendido para CALL
+                if (
+                    self.config.sr_rejeicao_rsi_filtro
+                    and _rsi_ok
+                    and float(_rsi_val) >= self.config.rsi_sobrevendido
+                ):
+                    return None
                 return Decisao(
                     ativo=ativo,
                     direcao="call",
@@ -489,6 +519,13 @@ class EstrategiaReversaoM5:
                 and v_close < meio
                 and (v_close < v_open or mecha_sup >= 0.35)
             ):
+                # §8: exige RSI sobrecomprado para PUT
+                if (
+                    self.config.sr_rejeicao_rsi_filtro
+                    and _rsi_ok
+                    and float(_rsi_val) <= self.config.rsi_sobrecomprado
+                ):
+                    return None
                 return Decisao(
                     ativo=ativo,
                     direcao="put",

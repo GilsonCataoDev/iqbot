@@ -70,6 +70,19 @@ class Configuracao:
     pullback_rsi_max: float = 65.0
     pullback_slope_forte_multiplo_atr: float = 0.5  # bloqueia pullback quando |slope EMA_Macro| > N*ATR
 
+    # --- Melhoria §8: SR Rejeição ---
+    # Toggle: exige RSI sobrevendido (CALL) ou sobrecomprado (PUT) no candle que toca o nível.
+    # Off por padrão — ativar após validar que melhora WR no backtest.
+    sr_rejeicao_rsi_filtro: bool = False
+    # 0=desativado; >0=corpo mínimo do candle de rejeição em múltiplos de ATR.
+    sr_rejeicao_corpo_min_atr: float = 0.0
+
+    # --- Melhoria §9: Pullback ---
+    # 0=desativado; >0=corpo mínimo do candle de confirmação em múltiplos de ATR.
+    pullback_confirmacao_corpo_atr: float = 0.0
+    # Toggle: exige RSI sobrevendido no recuo (CALL) ou sobrecomprado (PUT).
+    pullback_recuo_rsi_filtro: bool = False
+
     macd_fast: int = 6
     macd_slow: int = 16
     macd_signal: int = 9
@@ -108,6 +121,12 @@ class Configuracao:
     # Setup só entra se hora_utc atual estiver dentro da janela.
     # Exemplo: {"sr_rejeicao": (7, 14), "macd_crossover": (0, 12)}
     # None = sem restrição por setup.
+    # --- §11: Janela de entrada por setup ---
+    # None = usa entrada_max_segundos_no_candle global para todos os setups.
+    # Ex: {"sr_rejeicao": 30, "pullback_confluencia": 180}
+    # Setups de reversão intra-candle devem ter janela menor que setups confirmados no close.
+    janela_entrada_por_setup: dict | None = None
+
     horario_por_setup: dict | None = field(default_factory=lambda: {
         # Janelas boas (UTC) derivadas do histórico de 4 dias em PRACTICE.
         # Atualizar conforme o banco crescer.

@@ -764,6 +764,16 @@ def main(config: Configuracao | None = None) -> None:
                         )
                         algum_bloqueio_definitivo = True
                         continue
+            # §11: janela de entrada por setup
+            if config.janela_entrada_por_setup:
+                _janela_setup = config.janela_entrada_por_setup.get(setup_nome)
+                if _janela_setup is not None and segundo_no_candle > _janela_setup:
+                    print(
+                        f"    [{setup_nome}] fora da janela de entrada do setup "
+                        f"({segundo_no_candle}s > {_janela_setup}s) — cancelado"
+                    )
+                    algum_bloqueio_definitivo = True
+                    continue
             decisao = replace(decisao, candle_hora=proxima_vela)
             autorizacao = risco.avaliar(snapshot, decisao)
             registro.registrar_decisao(decisao, snapshot, autorizacao)
