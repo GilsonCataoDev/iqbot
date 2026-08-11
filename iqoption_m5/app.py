@@ -593,6 +593,22 @@ def main(config: Configuracao | None = None) -> None:
 
         for decisao in decisoes_todas:
             setup_nome = decisao.detalhes.get("setup", decisao.motivo)
+            # Filtro de horário por setup (UTC).
+            if config.horario_por_setup and setup_nome in config.horario_por_setup:
+                _h_ini, _h_fim = config.horario_por_setup[setup_nome]
+                _hora_utc = agora_utc.hour
+                _dentro = (
+                    _h_ini <= _hora_utc <= _h_fim
+                    if _h_ini <= _h_fim
+                    else _hora_utc >= _h_ini or _hora_utc <= _h_fim  # cruza meia-noite
+                )
+                if not _dentro:
+                    print(
+                        f"    [{setup_nome}] fora da janela horária "
+                        f"({_h_ini:02d}h-{_h_fim:02d}h UTC, agora={_hora_utc:02d}h) — cancelado"
+                    )
+                    algum_bloqueio_definitivo = True
+                    continue
             decisao = replace(decisao, candle_hora=proxima_vela)
             autorizacao = risco.avaliar(snapshot, decisao)
             registro.registrar_decisao(decisao, snapshot, autorizacao)

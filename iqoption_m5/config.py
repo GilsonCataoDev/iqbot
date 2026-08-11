@@ -1,5 +1,5 @@
 import os
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 
 TIMEFRAMES_SUPORTADOS = {60: "M1", 300: "M5"}
@@ -101,7 +101,27 @@ class Configuracao:
     # --- Horário bloqueado (UTC) ---
     # Evita operar em janelas de baixa liquidez / mercado OTC suspenso.
     # None = sem restrição. Tupla ((h_inicio, m_inicio), (h_fim, m_fim)).
-    horario_bloqueado: tuple | None = ((0, 0), (7, 0))  # 00:00-07:00 UTC
+    horario_bloqueado: tuple | None = None  # sem restrição de horário
+
+    # --- Filtro de horário por setup (UTC) ---
+    # Mapeia nome do setup para tupla (hora_inicio, hora_fim) em UTC (0-23, inclusivo).
+    # Setup só entra se hora_utc atual estiver dentro da janela.
+    # Exemplo: {"sr_rejeicao": (7, 14), "macd_crossover": (0, 12)}
+    # None = sem restrição por setup.
+    horario_por_setup: dict | None = field(default_factory=lambda: {
+        # Janelas boas (UTC) derivadas do histórico de 4 dias em PRACTICE.
+        # Atualizar conforme o banco crescer.
+        "macd_crossover":          (0, 12),   # 00h-12h bom; 13h-23h ruim (13h=22%, 23h=17%)
+        "sr_rejeicao":             (7, 20),   # 00h=23% WR; 04h=38%; bom de 07h em diante
+        "divergencia_rsi":         (5, 13),   # 05h-13h bom; 21h-23h ruins (25-38%)
+        "fibo_sr_retracao":        (0, 12),   # 11h top; 01h e 10h ruins — manhã UTC segura
+        "reversao_candle":         (5, 12),   # 08h-09h ótimo; 11h=0%
+        "bollinger_squeeze":       (8, 16),   # 13h=100%; 01h=25%
+        "pullback_confluencia":    (4, 22),   # 07h=100%; só evita 23h=0%
+        "pullback":                (4, 18),   # 16h=100%; noite sem dados suficientes
+        "reversao_bollinger_rsi":  (5, 15),   # poucos dados — janela conservadora
+        "reversao_confluencia":    (5, 15),   # poucos dados — janela conservadora
+    })
 
     # --- Drawdown máximo percentual ---
     # Para o bot quando (banca_pico - banca_atual) / banca_pico >= este valor.
