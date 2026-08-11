@@ -100,6 +100,29 @@ class RegistroSQLite:
                     preco_execucao REAL NOT NULL,
                     slippage_pips REAL NOT NULL
                 );
+
+                CREATE TABLE IF NOT EXISTS latencias (
+                    signal_id TEXT PRIMARY KEY,
+                    ativo TEXT NOT NULL,
+                    setup TEXT NOT NULL,
+                    timeframe INTEGER NOT NULL,
+                    id_ordem TEXT,
+                    ts_abertura_candle INTEGER,
+                    ts_fechamento_esperado INTEGER,
+                    ts_recebimento_candle REAL,
+                    ts_inicio_calculo REAL,
+                    ts_fim_calculo REAL,
+                    ts_envio_ordem REAL,
+                    ts_confirmacao_ordem REAL,
+                    ts_resultado REAL,
+                    latencia_recebimento_ms REAL,
+                    latencia_calculo_ms REAL,
+                    latencia_envio_ms REAL,
+                    latencia_confirmacao_ms REAL,
+                    idade_sinal_ms REAL,
+                    offset_servidor_s REAL,
+                    registrado_em TEXT NOT NULL
+                );
                 """
             )
             colunas_operacoes = {
@@ -115,6 +138,35 @@ class RegistroSQLite:
                 db.execute("ALTER TABLE operacoes ADD COLUMN hora_sinal TEXT")
             if "atraso_envio_ms" not in colunas_operacoes:
                 db.execute("ALTER TABLE operacoes ADD COLUMN atraso_envio_ms INTEGER")
+
+    def registrar_latencia(self, lat, id_ordem: str | None = None) -> None:
+        """Persiste um LatenciaSinal no banco. Seguro chamar múltiplas vezes
+        (INSERT OR REPLACE): a última chamada (com confirmação/resultado) ganha."""
+        from .timing import LatenciaSinal  # import local para não circular
+        with self._lock, self._sessao() as db:
+            d = lat.para_dict()
+            db.execute(
+                """
+                INSERT OR REPLACE INTO latencias (
+                    signal_id, ativo, setup, timeframe, id_ordem,
+                    ts_abertura_candle, ts_fechamento_esperado, ts_recebimento_candle,
+                    ts_inicio_calculo, ts_fim_calculo, ts_envio_ordem,
+                    ts_confirmacao_ordem, ts_resultado,
+                    latencia_recebimento_ms, latencia_calculo_ms, latencia_envio_ms,
+                    latencia_confirmacao_ms, idade_sinal_ms, offset_servidor_s,
+                    registrado_em
+                ) VALUES (
+                    :signal_id, :ativo, :setup, :timeframe, :id_ordem,
+                    :ts_abertura_candle, :ts_fechamento_esperado, :ts_recebimento_candle,
+                    :ts_inicio_calculo, :ts_fim_calculo, :ts_envio_ordem,
+                    :ts_confirmacao_ordem, :ts_resultado,
+                    :latencia_recebimento_ms, :latencia_calculo_ms, :latencia_envio_ms,
+                    :latencia_confirmacao_ms, :idade_sinal_ms, :offset_servidor_s,
+                    :registrado_em
+                )
+                """,
+                {**d, "id_ordem": id_ordem, "registrado_em": datetime.now().isoformat()},
+            )
 
     def registrar_decisao(
         self,

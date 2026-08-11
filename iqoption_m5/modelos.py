@@ -1,3 +1,4 @@
+import uuid
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any
@@ -22,6 +23,8 @@ class Decisao:
     candle_hora: pd.Timestamp
     motivo: str
     detalhes: dict[str, Any] = field(default_factory=dict)
+    signal_id: str = field(default_factory=lambda: str(uuid.uuid4()))
+    ts_sinal_monotonic: float = field(default_factory=lambda: __import__("time").monotonic())
 
 
 @dataclass(frozen=True)

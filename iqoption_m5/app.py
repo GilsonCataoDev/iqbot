@@ -14,6 +14,16 @@ import pandas as pd
 
 from .alerta import anexar_noticia, detectar_reversao, explicar_decisao, niveis_gatilho, para_grafico
 from .config import Configuracao
+from .timing import (
+    LatenciaSinal,
+    MOTIVO_FILTRO_HORARIO,
+    MOTIVO_SINAL_EXPIRADO,
+    calcular_fechamento_candle,
+    gerar_signal_id,
+    obter_offset_servidor,
+    segundo_no_candle as _seg_no_candle,
+    sinal_ainda_valido,
+)
 from .estrategia import EstrategiaReversaoM5
 from .executor import ExecutorSeguro
 from .grafico import GraficoM5
@@ -285,9 +295,16 @@ def main(config: Configuracao | None = None) -> None:
     _retry_mercado_fechado_inicio: dict[str, float] = {}
 
     def _avaliar_ativo(ativo: str, snapshot, agora_utc: datetime) -> None:
+        # --- Instrumentação de latência ---
+        ts_recebimento = time.time()
+        ts_inicio_calculo = time.monotonic()
+        _offset_srv = obter_offset_servidor(ts_recebimento, snapshot.timestamp_servidor)
+
         print(f"[{datetime.now():%H:%M:%S}] [INICIO] {ativo}")
         candle_fechado = snapshot.candles.index[-2]
         indicadores = estrategia.calcular_indicadores(snapshot.candles, ativo)
+
+        ts_fim_calculo = time.monotonic()
 
         segundo_no_candle = snapshot.timestamp_servidor % config.timeframe_segundos
         segundos_restantes = config.timeframe_segundos - segundo_no_candle
@@ -358,13 +375,56 @@ def main(config: Configuracao | None = None) -> None:
                         f"risco={autorizacao_reversao.motivo}"
                     )
                     _seg_ate_exp = config.timeframe_segundos - segundo_no_candle
-                    if _seg_ate_exp < config.min_segundos_ate_expiracao:
+                    # Fix: aplica filtro de horário também no path detectar_reversao.
+                    _hora_utc = agora_utc.hour
+                    _janela_rev = (config.horario_por_setup or {}).get(setup_real)
+                    _fora_janela_rev = False
+                    if _janela_rev is not None:
+                        _h_ini_r, _h_fim_r = _janela_rev
+                        _dentro_r = (
+                            _h_ini_r <= _hora_utc <= _h_fim_r
+                            if _h_ini_r <= _h_fim_r
+                            else _hora_utc >= _h_ini_r or _hora_utc <= _h_fim_r
+                        )
+                        if not _dentro_r:
+                            print(
+                                f"    [{setup_real}] fora da janela horária "
+                                f"({_h_ini_r:02d}h-{_h_fim_r:02d}h UTC, agora={_hora_utc:02d}h) — cancelado"
+                            )
+                            _fora_janela_rev = True
+                    if _fora_janela_rev:
+                        pass  # bloqueado por horário
+                    elif _seg_ate_exp < config.min_segundos_ate_expiracao:
                         print(
                             f"    [{setup_real}] tarde demais: "
                             f"{_seg_ate_exp:.0f}s até expiração — cancelado"
                         )
                     elif autorizacao_reversao.permitida:
+                        # Instrumenta latência da reversao antes de enviar
+                        _lat_rev = LatenciaSinal(
+                            signal_id=decisao_reversao.signal_id,
+                            ativo=ativo,
+                            setup=setup_real,
+                            timeframe=config.timeframe_segundos,
+                            ts_recebimento_candle=ts_recebimento,
+                            ts_inicio_calculo=ts_inicio_calculo,
+                            ts_fim_calculo=ts_fim_calculo,
+                            ts_fechamento_esperado=calcular_fechamento_candle(
+                                snapshot.timestamp_servidor - config.timeframe_segundos,
+                                config.timeframe_segundos,
+                            ),
+                            offset_servidor_s=_offset_srv,
+                        )
+                        _lat_rev.ts_envio_ordem = time.time()
+                        _lat_rev.finalizar_envio()
                         executor.executar(snapshot, decisao_reversao)
+                        _lat_rev.ts_confirmacao_ordem = time.time()
+                        _lat_rev.finalizar_confirmacao()
+                        print(f"    {_lat_rev.resumo()}")
+                        try:
+                            registro.registrar_latencia(_lat_rev)
+                        except Exception as _e_lat:
+                            print(f"    [lat] falha ao persistir: {_e_lat}")
 
             marca = (alerta.hora, alerta.tipo, alerta.direcao)
             if ultimo_alerta_avisado[ativo] != marca:
@@ -704,7 +764,31 @@ def main(config: Configuracao | None = None) -> None:
                     print(
                         "    [IA] discordou mas a noticia confirmada a favor do sinal tem prioridade"
                     )
+                # Instrumenta latência antes de enviar
+                _lat = LatenciaSinal(
+                    signal_id=decisao.signal_id,
+                    ativo=ativo,
+                    setup=setup_nome,
+                    timeframe=config.timeframe_segundos,
+                    ts_recebimento_candle=ts_recebimento,
+                    ts_inicio_calculo=ts_inicio_calculo,
+                    ts_fim_calculo=ts_fim_calculo,
+                    ts_fechamento_esperado=calcular_fechamento_candle(
+                        snapshot.timestamp_servidor - config.timeframe_segundos,
+                        config.timeframe_segundos,
+                    ),
+                    offset_servidor_s=_offset_srv,
+                )
+                _lat.ts_envio_ordem = time.time()
+                _lat.finalizar_envio()
                 executor.executar(snapshot, decisao)
+                _lat.ts_confirmacao_ordem = time.time()
+                _lat.finalizar_confirmacao()
+                print(f"    {_lat.resumo()}")
+                try:
+                    registro.registrar_latencia(_lat)
+                except Exception as _e_lat:
+                    print(f"    [lat] falha ao persistir: {_e_lat}")
                 houve_execucao = True
                 _retry_mercado_fechado_inicio.pop(ativo, None)
                 if config.cooldown_pos_ordem_por_ativo_candles > 0:
