@@ -135,6 +135,17 @@ class RegistroSQLite:
                     ts_unix INTEGER NOT NULL,
                     converteu INTEGER NOT NULL DEFAULT 0
                 );
+
+                CREATE TABLE IF NOT EXISTS candles_historico (
+                    ativo TEXT NOT NULL,
+                    timeframe INTEGER NOT NULL,
+                    ts_unix INTEGER NOT NULL,
+                    open REAL NOT NULL,
+                    high REAL NOT NULL,
+                    low REAL NOT NULL,
+                    close REAL NOT NULL,
+                    PRIMARY KEY (ativo, timeframe, ts_unix)
+                );
                 """
             )
             colunas_operacoes = {
@@ -680,3 +691,73 @@ class RegistroSQLite:
             (pd.Timestamp(candle_hora).isoformat(), direcao): "confirmado" if permitida else "bloqueado"
             for candle_hora, direcao, permitida in linhas
         }
+
+    # ------------------------------------------------------------------
+    # Persistência de candles históricos (backtest candle-a-candle)
+    # ------------------------------------------------------------------
+
+    def salvar_candles(
+        self, ativo: str, df: pd.DataFrame, timeframe: int
+    ) -> int:
+        """Persiste candles no banco. Retorna quantos foram inseridos (novos)."""
+        if df.empty:
+            return 0
+        linhas = []
+        for ts, row in df.iterrows():
+            ts_unix = int(
+                (ts if ts.tzinfo else ts.tz_localize("UTC")).timestamp()
+            )
+            linhas.append((
+                ativo, timeframe, ts_unix,
+                float(row["Open"]), float(row["High"]),
+                float(row["Low"]),  float(row["Close"]),
+            ))
+        with self._lock, self._sessao() as db:
+            cur = db.executemany(
+                """
+                INSERT OR IGNORE INTO candles_historico
+                    (ativo, timeframe, ts_unix, open, high, low, close)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                linhas,
+            )
+            return cur.rowcount
+
+    def carregar_candles(
+        self, ativo: str, timeframe: int, limite: int = 5000
+    ) -> pd.DataFrame:
+        """Carrega os últimos `limite` candles do banco como DataFrame OHLC.
+
+        O índice é um DatetimeIndex UTC.
+        """
+        with self._sessao() as db:
+            linhas = db.execute(
+                """
+                SELECT ts_unix, open, high, low, close
+                FROM candles_historico
+                WHERE ativo=? AND timeframe=?
+                ORDER BY ts_unix DESC
+                LIMIT ?
+                """,
+                (ativo, timeframe, limite),
+            ).fetchall()
+        if not linhas:
+            return pd.DataFrame(columns=["Open", "High", "Low", "Close"])
+        linhas = linhas[::-1]  # ordem cronológica
+        idx = pd.to_datetime([r[0] for r in linhas], unit="s", utc=True)
+        return pd.DataFrame(
+            {
+                "Open":  [r[1] for r in linhas],
+                "High":  [r[2] for r in linhas],
+                "Low":   [r[3] for r in linhas],
+                "Close": [r[4] for r in linhas],
+            },
+            index=idx,
+        )
+
+    def total_candles_armazenados(self, ativo: str, timeframe: int) -> int:
+        with self._sessao() as db:
+            return db.execute(
+                "SELECT COUNT(*) FROM candles_historico WHERE ativo=? AND timeframe=?",
+                (ativo, timeframe),
+            ).fetchone()[0]

@@ -340,6 +340,12 @@ def main(config: Configuracao | None = None) -> None:
 
         indicadores = estrategia.calcular_indicadores(snapshot.candles, ativo)
 
+        # Persiste candles para backtest candle-a-candle offline
+        try:
+            registro.salvar_candles(ativo, snapshot.candles, config.timeframe_segundos)
+        except Exception:
+            pass
+
         ts_fim_calculo = time.monotonic()
 
         segundo_no_candle = snapshot.timestamp_servidor % config.timeframe_segundos
