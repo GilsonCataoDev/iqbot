@@ -14,8 +14,12 @@ import pandas as pd
 
 from .alerta import anexar_noticia, detectar_reversao, explicar_decisao, niveis_gatilho, para_grafico
 from .config import Configuracao
+from .candle_guard import CandleGuard, candle_ts_para_unix
 from .timing import (
     LatenciaSinal,
+    MOTIVO_CANDLE_DUPLICADO,
+    MOTIVO_CANDLE_FORA_DE_ORDEM,
+    MOTIVO_CANDLE_INCOMPLETO,
     MOTIVO_FILTRO_HORARIO,
     MOTIVO_SINAL_EXPIRADO,
     calcular_fechamento_candle,
@@ -173,6 +177,7 @@ def main(config: Configuracao | None = None) -> None:
         threading.Thread(target=_grafico_rt_worker, name="grafico-rt", daemon=True).start()
 
     ultimo_candle_processado = {ativo: None for ativo in config.ativos}
+    _candle_guard = CandleGuard()  # deduplicação e validação de ordem/fechamento
     _cooldown_ativo: dict[str, float] = {}  # ativo -> unix timestamp da última ordem executada
     candle_historico_grafico = {ativo: None for ativo in config.ativos}
     sinais_historicos_cache = {ativo: [] for ativo in config.ativos}
@@ -300,8 +305,38 @@ def main(config: Configuracao | None = None) -> None:
         ts_inicio_calculo = time.monotonic()
         _offset_srv = obter_offset_servidor(ts_recebimento, snapshot.timestamp_servidor)
 
+        # Fix: recaptura agora_utc aqui para eliminar drift entre ativos avaliados
+        # em sequência no mesmo loop (pode ser vários segundos na versão anterior).
+        agora_utc = datetime.now(timezone.utc)
+
         print(f"[{datetime.now():%H:%M:%S}] [INICIO] {ativo}")
         candle_fechado = snapshot.candles.index[-2]
+
+        # --- CandleGuard: valida fechamento, duplicatas e ordem ---
+        _candle_ts_unix = candle_ts_para_unix(candle_fechado)
+        _guard_ok, _guard_motivo = _candle_guard.validar(
+            ativo, config.timeframe_segundos, _candle_ts_unix, snapshot.timestamp_servidor
+        )
+        if not _guard_ok:
+            if _guard_motivo == MOTIVO_CANDLE_DUPLICADO:
+                # Candle já processado — silencioso (reconexão, polling rápido)
+                print(f"[{datetime.now():%H:%M:%S}] [FIM] {ativo} ({MOTIVO_CANDLE_DUPLICADO})")
+                return
+            elif _guard_motivo == MOTIVO_CANDLE_FORA_DE_ORDEM:
+                print(
+                    f"[{datetime.now():%H:%M:%S}] {ativo}: {MOTIVO_CANDLE_FORA_DE_ORDEM} "
+                    f"(recebido ts={_candle_ts_unix}, último={_candle_guard.ultimo_processado(ativo, config.timeframe_segundos)}) — ignorado"
+                )
+                return
+            elif _guard_motivo == MOTIVO_CANDLE_INCOMPLETO:
+                # Candle ainda não fechou segundo o servidor — aguarda sem marcar slot
+                print(
+                    f"[{datetime.now():%H:%M:%S}] {ativo}: {MOTIVO_CANDLE_INCOMPLETO} "
+                    f"(ts={_candle_ts_unix}, servidor={snapshot.timestamp_servidor}) — retry"
+                )
+                _retry_ativos.add(ativo)
+                return
+
         indicadores = estrategia.calcular_indicadores(snapshot.candles, ativo)
 
         ts_fim_calculo = time.monotonic()
@@ -557,6 +592,7 @@ def main(config: Configuracao | None = None) -> None:
         segundos_ate_expiracao = config.timeframe_segundos - segundo_no_candle
         if segundos_ate_expiracao < config.min_segundos_ate_expiracao:
             ultimo_candle_processado[ativo] = candle_fechado
+            _candle_guard.registrar(ativo, config.timeframe_segundos, _candle_ts_unix)
             print(
                 f"[{datetime.now():%H:%M:%S}] [FIM] {ativo} "
                 f"(tarde demais: {segundos_ate_expiracao:.0f}s até expiração, mín {config.min_segundos_ate_expiracao}s)"
@@ -618,6 +654,7 @@ def main(config: Configuracao | None = None) -> None:
                 print(f"[{datetime.now():%H:%M:%S}] [FIM] {ativo}")
             else:
                 ultimo_candle_processado[ativo] = candle_fechado
+                _candle_guard.registrar(ativo, config.timeframe_segundos, _candle_ts_unix)
                 print(
                     f"[{datetime.now():%H:%M:%S}] {ativo}: sem sinal | "
                     f"mercado={status} payout={payout} candle={candle_fechado}"
@@ -640,6 +677,7 @@ def main(config: Configuracao | None = None) -> None:
             if _elapsed < _required:
                 _restantes = math.ceil((_required - _elapsed) / config.timeframe_segundos)
                 ultimo_candle_processado[ativo] = candle_fechado
+                _candle_guard.registrar(ativo, config.timeframe_segundos, _candle_ts_unix)
                 print(
                     f"[{datetime.now():%H:%M:%S}] [FIM] {ativo} "
                     f"(cooldown: {_restantes} candle(s) restante(s))"
@@ -815,6 +853,7 @@ def main(config: Configuracao | None = None) -> None:
         # Hard blocks (mercado normal fechado, IA, etc.): commit imediato.
         if houve_execucao or algum_bloqueio_definitivo:
             ultimo_candle_processado[ativo] = candle_fechado
+            _candle_guard.registrar(ativo, config.timeframe_segundos, _candle_ts_unix)
         else:
             tempo_restante_janela = config.entrada_max_segundos_no_candle - segundo_no_candle
             if tempo_restante_janela > 5:
@@ -825,6 +864,7 @@ def main(config: Configuracao | None = None) -> None:
                 )
             else:
                 ultimo_candle_processado[ativo] = candle_fechado
+                _candle_guard.registrar(ativo, config.timeframe_segundos, _candle_ts_unix)
 
         ultima_explicacao[ativo] = todos_motivos
         print(f"[{datetime.now():%H:%M:%S}] [FIM] {ativo}")
