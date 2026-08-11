@@ -340,12 +340,6 @@ def main(config: Configuracao | None = None) -> None:
 
         indicadores = estrategia.calcular_indicadores(snapshot.candles, ativo)
 
-        # Persiste candles para backtest candle-a-candle offline
-        try:
-            registro.salvar_candles(ativo, snapshot.candles, config.timeframe_segundos)
-        except Exception:
-            pass
-
         ts_fim_calculo = time.monotonic()
 
         segundo_no_candle = snapshot.timestamp_servidor % config.timeframe_segundos
@@ -571,12 +565,17 @@ def main(config: Configuracao | None = None) -> None:
         # --- Gráfico em tempo real (atualiza a cada 3s, não só no fechamento) ---
         if grafico is not None and _pode_atualizar_grafico(ativo):
             try:
-                # Sinais históricos só recalculam quando o candle fecha
+                # Sinais históricos e candles só recalculam/persistem quando o candle fecha
                 if candle_historico_grafico[ativo] != candle_fechado:
                     sinais_historicos_cache[ativo] = estrategia.sinais_historicos(
                         ativo, snapshot.candles
                     )
                     candle_historico_grafico[ativo] = candle_fechado
+                    # Persiste candles uma vez por candle fechado (não a cada tick)
+                    try:
+                        registro.salvar_candles(ativo, snapshot.candles, config.timeframe_segundos)
+                    except Exception:
+                        pass
 
                 status_sinais = registro.status_decisoes_grafico(ativo)
                 sinais_grafico = []
