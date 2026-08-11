@@ -15,6 +15,7 @@ import pandas as pd
 from .alerta import anexar_noticia, detectar_reversao, explicar_decisao, niveis_gatilho, para_grafico
 from .config import Configuracao
 from .candle_guard import CandleGuard, candle_ts_para_unix
+from .regime import detectar_regime
 from .timing import (
     LatenciaSinal,
     MOTIVO_CANDLE_DUPLICADO,
@@ -427,8 +428,26 @@ def main(config: Configuracao | None = None) -> None:
                                 f"({_h_ini_r:02d}h-{_h_fim_r:02d}h UTC, agora={_hora_utc:02d}h) — cancelado"
                             )
                             _fora_janela_rev = True
-                    if _fora_janela_rev:
-                        pass  # bloqueado por horário
+                    # Filtro de regime de mercado (reversao path)
+                    _fora_regime_rev = False
+                    if config.filtro_regime_ativo and config.regimes_por_setup:
+                        _regimes_rev = config.regimes_por_setup.get(setup_real)
+                        if _regimes_rev is not None:
+                            _indice_rev = len(indicadores) - 2
+                            _regime_rev = detectar_regime(
+                                indicadores,
+                                _indice_rev,
+                                config.atr_regime_janela,
+                                config.atr_max_multiplo_mediana,
+                            )
+                            if _regime_rev.name not in _regimes_rev:
+                                print(
+                                    f"    [{setup_real}] regime {_regime_rev.name} "
+                                    f"não permitido {_regimes_rev} — cancelado"
+                                )
+                                _fora_regime_rev = True
+                    if _fora_janela_rev or _fora_regime_rev:
+                        pass  # bloqueado por horário ou regime
                     elif _seg_ate_exp < config.min_segundos_ate_expiracao:
                         print(
                             f"    [{setup_real}] tarde demais: "
@@ -707,6 +726,23 @@ def main(config: Configuracao | None = None) -> None:
                     )
                     algum_bloqueio_definitivo = True
                     continue
+            # Filtro de regime de mercado
+            if config.filtro_regime_ativo and config.regimes_por_setup:
+                _regimes_ok = config.regimes_por_setup.get(setup_nome)
+                if _regimes_ok is not None:
+                    _regime = detectar_regime(
+                        indicadores,
+                        len(indicadores) - 2,
+                        config.atr_regime_janela,
+                        config.atr_max_multiplo_mediana,
+                    )
+                    if _regime.name not in _regimes_ok:
+                        print(
+                            f"    [{setup_nome}] regime {_regime.name} "
+                            f"não permitido {_regimes_ok} — cancelado"
+                        )
+                        algum_bloqueio_definitivo = True
+                        continue
             decisao = replace(decisao, candle_hora=proxima_vela)
             autorizacao = risco.avaliar(snapshot, decisao)
             registro.registrar_decisao(decisao, snapshot, autorizacao)

@@ -123,6 +123,26 @@ class Configuracao:
         "reversao_confluencia":    (5, 15),   # poucos dados — janela conservadora
     })
 
+    # --- Filtro de regime de mercado ---
+    # False = sem filtro (padrão). True = aplica regimes_por_setup antes de executar.
+    filtro_regime_ativo: bool = False
+
+    # Mapeia nome do setup para tupla de regimes permitidos (Regime.name).
+    # Ignored quando filtro_regime_ativo=False.
+    # Exemplo: {"sr_rejeicao": ("LATERAL",), "pullback": ("TENDENCIA_ALTA", "TENDENCIA_BAIXA")}
+    regimes_por_setup: dict | None = field(default_factory=lambda: {
+        "sr_rejeicao":             ("LATERAL",),
+        "macd_crossover":          ("TENDENCIA_ALTA", "TENDENCIA_BAIXA"),
+        "divergencia_rsi":         ("LATERAL", "TENDENCIA_ALTA", "TENDENCIA_BAIXA"),
+        "reversao_bollinger_rsi":  ("LATERAL",),
+        "reversao_candle":         ("LATERAL", "TENDENCIA_ALTA", "TENDENCIA_BAIXA"),
+        "reversao_confluencia":    ("LATERAL", "TENDENCIA_ALTA", "TENDENCIA_BAIXA"),
+        "pullback_confluencia":    ("TENDENCIA_ALTA", "TENDENCIA_BAIXA"),
+        "pullback":                ("TENDENCIA_ALTA", "TENDENCIA_BAIXA"),
+        "fibo_sr_retracao":        ("TENDENCIA_ALTA", "TENDENCIA_BAIXA"),
+        "bollinger_squeeze":       ("LATERAL",),
+    })
+
     # --- Drawdown máximo percentual ---
     # Para o bot quando (banca_pico - banca_atual) / banca_pico >= este valor.
     # 0.0 = desativado.
