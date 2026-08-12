@@ -652,29 +652,37 @@ class RegistroSQLite:
         return float(linha[0]) if linha and linha[0] is not None else None
 
     def stats_globais(self) -> dict:
-        """Entradas e winrate do dia atual, separados por OTC e mercado normal."""
+        """Entradas e winrate do dia atual, separados por OTC e mercado normal.
+
+        Conta TODAS as ordens do dia exceto falha_envio (inclusive as ainda abertas).
+        Winrate e lucro calculados apenas sobre as finalizadas com lucro definido.
+        """
         hoje = datetime.now().date().isoformat()
         with self._lock, self._sessao() as db:
             linhas = db.execute(
                 """
-                SELECT ativo, lucro FROM operacoes
-                WHERE date(enviada_em)=? AND status='finalizada' AND lucro IS NOT NULL
+                SELECT ativo, status, lucro FROM operacoes
+                WHERE date(enviada_em)=? AND status != 'falha_envio'
                 """,
                 (hoje,),
             ).fetchall()
         stats: dict[str, dict] = {
-            "otc": {"entradas": 0, "wins": 0, "lucro": 0.0},
-            "normal": {"entradas": 0, "wins": 0, "lucro": 0.0},
+            "otc":    {"entradas": 0, "wins": 0, "finalizadas": 0, "lucro": 0.0},
+            "normal": {"entradas": 0, "wins": 0, "finalizadas": 0, "lucro": 0.0},
         }
-        for ativo, lucro in linhas:
+        for ativo, status, lucro in linhas:
             chave = "otc" if ativo.upper().endswith("-OTC") else "normal"
             stats[chave]["entradas"] += 1
-            stats[chave]["lucro"] += float(lucro)
-            if lucro > 0:
-                stats[chave]["wins"] += 1
+            if status == "finalizada" and lucro is not None:
+                stats[chave]["finalizadas"] += 1
+                stats[chave]["lucro"] += float(lucro)
+                if lucro > 0:
+                    stats[chave]["wins"] += 1
         for chave in ("otc", "normal"):
-            n = stats[chave]["entradas"]
-            stats[chave]["winrate"] = round(100 * stats[chave]["wins"] / n, 1) if n else None
+            n_fin = stats[chave]["finalizadas"]
+            stats[chave]["winrate"] = (
+                round(100 * stats[chave]["wins"] / n_fin, 1) if n_fin else None
+            )
             stats[chave]["lucro"] = round(stats[chave]["lucro"], 2)
         return stats
 

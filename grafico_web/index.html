@@ -843,14 +843,18 @@ function renderizarPainel(dados) {
       if (s.entradas === 0) {
         return `<div class="stats-row"><span class="stats-label">${label}</span><span style="color:var(--muted);font-size:11px">nenhuma</span></div>`;
       }
-      const wr = s.winrate ?? 0;
-      const barColor = wr >= 60 ? 'var(--green)' : wr >= 45 ? 'var(--yellow)' : 'var(--red)';
+      const semResultado = s.winrate === null || s.winrate === undefined;
+      const wr = semResultado ? 0 : s.winrate;
+      const barColor = semResultado ? 'var(--muted)' : wr >= 60 ? 'var(--green)' : wr >= 45 ? 'var(--yellow)' : 'var(--red)';
+      const wrStr = semResultado ? '--' : `${wr}%`;
       const lucroStr = s.lucro >= 0 ? `+${s.lucro.toFixed(2)}` : s.lucro.toFixed(2);
       const lucroClass = s.lucro >= 0 ? 'win-color' : 'loss-color';
+      const abertas = s.entradas - (s.finalizadas ?? s.entradas);
+      const abertasStr = abertas > 0 ? ` <span style="color:var(--muted);font-size:10px">(${abertas} ag.)</span>` : '';
       return `<div class="stats-row">` +
         `<span class="stats-label">${label}</span>` +
         `<div class="stats-bar-wrap"><div class="stats-bar" style="width:${wr}%;background:${barColor}"></div></div>` +
-        `<span class="stats-nums">${s.wins}/${s.entradas} &nbsp;<strong style="color:${barColor}">${wr}%</strong> &nbsp;<span class="${lucroClass}">${lucroStr}</span></span>` +
+        `<span class="stats-nums">${s.wins}/${s.entradas}${abertasStr} &nbsp;<strong style="color:${barColor}">${wrStr}</strong> &nbsp;<span class="${lucroClass}">${lucroStr}</span></span>` +
         `</div>`;
     };
     cartaoStats.innerHTML =
