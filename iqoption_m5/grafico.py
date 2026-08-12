@@ -181,6 +181,7 @@ class GraficoM5:
         funil: dict | None = None,
         stats_globais: dict | None = None,
         entradas_detalhadas: list | None = None,
+        niveis_sr: dict | None = None,
     ) -> dict:
         conversor = self._unix
         candles = [
@@ -204,10 +205,16 @@ class GraficoM5:
         suporte = float(janela_niveis["Low"].min())
         resistencia = float(janela_niveis["High"].max())
         amplitude = resistencia - suporte
-        niveis = [
-            {"tipo": "suporte", "preco": suporte},
-            {"tipo": "resistencia", "preco": resistencia},
-        ]
+        if niveis_sr:
+            niveis = (
+                [{"tipo": "suporte",     "preco": p} for p in niveis_sr.get("suportes",     [])] +
+                [{"tipo": "resistencia", "preco": p} for p in niveis_sr.get("resistencias", [])]
+            )
+        else:
+            niveis = [
+                {"tipo": "suporte",     "preco": suporte},
+                {"tipo": "resistencia", "preco": resistencia},
+            ]
         fib = [
             {"nivel": nivel, "preco": suporte + amplitude * nivel}
             for nivel in (0.0, 0.236, 0.382, 0.5, 0.618, 0.786, 1.0)
@@ -284,6 +291,7 @@ class GraficoM5:
             "funil": funil,
             "statsGlobais": stats_globais,
             "entradasDetalhadas": entradas_detalhadas,
+            "niveisSR": niveis_sr,
         }
 
     def atualizar(self, ativo: str, dados: dict) -> None:

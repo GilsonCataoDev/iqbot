@@ -616,6 +616,7 @@ def main(config: Configuracao | None = None) -> None:
                     },
                     stats_globais=registro.stats_globais(),
                     entradas_detalhadas=registro.entradas_hoje_detalhadas(),
+                    niveis_sr=estrategia.niveis_sr_atuais(indicadores, len(indicadores) - 1),
                 )
                 grafico_fila.put((ativo, dados_grafico))
             except Exception as erro:

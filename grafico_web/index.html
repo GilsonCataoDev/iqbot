@@ -442,11 +442,11 @@ async function atualizar() {
     linhasNiveis.forEach(l => serieCandle.removePriceLine(l));
     linhasNiveis = chkNiveis.checked ? (dados.niveis || []).map(n => serieCandle.createPriceLine({
       price: n.preco,
-      color: n.tipo === 'resistencia' ? '#ef5350' : '#26a69a',
+      color: n.tipo === 'resistencia' ? '#ef535099' : '#26a69a99',
       lineWidth: 1,
       lineStyle: LightweightCharts.LineStyle.Dashed,
       axisLabelVisible: true,
-      title: n.tipo === 'resistencia' ? 'Resistência' : 'Suporte',
+      title: n.tipo === 'resistencia' ? 'R' : 'S',
     })) : [];
 
     linhasFib.forEach(l => serieCandle.removePriceLine(l));

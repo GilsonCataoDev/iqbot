@@ -183,6 +183,45 @@ class EstrategiaReversaoM5:
                 resistencias.append(float(atual["High"]))
         return suportes, resistencias
 
+    def niveis_sr_atuais(self, df: pd.DataFrame, indice: int) -> dict[str, list[float]]:
+        """Retorna suportes e resistências visíveis ao redor do preço atual.
+
+        Filtra para ±4 ATR do Close atual e agrupa níveis próximos (cluster 0.4 ATR).
+        Usado para plotagem no gráfico — máx 6 linhas por lado.
+        """
+        raio_min = self.config.pullback_pivo_raio * 2 + 5
+        if indice < raio_min or indice >= len(df):
+            return {"suportes": [], "resistencias": []}
+
+        vela = df.iloc[indice]
+        try:
+            preco_atual = float(vela["Close"])
+            atr = float(vela["ATR"])
+        except (KeyError, TypeError, ValueError):
+            return {"suportes": [], "resistencias": []}
+        if atr <= 0:
+            return {"suportes": [], "resistencias": []}
+
+        suportes, resistencias = self._pivos(df, indice)
+        janela_display = 4.0 * atr
+        cluster_min   = 0.4  * atr
+
+        def _filtrar(niveis: list[float], reverso: bool) -> list[float]:
+            niveis = [n for n in niveis if abs(n - preco_atual) <= janela_display]
+            if not niveis:
+                return []
+            niveis = sorted(set(niveis), reverse=reverso)
+            agrupados: list[float] = []
+            for n in niveis:
+                if not agrupados or abs(n - agrupados[-1]) > cluster_min:
+                    agrupados.append(round(n, 5))
+            return agrupados[:6]
+
+        return {
+            "suportes":     _filtrar(suportes,     reverso=True),
+            "resistencias": _filtrar(resistencias, reverso=False),
+        }
+
     def _fundos_swing(self, series: pd.Series, raio: int) -> list[int]:
         arr = series.to_numpy()
         return [
