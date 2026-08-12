@@ -125,6 +125,22 @@
   .setup-detalhe { font-size: 10px; color: var(--muted); margin-top: 1px; }
   #cartao-estrategias { max-height: 240px; overflow-y: auto; }
 
+  /* Entradas detalhadas */
+  #cartao-entradas { max-height: 320px; overflow-y: auto; }
+  .entrada-item { padding: 6px 0; border-bottom: 1px solid #1a2035; font-size: 11px; }
+  .entrada-item:last-child { border-bottom: none; }
+  .entrada-cabecalho { display: flex; align-items: center; gap: 6px; margin-bottom: 3px; }
+  .entrada-hora { color: var(--muted); font-variant-numeric: tabular-nums; min-width: 38px; }
+  .entrada-ativo { font-weight: 600; }
+  .entrada-dir-call { color: var(--green); font-weight: 700; }
+  .entrada-dir-put  { color: var(--red);   font-weight: 700; }
+  .entrada-setup { background: #1c2233; border-radius: 3px; padding: 1px 5px; color: var(--muted); font-size: 10px; }
+  .entrada-status-aberta   { color: #42a5f5; font-size: 10px; }
+  .entrada-status-ganho    { color: var(--green); font-size: 10px; }
+  .entrada-status-perda    { color: var(--red);   font-size: 10px; }
+  .entrada-status-outro    { color: var(--muted); font-size: 10px; }
+  .entrada-motivos { padding-left: 44px; color: var(--muted); font-size: 10px; line-height: 1.5; }
+
   /* Stats card */
   #cartao-stats { border-left: 3px solid var(--green); }
   .stats-row {
@@ -161,6 +177,7 @@
     <div class="cartao" id="cartao-estrategias"><h3>Reversão (validada) vs Pullback/Bollinger (não validadas)</h3><p>Sem operações suficientes ainda.</p></div>
     <div class="cartao" id="cartao-funil"><h3>Funil de sinais hoje (reversão de vela)</h3><p>Sem dados ainda hoje.</p></div>
     <div class="cartao" id="cartao-stats"><h3>Entradas hoje</h3><p>Sem dados ainda.</p></div>
+    <div class="cartao" id="cartao-entradas"><h3>Detalhes das entradas</h3><p>Sem entradas hoje ainda.</p></div>
   </div>
   <div id="chart-preco"></div>
   <div id="chart-volume"></div>
@@ -861,6 +878,46 @@ function renderizarPainel(dados) {
       '<h3>Entradas hoje</h3>' +
       fmtRow('OTC', stats.otc) +
       fmtRow('Normal', stats.normal);
+  }
+
+  // --- Entradas detalhadas ---
+  const entradas = dados.entradasDetalhadas;
+  const cartaoEntradas = document.getElementById('cartao-entradas');
+  if (!entradas || entradas.length === 0) {
+    cartaoEntradas.innerHTML = '<h3>Detalhes das entradas</h3><p>Sem entradas hoje ainda.</p>';
+  } else {
+    const fmtEntrada = e => {
+      const dirCls = e.direcao === 'call' ? 'entrada-dir-call' : 'entrada-dir-put';
+      const dirLabel = e.direcao === 'call' ? '▲ CALL' : '▼ PUT';
+      let statusStr, statusCls;
+      if (e.status === 'aberta') {
+        statusStr = '⏳ aguardando'; statusCls = 'entrada-status-aberta';
+      } else if (e.lucro !== null && e.lucro > 0) {
+        statusStr = `✓ +${e.lucro.toFixed(2)}`; statusCls = 'entrada-status-ganho';
+      } else if (e.lucro !== null && e.lucro < 0) {
+        statusStr = `✗ ${e.lucro.toFixed(2)}`; statusCls = 'entrada-status-perda';
+      } else if (e.lucro === 0) {
+        statusStr = '= empate'; statusCls = 'entrada-status-outro';
+      } else {
+        statusStr = escapar(e.status); statusCls = 'entrada-status-outro';
+      }
+      const motivosHtml = (e.motivos || []).length
+        ? `<div class="entrada-motivos">${e.motivos.map(m => `• ${escapar(m)}`).join('<br>')}</div>`
+        : '';
+      return `<div class="entrada-item">` +
+        `<div class="entrada-cabecalho">` +
+        `<span class="entrada-hora">${escapar(e.hora)}</span>` +
+        `<span class="entrada-ativo">${escapar(e.ativo)}</span>` +
+        `<span class="${dirCls}">${dirLabel}</span>` +
+        `<span class="entrada-setup">${escapar(e.setup)}</span>` +
+        `<span class="${statusCls}" style="margin-left:auto">${statusStr}</span>` +
+        `</div>` +
+        motivosHtml +
+        `</div>`;
+    };
+    cartaoEntradas.innerHTML =
+      '<h3>Detalhes das entradas</h3>' +
+      [...entradas].reverse().map(fmtEntrada).join('');
   }
 }
 

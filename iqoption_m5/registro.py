@@ -686,6 +686,94 @@ class RegistroSQLite:
             stats[chave]["lucro"] = round(stats[chave]["lucro"], 2)
         return stats
 
+    def entradas_hoje_detalhadas(self) -> list[dict]:
+        """Lista de entradas do dia com justificativa, correlacionada com decisoes.
+
+        Retorna uma entrada por operação (exceto falha_envio), enriquecida com
+        o detalhes_json da decisão correspondente (mesmo ativo+direcao, timestamp
+        mais próximo dentro de 10 s).
+        """
+        import json as _json
+
+        hoje = datetime.now().date().isoformat()
+        with self._lock, self._sessao() as db:
+            ops = db.execute(
+                """
+                SELECT id_ordem, ativo, direcao, status, lucro, enviada_em, setup
+                FROM operacoes
+                WHERE date(enviada_em)=? AND status != 'falha_envio'
+                ORDER BY enviada_em ASC
+                """,
+                (hoje,),
+            ).fetchall()
+            decs = db.execute(
+                """
+                SELECT ativo, direcao, registrado_em, detalhes_json
+                FROM decisoes
+                WHERE date(registrado_em)=? AND permitida=1
+                ORDER BY registrado_em ASC
+                """,
+                (hoje,),
+            ).fetchall()
+
+        # Índice de decisões por (ativo, direcao) → lista de (ts_unix, detalhes)
+        from datetime import datetime as _dt
+        dec_idx: dict[tuple, list] = {}
+        for ativo, direcao, reg_em, det_json in decs:
+            try:
+                ts = _dt.fromisoformat(reg_em).timestamp()
+            except Exception:
+                continue
+            dec_idx.setdefault((ativo, direcao), []).append((ts, det_json))
+
+        resultado = []
+        for id_ordem, ativo, direcao, status, lucro, enviada_em, setup in ops:
+            try:
+                ts_op = _dt.fromisoformat(enviada_em).timestamp()
+            except Exception:
+                ts_op = None
+
+            # Busca decisão mais próxima (≤10 s)
+            detalhes: dict = {}
+            if ts_op is not None:
+                candidatos = dec_idx.get((ativo, direcao), [])
+                melhor = min(
+                    candidatos, key=lambda x: abs(x[0] - ts_op), default=None
+                )
+                if melhor and abs(melhor[0] - ts_op) <= 10:
+                    try:
+                        detalhes = _json.loads(melhor[1]) if melhor[1] else {}
+                    except Exception:
+                        detalhes = {}
+
+            # Justificativa legível
+            motivos: list[str] = detalhes.get("motivos") or []
+            if not motivos:
+                # Para sr_rejeicao e outros: monta do detalhes
+                partes = []
+                if detalhes.get("tipo_sr"):
+                    partes.append(detalhes["tipo_sr"].capitalize())
+                if detalhes.get("nivel_sr"):
+                    partes.append(f"nível {detalhes['nivel_sr']:.5f}")
+                if detalhes.get("mecha_sup_pct") is not None:
+                    partes.append(f"mecha {detalhes['mecha_sup_pct']}%")
+                if detalhes.get("tendencia_macro"):
+                    partes.append(f"tendência {detalhes['tendencia_macro']}")
+                if partes:
+                    motivos = [", ".join(partes)]
+
+            resultado.append({
+                "hora": enviada_em[11:16],          # "HH:MM"
+                "ativo": ativo,
+                "direcao": direcao,
+                "setup": setup or detalhes.get("setup", "?"),
+                "status": status,
+                "lucro": None if lucro is None else float(lucro),
+                "motivos": motivos[:3],              # máximo 3 linhas
+            })
+
+        return resultado
+
     def status_decisoes_grafico(self, ativo: str) -> dict[tuple[str, str], str]:
         with self._lock, self._sessao() as db:
             linhas = db.execute(

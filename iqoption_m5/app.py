@@ -615,6 +615,7 @@ def main(config: Configuracao | None = None) -> None:
                         "aproximando": contagem_aproximando_hoje.get(ativo, 0),
                     },
                     stats_globais=registro.stats_globais(),
+                    entradas_detalhadas=registro.entradas_hoje_detalhadas(),
                 )
                 grafico_fila.put((ativo, dados_grafico))
             except Exception as erro:

@@ -180,6 +180,7 @@ class GraficoM5:
         desempenho_simulado_por_setup: dict | None = None,
         funil: dict | None = None,
         stats_globais: dict | None = None,
+        entradas_detalhadas: list | None = None,
     ) -> dict:
         conversor = self._unix
         candles = [
@@ -282,6 +283,7 @@ class GraficoM5:
             "desempenhoSimuladoPorSetup": desempenho_simulado_por_setup,
             "funil": funil,
             "statsGlobais": stats_globais,
+            "entradasDetalhadas": entradas_detalhadas,
         }
 
     def atualizar(self, ativo: str, dados: dict) -> None:
