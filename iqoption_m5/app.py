@@ -310,7 +310,6 @@ def main(config: Configuracao | None = None) -> None:
         # em sequência no mesmo loop (pode ser vários segundos na versão anterior).
         agora_utc = datetime.now(timezone.utc)
 
-        print(f"[{datetime.now():%H:%M:%S}] [INICIO] {ativo}")
         candle_fechado = snapshot.candles.index[-2]
 
         # --- CandleGuard: valida fechamento, duplicatas e ordem ---
@@ -321,7 +320,6 @@ def main(config: Configuracao | None = None) -> None:
         if not _guard_ok:
             if _guard_motivo == MOTIVO_CANDLE_DUPLICADO:
                 # Candle já processado — silencioso (reconexão, polling rápido)
-                print(f"[{datetime.now():%H:%M:%S}] [FIM] {ativo} ({MOTIVO_CANDLE_DUPLICADO})")
                 return
             elif _guard_motivo == MOTIVO_CANDLE_FORA_DE_ORDEM:
                 print(
@@ -338,6 +336,7 @@ def main(config: Configuracao | None = None) -> None:
                 _retry_ativos.add(ativo)
                 return
 
+        print(f"[{datetime.now():%H:%M:%S}] [INICIO] {ativo}")
         indicadores = estrategia.calcular_indicadores(snapshot.candles, ativo)
 
         ts_fim_calculo = time.monotonic()
@@ -623,7 +622,6 @@ def main(config: Configuracao | None = None) -> None:
                 print(f"[{datetime.now():%H:%M:%S}] {ativo}: falha ao enfileirar gráfico ({erro})")
 
         if ultimo_candle_processado[ativo] == candle_fechado:
-            print(f"[{datetime.now():%H:%M:%S}] [FIM] {ativo}")
             return
 
         # Fora da janela de entrada o risco bloquearia qualquer ordem por
