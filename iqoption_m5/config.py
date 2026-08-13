@@ -13,20 +13,18 @@ class Configuracao:
         "EURUSD",
         "GBPUSD",
         "USDJPY",
-        "AUDCAD",
-        "EURGBP",
         "EURUSD-OTC",
         "GBPUSD-OTC",
         "USDJPY-OTC",
-        "AUDCAD-OTC",
-        "EURGBP-OTC",
     )
     conta: str = "PRACTICE"
     confirmo_conta_real: bool = False  # trava extra: precisa ser True de propósito pra operar dinheiro real
     banca_inicial: float = 0.0
     piso_banca: float = 0.0  # 0 = desativado; se >0, para tudo quando banca_inicial+lucro_total <= piso
-    executar_ordens: bool = True
-    executar_estrategias_nao_validadas: bool = True  # pullback/bollinger; False = so registra, so reversao_candle executa
+    # Seguro por padrao: Configuracao() apenas monitora. Perfis que enviam
+    # ordens precisam ativar isso explicitamente.
+    executar_ordens: bool = False
+    executar_estrategias_nao_validadas: bool = False  # pullback/bollinger; False = so registra, so reversao_candle executa
     pares_validados: tuple[str, ...] = ()  # vazio = todos os `ativos` podem executar; se preenchido, so esses arriscam dinheiro real
     confiar_resultado_automatico: bool = True  # False = sempre perda tecnica (historico da IQ ja mentiu "win")
     verificar_resultado_por_candle: bool = True  # True = calcula resultado pelo candle, não confia no historico da IQ
@@ -38,7 +36,7 @@ class Configuracao:
     limite_candles: int = 120
     expiracao_minutos: int = 5
     intervalo_loop_segundos: float = 2.5
-    entrada_max_segundos_no_candle: int = 200
+    entrada_max_segundos_no_candle: int = 15
     min_segundos_ate_expiracao: int = 120  # não entra se restar < 2 min até o mark de 5min
     marcacao_tolerancia_atr: float = 2.0   # reversão: cancela se preço afastou > N×ATR do nível
     abrir_grafico: bool = True
@@ -98,18 +96,19 @@ class Configuracao:
     bollinger_squeeze_min_corpo_atr: float = 0.5
 
     meta_diaria: float = 0.0  # 0 = desativado; se >0, encerra o dia ao atingir esse lucro
-    payout_minimo: float = 0.75
+    payout_minimo: float = 0.80
     bloquear_otc_real: bool = True
     cache_mercado_segundos: int = 60
-    max_operacoes_dia: int = 9999
-    max_perdas_consecutivas: int = 9999
-    stop_diario: float = -9999.0
-    parar_por_perdas: bool = False
-    parar_por_prejuizo: bool = False
+    max_operacoes_dia: int = 5
+    max_perdas_consecutivas: int = 3
+    stop_diario: float = -5.0
+    parar_por_perdas: bool = True
+    parar_por_prejuizo: bool = True
     cooldown_pos_ordem_segundos: float = 0.0  # 0 = desligado; >0 = bloqueia nova entrada por N segundos após resultado
     cooldown_pos_ordem_por_ativo_candles: int = 0  # 0 = desligado; >0 = bloqueia N candles após ordem no mesmo ativo
     filtro_candle_entrada_atr: float = 0.0  # 0 = desligado; >0 = cancela se candle N+1 abre > N×ATR contra o sinal
     bloquear_noticia_alto_impacto: bool = False  # bloqueia entrada em janela de notícia HIGH (ativos reais)
+    ia_como_filtro: bool = True  # True = IA com confianca media/alta bloqueia sinal contrário; False = só exibe parecer
 
     # --- Horário bloqueado (UTC) ---
     # Evita operar em janelas de baixa liquidez / mercado OTC suspenso.
@@ -226,8 +225,8 @@ class Configuracao:
             raise RuntimeError("LIMITE_CANDLES é pequeno demais para os indicadores configurados.")
         if not 0 <= self.payout_minimo <= 1:
             raise RuntimeError("PAYOUT_MINIMO deve estar entre 0 e 1.")
-        if self.max_operacoes_dia < 1:
-            raise RuntimeError("MAX_OPERACOES_DIA deve ser positivo.")
+        if self.max_operacoes_dia < 0:
+            raise RuntimeError("MAX_OPERACOES_DIA nao pode ser negativo; use 0 para sem limite.")
         if not 0 < self.pullback_fib_min < self.pullback_fib_max < 1:
             raise RuntimeError("Faixa de Fibonacci do pullback é inválida.")
         if self.pullback_pivo_raio < 1 or self.pullback_janela < 10:
@@ -257,11 +256,60 @@ def configuracao_m1(base: Configuracao | None = None) -> Configuracao:
     )
 
 
+def configuracao_pesquisa_m5(base: Configuracao | None = None) -> Configuracao:
+    """Perfil amplo para descobrir e validar estratégias sem enviar ordens.
+
+    Mantém candidatos experimentais e todos os pares observados. Proteções de
+    execução não filtram a amostra porque ``executar_ordens`` permanece falso.
+    """
+    return replace(
+        base or Configuracao(),
+        ativos=(
+            "EURUSD", "GBPUSD", "USDJPY", "AUDCAD", "EURGBP",
+            "EURUSD-OTC", "GBPUSD-OTC", "USDJPY-OTC",
+            "AUDCAD-OTC", "EURGBP-OTC",
+        ),
+        executar_ordens=False,
+        executar_estrategias_nao_validadas=True,
+        max_operacoes_dia=0,
+        horario_bloqueado=None,
+        horario_por_setup=None,
+        entrada_max_segundos_no_candle=200,
+        payout_minimo=0.75,
+        engulfing_sr_ativo=True,
+        divergencia_rsi_ativo=True,
+        bollinger_squeeze_ativo=True,
+        pin_bar_sr_ativo=True,
+        pullback_ativo=True,
+    )
+
+
+def configuracao_practice_m5(base: Configuracao | None = None) -> Configuracao:
+    """Perfil PRACTICE que envia ordens com limites conservadores.
+
+    Separado de ``Configuracao()`` para que importar ou iniciar o programa sem
+    uma escolha explicita nunca envie uma ordem por acidente.
+    """
+    return replace(
+        base or Configuracao(),
+        conta="PRACTICE",
+        executar_ordens=True,
+        executar_estrategias_nao_validadas=False,
+        max_operacoes_dia=5,
+        max_perdas_consecutivas=3,
+        stop_diario=-5.0,
+        parar_por_perdas=True,
+        parar_por_prejuizo=True,
+        payout_minimo=0.80,
+        entrada_max_segundos_no_candle=15,
+    )
+
+
 def configuracao_scalping_60(base: Configuracao | None = None) -> Configuracao:
     """Perfil scalping para banca inicial de R$60 em conta REAL.
 
     Entrada fixa de R$1 (≈1.7% da banca), stop diário −R$6, meta +R$5.
-    Apenas os 5 pares com melhor desempenho observado (WR ≥ 55% na amostra).
+    Monitora 5 pares; ordens OTC permanecem bloqueadas em conta REAL.
     Proteções extras: circuit breaker, cooldown por ativo, filtro de abertura,
     bloqueio de notícia HIGH.
     """
@@ -271,6 +319,7 @@ def configuracao_scalping_60(base: Configuracao | None = None) -> Configuracao:
         senha=os.environ.get("IQ_OPTION_SENHA", ""),
         conta="REAL",
         confirmo_conta_real=True,
+        executar_ordens=True,
         ativos=(
             "EURUSD",
             "GBPUSD",
@@ -279,7 +328,7 @@ def configuracao_scalping_60(base: Configuracao | None = None) -> Configuracao:
             "EURGBP-OTC",
         ),
         pares_validados=(),
-        bloquear_otc_real=False,
+        bloquear_otc_real=True,
         banca_inicial=60.0,
         piso_banca=40.0,
         valor_por_ordem=1.0,
@@ -287,8 +336,9 @@ def configuracao_scalping_60(base: Configuracao | None = None) -> Configuracao:
         stop_diario=-6.0,
         meta_diaria=5.0,
         parar_por_prejuizo=True,
-        max_operacoes_dia=20,
-        max_perdas_consecutivas=9999,
+        parar_por_perdas=True,
+        max_operacoes_dia=10,
+        max_perdas_consecutivas=3,
         drawdown_maximo_percentual=0.20,
         circuit_breaker_max_perdas=3,
         circuit_breaker_cooldown_minutos=60,
@@ -297,7 +347,7 @@ def configuracao_scalping_60(base: Configuracao | None = None) -> Configuracao:
         bloquear_noticia_alto_impacto=True,
         alavancagem_pyramid=False,
         alavancagem_maximo=0.0,
-        executar_estrategias_nao_validadas=True,
+        executar_estrategias_nao_validadas=False,
         confiar_resultado_automatico=False,
         verificar_resultado_por_candle=True,
         porta_grafico=8770,
@@ -305,9 +355,10 @@ def configuracao_scalping_60(base: Configuracao | None = None) -> Configuracao:
 
 
 def configuracao_real_m5(base: Configuracao | None = None) -> Configuracao:
-    """Perfil conta real — todos os ativos operam de verdade.
+    """Perfil conta real com execução limitada aos ativos não OTC.
 
-    M5 com expiração de 5 min. 10 ativos (5 reais + 5 OTC).
+    M5 com expiração de 5 min. Monitora 10 ativos (5 reais + 5 OTC), mas
+    os sintéticos OTC ficam bloqueados para envio de ordens reais.
     Entrada = 3% da banca (Kelly fracionado). Stop -R$12/dia, meta +R$15/dia.
     Piso de banca R$25. Resultado verificado pelo candle (não confia no
     histórico da IQ). Credenciais lidas de config.email/config.senha,
@@ -319,19 +370,22 @@ def configuracao_real_m5(base: Configuracao | None = None) -> Configuracao:
         senha=os.environ.get("IQ_OPTION_SENHA", ""),
         conta="REAL",
         confirmo_conta_real=True,
+        executar_ordens=True,
         ativos=(
             "GBPUSD", "EURUSD", "USDJPY", "AUDCAD", "EURGBP",
             "GBPUSD-OTC", "EURUSD-OTC", "USDJPY-OTC",
             "AUDCAD-OTC", "EURGBP-OTC",
         ),
         pares_validados=(),
-        bloquear_otc_real=False,
+        bloquear_otc_real=True,
         valor_por_ordem=3.5,
         valor_percentual_banca=0.03,
-        max_operacoes_dia=9999,
+        max_operacoes_dia=5,
+        max_perdas_consecutivas=3,
         stop_diario=-12.0,
         meta_diaria=15.0,
         parar_por_prejuizo=True,
+        parar_por_perdas=True,
         banca_inicial=50.0,
         piso_banca=25.0,
         alavancagem_pyramid=False,
@@ -339,5 +393,8 @@ def configuracao_real_m5(base: Configuracao | None = None) -> Configuracao:
         executar_estrategias_nao_validadas=False,
         confiar_resultado_automatico=False,
         verificar_resultado_por_candle=True,
+        drawdown_maximo_percentual=0.20,
+        circuit_breaker_max_perdas=3,
+        circuit_breaker_cooldown_minutos=60,
         porta_grafico=8769,
     )

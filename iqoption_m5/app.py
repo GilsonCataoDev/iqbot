@@ -211,10 +211,15 @@ def main(config: Configuracao | None = None) -> None:
             return True
         return False
 
+    limite_diario = (
+        f"{config.max_operacoes_dia}/dia"
+        if config.max_operacoes_dia > 0
+        else "sem limite diário"
+    )
     print(f"IQ Option {config.rotulo_timeframe} — mercado normal e OTC")
     print(
         f"Conta={config.conta} | ordens={'ATIVAS' if config.executar_ordens else 'DESATIVADAS'} | "
-        f"valor={config.valor_por_ordem} | máximo={config.max_operacoes_dia}/dia | "
+        f"valor={config.valor_por_ordem} | máximo={limite_diario} | "
         f"expiração={config.expiracao_minutos}min"
     )
     if config.timeframe_segundos != 300:
@@ -815,11 +820,17 @@ def main(config: Configuracao | None = None) -> None:
                 print(f"    [{setup_nome}] par nao validado, ignorado (use backtest offline)")
                 algum_bloqueio_definitivo = True
             elif ia_discorda and not favorece_noticia:
-                print(
-                    f"    [IA] BLOQUEOU [{setup_nome}]: IA sugere {ia_atual.direcao_sugerida} "
-                    f"({ia_atual.confianca}) contra o sinal {decisao.direcao.upper()}"
-                )
-                algum_bloqueio_definitivo = True
+                if config.ia_como_filtro:
+                    print(
+                        f"    [IA] BLOQUEOU [{setup_nome}]: IA sugere {ia_atual.direcao_sugerida} "
+                        f"({ia_atual.confianca}) contra o sinal {decisao.direcao.upper()}"
+                    )
+                    algum_bloqueio_definitivo = True
+                else:
+                    print(
+                        f"    [IA] discorda [{setup_nome}]: sugere {ia_atual.direcao_sugerida} "
+                        f"({ia_atual.confianca}) — filtro desativado, seguindo sinal"
+                    )
             elif autorizacao.permitida:
                 # Marcação universal: valida proximidade do preço ao nível que gerou o sinal.
                 # Para reversões usa nivel_sr; para continuação usa o preço do sinal (Close(N)).
