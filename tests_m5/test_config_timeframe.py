@@ -1,7 +1,12 @@
 import unittest
 from dataclasses import replace
 
-from iqoption_m5.config import Configuracao, configuracao_m1
+from iqoption_m5.config import (
+    Configuracao,
+    configuracao_m1,
+    configuracao_pesquisa_m5,
+    configuracao_practice_m5,
+)
 
 
 class TestPerfilM5(unittest.TestCase):
@@ -10,6 +15,44 @@ class TestPerfilM5(unittest.TestCase):
         config.validar()
         self.assertEqual(config.timeframe_segundos, 300)
         self.assertEqual(config.rotulo_timeframe, "M5")
+
+    def test_padrao_e_somente_monitor(self):
+        config = Configuracao()
+        self.assertFalse(config.executar_ordens)
+        self.assertFalse(config.executar_estrategias_nao_validadas)
+        self.assertEqual(config.max_operacoes_dia, 5)
+        self.assertEqual(config.max_perdas_consecutivas, 3)
+
+    def test_practice_exige_perfil_explicito_para_enviar_ordens(self):
+        config = configuracao_practice_m5()
+        self.assertTrue(config.executar_ordens)
+        self.assertEqual(config.conta, "PRACTICE")
+
+    def test_pesquisa_mantem_amostra_ampla_sem_enviar_ordens(self):
+        config = configuracao_pesquisa_m5()
+        self.assertFalse(config.executar_ordens)
+        self.assertEqual(config.max_operacoes_dia, 0)
+        self.assertIsNone(config.horario_bloqueado)
+        self.assertIsNone(config.horario_por_setup)
+        self.assertEqual(len(config.ativos), 10)
+        self.assertTrue(config.executar_estrategias_nao_validadas)
+        self.assertTrue(config.engulfing_sr_ativo)
+        self.assertTrue(config.divergencia_rsi_ativo)
+        self.assertTrue(config.bollinger_squeeze_ativo)
+        self.assertTrue(config.pin_bar_sr_ativo)
+        self.assertTrue(config.pullback_ativo)
+
+    def test_pesquisa_remove_horarios_herdados_da_base(self):
+        base = replace(
+            Configuracao(),
+            horario_bloqueado=((22, 0), (7, 0)),
+            horario_por_setup={"sr_rejeicao": (7, 20)},
+        )
+
+        config = configuracao_pesquisa_m5(base)
+
+        self.assertIsNone(config.horario_bloqueado)
+        self.assertIsNone(config.horario_por_setup)
 
 
 class TestPerfilM1(unittest.TestCase):

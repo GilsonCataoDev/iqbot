@@ -10,10 +10,10 @@ if "%IQ_OPTION_EMAIL%"=="" (
 )
 echo ============================================================
 echo  ATENCAO: isso vai operar com DINHEIRO REAL na sua conta IQ Option.
-echo  Plano: entrada = 3%% da banca, meta de +R$15/dia e stop de -R$12/dia.
+echo  Plano: entrada = 3%% da banca, maximo 5/dia, meta +R$15 e stop -R$12.
 echo  Piso de banca R$25: para de vez se cair ate la.
-echo  10 ativos (5 pares reais + 5 OTC). Todas as estrategias executam
-echo  ordens reais em TODOS os ativos configurados.
+echo  Monitora 10 ativos. Ordens OTC ficam bloqueadas em conta REAL.
+echo  Estrategias nao validadas nao enviam ordens reais.
 echo  M5 com expiracao de 5 minutos.
 echo ============================================================
 echo.

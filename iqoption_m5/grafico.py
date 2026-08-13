@@ -276,6 +276,7 @@ class GraficoM5:
                     "time": conversor(op["hora"]), "direcao": op["direcao"],
                     "vitoria": op["lucro"] is not None and op["lucro"] > 0,
                     "aberta": op["status"] == "aberta", "lucro": op["lucro"],
+                    "status": op["status"],
                     "setup": op.get("setup", ""), "preco": op.get("preco"),
                 }
                 for op in operacoes

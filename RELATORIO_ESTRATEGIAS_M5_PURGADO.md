@@ -3,7 +3,7 @@ Triagem walk-forward em três janelas futuras por ativo, payout assumido de 85%.
 
 **Modo purgado:** operações sobrepostas foram descartadas. Um sinal com expiração de N velas ocupa N velas; sinais em velas seguidas mediriam quase o mesmo movimento e inflariam a amostra. Aqui cada operação é independente das demais, então o intervalo de confiança é honesto.
 
-- Combinações avaliadas: 48
+- Combinações avaliadas: 84
 - Candidatos promissores: 0
 - Regra de aprovação: mínimo de 300 operações fora da amostra, lucro positivo em todas as três janelas e piso do intervalo simultâneo acima do breakeven.
 

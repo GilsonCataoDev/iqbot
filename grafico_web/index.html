@@ -566,14 +566,16 @@ async function atualizar() {
       const setupLabel = o.setup ? `[${o.setup}] ` : '';
       const precoLabel = o.preco != null ? ` @ ${o.preco.toFixed(5)}` : '';
       const dirLabel = o.direcao === 'call' ? 'CALL' : 'PUT';
+      const desconhecido = o.status === 'resultado_desconhecido';
       let texto;
       if (o.aberta) texto = `${setupLabel}${dirLabel}${precoLabel} — ABERTA`;
+      else if (desconhecido) texto = `${setupLabel}${dirLabel}${precoLabel} — RESULTADO DESCONHECIDO`;
       else texto = `${setupLabel}${dirLabel}${precoLabel} — ${o.vitoria ? 'GANHOU' : 'PERDEU'}`;
       return {
         time: o.time,
         position: o.direcao === 'call' ? 'belowBar' : 'aboveBar',
-        color: o.aberta ? '#42a5f5' : (o.vitoria ? '#00e676' : '#ff1744'),
-        shape: o.aberta ? 'square' : (o.vitoria ? 'arrowUp' : 'arrowDown'),
+        color: o.aberta ? '#42a5f5' : (desconhecido ? '#9e9e9e' : (o.vitoria ? '#00e676' : '#ff1744')),
+        shape: (o.aberta || desconhecido) ? 'square' : (o.vitoria ? 'arrowUp' : 'arrowDown'),
         text: texto,
       };
     });

@@ -15,7 +15,7 @@ from pathlib import Path
 ROOT = Path(__file__).parent
 sys.path.insert(0, str(ROOT))
 
-from iqoption_m5.config import Configuracao
+from iqoption_m5.config import Configuracao, configuracao_pesquisa_m5
 from iqoption_m5.registro import RegistroSQLite
 from iqoption_m5.backtest_candle import comparar_configs, imprimir_comparacao_configs
 
@@ -111,24 +111,24 @@ def _buscar_candles(api, registro: RegistroSQLite, ativo: str, timeframe: int, q
 # ---------------------------------------------------------------------------
 
 def _config_base() -> Configuracao:
-    return Configuracao(
+    return configuracao_pesquisa_m5(Configuracao(
         sr_rejeicao_rsi_filtro=False,
         sr_rejeicao_corpo_min_atr=0.0,
         pullback_recuo_rsi_filtro=False,
         pullback_confirmacao_corpo_atr=0.0,
-    )
+    ))
 
 
 def _config_filtros() -> Configuracao:
     """§8 + §9 ativados com parâmetros conservadores para primeiro teste."""
-    return Configuracao(
+    return configuracao_pesquisa_m5(Configuracao(
         # §8: SR rejeição exige RSI em zona extrema + corpo mínimo de 0.5×ATR
         sr_rejeicao_rsi_filtro=True,
         sr_rejeicao_corpo_min_atr=0.5,
         # §9: pullback exige RSI extremo no recuo + corpo mínimo na confirmação
         pullback_recuo_rsi_filtro=True,
         pullback_confirmacao_corpo_atr=0.5,
-    )
+    ))
 
 
 # ---------------------------------------------------------------------------

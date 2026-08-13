@@ -38,6 +38,29 @@ class TestEstatistica(unittest.TestCase):
         self.assertLessEqual(superior, 1.0)
 
 
+class TestBacktestRealista(unittest.TestCase):
+    def test_aplica_payout_spread_e_slippage(self):
+        instante = pd.Timestamp("2026-03-02 10:00")
+        operacao = backtest.Operacao(
+            ativo="EURUSD",
+            direcao="call",
+            setup="teste",
+            fatores="",
+            hora_sinal=instante,
+            hora_entrada=instante,
+            preco_entrada=1.0,
+            preco_saida=1.1,
+            resultado="ganho",
+        )
+        simulador = backtest.BacktestRealista(
+            backtest.CustoOperacao(payout=0.85, spread_pips=0.02, slippage_pips=0.01)
+        )
+
+        resumo = simulador.resumo([operacao], valor=1.0)
+
+        self.assertAlmostEqual(resumo["lucro_total"], 0.82)
+
+
 class TestSimulacao(unittest.TestCase):
     def setUp(self):
         self.config = Configuracao()

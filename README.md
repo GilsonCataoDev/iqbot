@@ -1,12 +1,14 @@
 # IQ Option M5
 
-Monitor automático para conta de treinamento (`PRACTICE`) da IQ Option. Analisa candles de 5 minutos, abre um gráfico local no navegador, marca possíveis entradas e pode executar no máximo cinco operações por dia.
+Ferramenta de pesquisa e validação de estratégias M5 para IQ Option. Analisa candles, compara candidatos, abre um painel local e registra sinais. **O modo padrão é PESQUISA: monitora 10 ativos e não envia ordens.** O envio em `PRACTICE` ou `REAL` exige perfil e confirmação explícitos.
 
 ## Começar em 3 passos
 
 1. Execute `INSTALAR_DEPENDENCIAS.bat` uma vez.
-2. Execute `INICIAR_IQ_M5.bat`.
+2. Execute `INICIAR_IQ_M5.bat` para validar estratégias sem enviar ordens.
 3. Informe o e-mail e a senha da IQ Option no terminal.
+
+Para enviar ordens na conta de treinamento, execute `INICIAR_IQ_PRACTICE.bat` e confirme digitando `SIM`. Pela linha de comando: `python rodar_iqoption_m5.py --practice --confirmo`.
 
 ## M5 ou M1
 
@@ -25,7 +27,7 @@ O navegador abrirá automaticamente. A senha não fica gravada no projeto e não
 - Mercado normal: `EURUSD`, `GBPUSD` e `USDJPY`.
 - OTC: `EURUSD-OTC`, `GBPUSD-OTC` e `USDJPY-OTC`.
 
-O limite de cinco operações é compartilhado entre todos os ativos.
+No perfil PRACTICE com execução, o limite de cinco operações é compartilhado entre todos os ativos.
 
 ## O que aparece no gráfico
 
@@ -59,13 +61,14 @@ No gráfico, `PULLBACK FIBO+SUPORTE` ou `PULLBACK FIBO+RESISTÊNCIA` indica conf
 
 ## Proteções
 
-- Somente conta `PRACTICE`.
+- Perfil PESQUISA observa estratégias candidatas e nunca envia ordens.
+- Envio em `PRACTICE` exige `--practice --confirmo`.
 - Valor de 1 unidade por ordem.
 - Payout mínimo de 80%.
 - Entrada somente no começo de um novo candle M5.
 - Uma operação aberta por vez.
 - Máximo de cinco operações por dia.
-- As cinco operações podem ser concluídas mesmo após perdas. Os bloqueios por perdas consecutivas e prejuízo diário ficam desativados por padrão.
+- Três perdas consecutivas ou prejuízo diário de 5 unidades encerram a sessão.
 
 Essas regras reduzem risco, mas não garantem lucro. OTC e mercado normal têm comportamentos diferentes; acompanhe os resultados separadamente antes de considerar qualquer mudança.
 
@@ -73,7 +76,7 @@ Essas regras reduzem risco, mas não garantem lucro. OTC e mercado normal têm c
 
 - Execute `VER_RESULTADOS_M5.bat` para consultar o histórico.
 - Execute `TESTAR_IQ_M5.bat` para verificar o projeto sem enviar ordens reais.
-- O banco fica em `iqoption_m5\dados\iqoption_m5.sqlite3`.
+- O banco PRACTICE fica em `iqoption_m5\dados\iqoption_m5_practice.sqlite3`.
 
 ## Investigação de estratégias alternativas
 
@@ -86,6 +89,8 @@ Essas regras reduzem risco, mas não garantem lucro. OTC e mercado normal têm c
 
 `RODAR_BACKTEST_M5.bat` mede a estratégia contra o histórico da IQ Option sem enviar nenhuma ordem. Ele usa a mesma `EstrategiaReversaoM5` do robô, então o que aparece no relatório é a lógica que roda ao vivo.
 
+O backtest usa `configuracao_pesquisa_m5()`: 10 ativos e estratégias candidatas habilitadas. O perfil não aplica limite diário nem filtro de horário, para que a amostra possa ser comparada posteriormente por hora. Os limites de operação PRACTICE/REAL não reduzem a amostra de pesquisa.
+
 O relatório traz a taxa de acerto com intervalo de confiança de 95% comparada ao breakeven do payout, separada por ativo, estratégia, direção, fatores de confluência e hora do dia. A linha final aponta as horas que ficaram abaixo do breakeven — candidatas a bloqueio.
 
 Opções úteis:
@@ -95,14 +100,27 @@ python rodar_backtest_m5.py --candles 20000     histórico maior
 python rodar_backtest_m5.py --offline           usa o cache, não baixa nada
 python rodar_backtest_m5.py --ativos EURUSD-OTC  um ativo só
 python rodar_backtest_m5.py --payout 0.92       ajusta o breakeven
+python rodar_backtest_m5.py --spread-pips 0.0002 --slippage-pips 0.0001
 python rodar_backtest_m5.py --offline --validar  valida os filtros fora da amostra
 ```
 
 `--validar` divide o histórico em treino (70% inicial) e teste (30% final), escolhe os filtros olhando somente o treino e mede o resultado no período escondido. Serve para separar vantagem real de coincidência: um filtro escolhido depois de ver todos os dados quase sempre parece bom no próprio período em que foi escolhido.
 
+O relatório também executa `BacktestRealista`. Informe `--spread-pips` e `--slippage-pips` com valores observados na conta; deixar ambos em zero mostra apenas o efeito do payout.
+
 O histórico baixado fica em `iqoption_m5\dados\historico\`, então depois da primeira execução o `--offline` permite testar ideias sem esperar download.
 
 Cada linha do relatório vale para o ativo daquela linha. Os ativos `-OTC` têm preço sintético gerado pela corretora: o resultado de um `-OTC` não vale para o par real de mesmo nome, nem o contrário.
+
+## Laboratório Forex/CFD
+
+O executor Forex é separado do executor de opções e permanece exclusivamente em simulação:
+
+```
+python rodar_forex_simulacao.py
+```
+
+Ele compara rompimento + reteste, toque em LTA/LTB e correção na tendência com Fibonacci 50%–61,8% mais suporte/resistência. As hipóteses usam pivôs confirmados, stop por ATR e alvo estrutural, exigindo retorno/risco mínimo de 1,2. Não chama `buy_order` nem abre posições na IQ. A hipótese precisa ficar positiva fora da amostra antes de qualquer integração PRACTICE.
 
 ## Problemas comuns
 
@@ -110,13 +128,14 @@ Cada linha do relatório vale para o ativo daquela linha. Os ativos `-OTC` têm 
 - `payout=indisponível`: nenhuma ordem será enviada até a IQ confirmar o payout.
 - O gráfico não abre: copie no navegador o endereço mostrado depois de `Gráfico M5 aberto:`.
 - Uma aba fica momentaneamente atrasada: o painel mantém o último candle válido e tenta novamente sem apagar o ativo.
-- `operacao_pendente_banco`: abra novamente pelo `INICIAR_IQ_M5.bat`. Após o login, a ferramenta procura a ordem no histórico sem usar a consulta antiga que pode travar. Se uma ordem vencida há mais de 10 minutos não aparecer no histórico, ela é registrada conservadoramente como perda técnica para liberar o monitor sem criar uma operação duplicada.
+- `operacao_pendente_banco`: abra novamente pelo iniciador correspondente. A ferramenta procura o resultado no histórico. Se a corretora não responder, a operação fica como `resultado_desconhecido`: o risco reserva a perda máxima, mas lucro e win rate não inventam uma perda confirmada.
 - Para encerrar: pressione `Ctrl + C` no terminal.
 
 ## Arquivos principais
 
 - `rodar_iqoption_m5.py`: inicia a ferramenta.
 - `rodar_backtest_m5.py`: mede a estratégia no histórico, sem enviar ordens.
+- `rodar_forex_simulacao.py`: executa o laboratório Forex/CFD sem enviar ordens.
 - `iqoption_m5\config.py`: ativos, estratégia e limites.
 - `iqoption_m5\estrategia.py`: cálculo dos sinais.
 - `iqoption_m5\backtest.py`: simulação e relatório estatístico.

@@ -11,6 +11,7 @@ import numpy as np
 import pandas as pd
 
 from .backtest import breakeven, intervalo_wilson
+from .forex_estrategia import planos_correcao_fibo_sr
 
 
 @dataclass(frozen=True)
@@ -36,6 +37,22 @@ def _grade_nivel(ativo: str) -> tuple[float, float]:
     return (0.05, 0.10) if "JPY" in ativo else (0.0005, 0.0010)
 
 
+def _niveis_pivos_confirmados(
+    candles: pd.DataFrame, raio: int
+) -> tuple[pd.Series, pd.Series]:
+    """Últimos pivôs disponíveis em cada fechamento, sem antecipar confirmação.
+
+    Um pivô na posição i precisa de ``raio`` candles à direita. Seu preço só
+    aparece na série no fechamento de i+raio, quando já pode ser conhecido.
+    """
+    largura = raio * 2 + 1
+    fundo = candles["Low"].eq(candles["Low"].rolling(largura, center=True).min())
+    topo = candles["High"].eq(candles["High"].rolling(largura, center=True).max())
+    suporte = candles["Low"].where(fundo).shift(raio).ffill()
+    resistencia = candles["High"].where(topo).shift(raio).ffill()
+    return suporte, resistencia
+
+
 def candidatos(ativo: str) -> list[Candidato]:
     saida: list[Candidato] = []
     for expiracao in (1, 3, 6):
@@ -55,6 +72,65 @@ def candidatos(ativo: str) -> list[Candidato]:
             base = {"limiar_atr": limiar, "expiracao": expiracao}
             saida.append(Candidato("nivel_anterior_bounce", base))
             saida.append(Candidato("nivel_anterior_breakout", base))
+    for expiracao in (1, 2, 3):
+        for janela in (6, 12, 24):
+            saida.append(
+                Candidato(
+                    "rompimento_forte",
+                    {
+                        "janela": janela,
+                        "corpo_minimo": 0.55,
+                        "fechamento_extremo": 0.20,
+                        "atr_minimo": 0.80,
+                        "atr_maximo": 2.00,
+                        "expiracao": expiracao,
+                    },
+                )
+            )
+        for janela_movimento, limiar in product((1, 3), (1.5, 2.0, 2.5)):
+            saida.append(
+                Candidato(
+                    "extremo_rejeicao",
+                    {
+                        "janela_movimento": janela_movimento,
+                        "janela_nivel": 12,
+                        "janela_volatilidade": 48,
+                        "limiar_sigma": limiar,
+                        "pavio_corpo": 1.5,
+                        "expiracao": expiracao,
+                    },
+                )
+            )
+        for raio, tolerancia in product((2, 3), (0.15, 0.30)):
+            base = {
+                "raio": raio,
+                "tolerancia_atr": tolerancia,
+                "corpo_min_atr": 0.30,
+                "fechamento_extremo": 0.25,
+                "janela_reteste": 6,
+                "expiracao": expiracao,
+            }
+            saida.append(Candidato("topo_fundo_rejeicao", base))
+            saida.append(Candidato("topo_fundo_rompimento", base))
+            saida.append(Candidato("topo_fundo_pullback", base))
+    for expiracao in (1, 3, 6):
+        for tolerancia, impulso in product((0.25, 0.40), (1.5, 2.0)):
+            saida.append(
+                Candidato(
+                    "correcao_fibo_sr_binaria",
+                    {
+                        "raio_pivo": 2,
+                        "fib_min": 0.50,
+                        "fib_max": 0.618,
+                        "tolerancia_sr_atr": tolerancia,
+                        "corpo_min_atr": 0.30,
+                        "impulso_min_atr": impulso,
+                        "rr_minimo": 0.0,
+                        "max_candles_correcao": 12,
+                        "expiracao": expiracao,
+                    },
+                )
+            )
     return saida
 
 
@@ -87,6 +163,150 @@ def sinais(candles: pd.DataFrame, candidato: Candidato, ativo: str = "EURUSD") -
         direcao = pd.Series(
             np.select([close > maxima, close < minima], [1, -1], default=0),
             index=candles.index,
+        )
+    elif candidato.familia == "rompimento_forte":
+        janela = int(p["janela"])
+        maxima = candles["High"].shift(1).rolling(janela).max()
+        minima = candles["Low"].shift(1).rolling(janela).min()
+        amplitude = (candles["High"] - candles["Low"]).replace(0, np.nan)
+        corpo = close - candles["Open"]
+        corpo_forte = corpo.abs() >= float(p["corpo_minimo"]) * amplitude
+        amplitude_valida = amplitude.between(
+            float(p["atr_minimo"]) * atr,
+            float(p["atr_maximo"]) * atr,
+        )
+        extremo = float(p["fechamento_extremo"])
+        call = (
+            (close > maxima)
+            & (corpo > 0)
+            & corpo_forte
+            & amplitude_valida
+            & (close >= candles["High"] - extremo * amplitude)
+        )
+        put = (
+            (close < minima)
+            & (corpo < 0)
+            & corpo_forte
+            & amplitude_valida
+            & (close <= candles["Low"] + extremo * amplitude)
+        )
+        direcao = pd.Series(
+            np.select([call, put], [1, -1], default=0),
+            index=candles.index,
+        )
+    elif candidato.familia == "extremo_rejeicao":
+        janela_movimento = int(p["janela_movimento"])
+        janela_nivel = int(p["janela_nivel"])
+        janela_volatilidade = int(p["janela_volatilidade"])
+        retornos = np.log(close / close.shift(1))
+        movimento = np.log(close / close.shift(janela_movimento))
+        # A volatilidade termina em t-1: o proprio extremo nao dilui seu limiar.
+        sigma = retornos.shift(1).rolling(janela_volatilidade).std().replace(0, np.nan)
+        limiar = float(p["limiar_sigma"]) * sigma
+        maxima = candles["High"].shift(1).rolling(janela_nivel).max()
+        minima = candles["Low"].shift(1).rolling(janela_nivel).min()
+        corpo = (close - candles["Open"]).abs()
+        pavio_inferior = np.minimum(candles["Open"], close) - candles["Low"]
+        pavio_superior = candles["High"] - np.maximum(candles["Open"], close)
+        meio = (candles["High"] + candles["Low"]) / 2
+        razao_pavio = float(p["pavio_corpo"])
+        call = (
+            (movimento <= -limiar)
+            & (candles["Low"] < minima)
+            & (close > minima)
+            & (close > meio)
+            & (pavio_inferior >= razao_pavio * corpo)
+        )
+        put = (
+            (movimento >= limiar)
+            & (candles["High"] > maxima)
+            & (close < maxima)
+            & (close < meio)
+            & (pavio_superior >= razao_pavio * corpo)
+        )
+        direcao = pd.Series(
+            np.select([call, put], [1, -1], default=0),
+            index=candles.index,
+        )
+    elif candidato.familia.startswith("topo_fundo_"):
+        suporte, resistencia = _niveis_pivos_confirmados(candles, int(p["raio"]))
+        tolerancia = float(p["tolerancia_atr"]) * atr
+        corpo_direcional = close - candles["Open"]
+        corpo_valido = corpo_direcional.abs() >= float(p["corpo_min_atr"]) * atr
+        amplitude = (candles["High"] - candles["Low"]).replace(0, np.nan)
+        extremo = float(p["fechamento_extremo"])
+
+        if candidato.familia == "topo_fundo_rejeicao":
+            call = (
+                (candles["Low"] <= suporte + tolerancia)
+                & (close > suporte)
+                & (close > (candles["High"] + candles["Low"]) / 2)
+                & (corpo_direcional > 0)
+            )
+            put = (
+                (candles["High"] >= resistencia - tolerancia)
+                & (close < resistencia)
+                & (close < (candles["High"] + candles["Low"]) / 2)
+                & (corpo_direcional < 0)
+            )
+        elif candidato.familia == "topo_fundo_rompimento":
+            call = (
+                (close > resistencia)
+                & (close.shift(1) <= resistencia)
+                & (corpo_direcional > 0)
+                & corpo_valido
+                & (close >= candles["High"] - extremo * amplitude)
+            )
+            put = (
+                (close < suporte)
+                & (close.shift(1) >= suporte)
+                & (corpo_direcional < 0)
+                & corpo_valido
+                & (close <= candles["Low"] + extremo * amplitude)
+            )
+        else:
+            rompimento_alta = (close > resistencia) & (close.shift(1) <= resistencia)
+            rompimento_baixa = (close < suporte) & (close.shift(1) >= suporte)
+            nivel_alta = resistencia.where(rompimento_alta)
+            nivel_baixa = suporte.where(rompimento_baixa)
+            janela_reteste = int(p["janela_reteste"])
+            ultimo_alta = nivel_alta.ffill(limit=janela_reteste).shift(1)
+            ultimo_baixa = nivel_baixa.ffill(limit=janela_reteste).shift(1)
+            call = (
+                ultimo_alta.notna()
+                & (candles["Low"] <= ultimo_alta + tolerancia)
+                & (close > ultimo_alta)
+                & (corpo_direcional > 0)
+                & corpo_valido
+            )
+            put = (
+                ultimo_baixa.notna()
+                & (candles["High"] >= ultimo_baixa - tolerancia)
+                & (close < ultimo_baixa)
+                & (corpo_direcional < 0)
+                & corpo_valido
+            )
+        direcao = pd.Series(
+            np.select([call, put], [1, -1], default=0),
+            index=candles.index,
+        )
+    elif candidato.familia == "correcao_fibo_sr_binaria":
+        planos = planos_correcao_fibo_sr(
+            ativo,
+            candles,
+            raio_pivo=int(p["raio_pivo"]),
+            fib_min=float(p["fib_min"]),
+            fib_max=float(p["fib_max"]),
+            tolerancia_sr_atr=float(p["tolerancia_sr_atr"]),
+            corpo_min_atr=float(p["corpo_min_atr"]),
+            impulso_min_atr=float(p["impulso_min_atr"]),
+            rr_minimo=float(p["rr_minimo"]),
+            max_candles_correcao=int(p["max_candles_correcao"]),
+        )
+        direcao = planos.map(
+            lambda plano: 1 if getattr(plano, "lado", None) == "buy"
+            else -1 if getattr(plano, "lado", None) == "sell"
+            else 0
         )
     elif candidato.familia == "reversao_zscore":
         janela = int(p["janela"])
@@ -194,9 +414,16 @@ def avaliar_ativo(
     todos = candidatos(ativo)
     por_familia = sorted({c.familia for c in todos})
     sinais_cache = {}
+    direcoes_cache = {}
     for c in todos:
         expiracao = int(c.parametros["expiracao"])
-        dados = resultados(candles, sinais(candles, c, ativo), expiracao=expiracao)
+        chave_direcao = (
+            c.familia,
+            tuple(sorted((chave, valor) for chave, valor in c.parametros.items() if chave != "expiracao")),
+        )
+        if chave_direcao not in direcoes_cache:
+            direcoes_cache[chave_direcao] = sinais(candles, c, ativo)
+        dados = resultados(candles, direcoes_cache[chave_direcao], expiracao=expiracao)
         if purgar:
             dados = purgar_sobrepostas(dados, candles, expiracao)
         sinais_cache[str(c)] = dados

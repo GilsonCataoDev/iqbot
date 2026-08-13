@@ -160,10 +160,10 @@ class TestEstrategiasOpcionais(unittest.TestCase):
     # ------------------------------------------------------------------ #
 
     def _setup_engulfing_call(self, df):
-        """Monta engulfing bullish em suporte no penúltimo candle (indice=len-2)."""
+        """Monta engulfing bullish em suporte no candle em formação."""
         # Pivô de suporte em i=40 (índice absoluto no df de 80 linhas)
         df.iloc[40, df.columns.get_loc("Low")] = 96.0
-        i = len(df) - 2
+        i = len(df) - 1
         df.iloc[i - 1, df.columns.get_loc("Open")] = 100.5
         df.iloc[i - 1, df.columns.get_loc("Close")] = 99.5
         df.iloc[i, df.columns.get_loc("Open")] = 99.3
@@ -174,20 +174,20 @@ class TestEstrategiasOpcionais(unittest.TestCase):
         return df, i
 
     def test_engulfing_sr_call_em_suporte(self):
-        """Engulfing bullish tocando suporte → CALL em avaliar_todas."""
+        """Engulfing bullish tocando suporte → CALL nas reversões ao vivo."""
         est = self._estrategia(engulfing_sr_ativo=True)
         df, _ = self._setup_engulfing_call(self._base_df(80))
-        decisoes = est.avaliar_todas("EURUSD-OTC", df)
+        decisoes = est.avaliar_reversoes("EURUSD-OTC", df)
         eng = [d for d in decisoes if d.detalhes.get("setup") == "engulfing_sr"]
         self.assertTrue(eng, "engulfing bullish em suporte deve gerar CALL")
         self.assertEqual(eng[0].direcao, "call")
 
     def test_engulfing_sr_put_em_resistencia(self):
-        """Engulfing bearish tocando resistência → PUT em avaliar_todas."""
+        """Engulfing bearish tocando resistência → PUT nas reversões ao vivo."""
         est = self._estrategia(engulfing_sr_ativo=True)
         df = self._base_df(80)
         df.iloc[40, df.columns.get_loc("High")] = 104.0
-        i = len(df) - 2
+        i = len(df) - 1
         df.iloc[i - 1, df.columns.get_loc("Open")] = 99.5
         df.iloc[i - 1, df.columns.get_loc("Close")] = 100.5
         df.iloc[i, df.columns.get_loc("Open")] = 100.7
@@ -196,16 +196,16 @@ class TestEstrategiasOpcionais(unittest.TestCase):
         df.iloc[i, df.columns.get_loc("Low")] = 99.0
         df.iloc[i, df.columns.get_loc("TendenciaMacro")] = "baixa"
 
-        decisoes = est.avaliar_todas("EURUSD-OTC", df)
+        decisoes = est.avaliar_reversoes("EURUSD-OTC", df)
         eng = [d for d in decisoes if d.detalhes.get("setup") == "engulfing_sr"]
         self.assertTrue(eng, "engulfing bearish em resistência deve gerar PUT")
         self.assertEqual(eng[0].direcao, "put")
 
     def test_engulfing_sr_desativado_por_padrao(self):
-        """Com flag desligada, engulfing não deve aparecer em avaliar_todas."""
+        """Com flag desligada, engulfing não deve aparecer nas reversões."""
         est = self._estrategia(engulfing_sr_ativo=False)
         df, _ = self._setup_engulfing_call(self._base_df(80))
-        decisoes = est.avaliar_todas("EURUSD-OTC", df)
+        decisoes = est.avaliar_reversoes("EURUSD-OTC", df)
         eng = [d for d in decisoes if d.detalhes.get("setup") == "engulfing_sr"]
         self.assertEqual(eng, [], "engulfing_sr desativado não deve disparar")
 

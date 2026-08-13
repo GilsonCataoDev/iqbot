@@ -66,7 +66,7 @@ def recuperar_operacoes_pendentes(
         except Exception as erro:
             idade = (datetime.now() - pendente.enviada_em).total_seconds()
             if idade >= idade_perda_tecnica_segundos:
-                registro.registrar_resultado(
+                registro.registrar_resultado_desconhecido(
                     ResultadoOrdem(
                         id_ordem=pendente.id_ordem,
                         ativo=pendente.ativo,
@@ -75,16 +75,16 @@ def recuperar_operacoes_pendentes(
                         encerrada_em=datetime.now(),
                         valor=pendente.valor,
                         payout=pendente.payout,
-                        lucro=-pendente.valor,
-                        resultado_bruto="perda_tecnica_resultado_indisponivel",
+                        lucro=None,
+                        resultado_bruto=f"resultado_desconhecido:{erro}",
                     )
                 )
                 print(
                     f">> {pendente.ativo}: a IQ não devolveu o resultado da ordem "
-                    f"{pendente.id_ordem}; registrada como perda técnica de "
-                    f"{-pendente.valor:+.2f} para liberar o monitor com segurança."
+                    f"{pendente.id_ordem}; mantida como resultado desconhecido. "
+                    f"O risco reserva {-pendente.valor:+.2f}, mas o histórico não inventa uma perda."
                 )
-                recuperadas += 1
+                falhas += 1
             else:
                 print(f">> Não foi possível recuperar a ordem {pendente.id_ordem}: {erro}")
                 falhas += 1

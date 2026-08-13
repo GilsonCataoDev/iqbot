@@ -408,7 +408,7 @@ Arquivo: `iqoption_m5/config.py` — dataclass `Configuracao` (frozen).
 
 | Parâmetro | Padrão | Descrição |
 |---|---|---|
-| `max_operacoes_dia` | `9999` | Máximo de ordens por dia |
+| `max_operacoes_dia` | `0` | Sem limite diário no perfil de pesquisa; ordens permanecem desativadas |
 | `max_perdas_consecutivas` | `9999` | Perdas seguidas antes de parar |
 | `stop_diario` | `-9999.0` | Prejuízo diário que para o bot |
 | `parar_por_perdas` | `False` | Ativa bloqueio por perdas consecutivas |

@@ -17,6 +17,8 @@ from .modelos import (
     SnapshotMercado,
 )
 
+VERSAO_SCHEMA = 1
+
 
 class RegistroSQLite:
     """Auditoria local: decisões bloqueadas e operações ficam no mesmo banco."""
@@ -43,6 +45,11 @@ class RegistroSQLite:
 
     def _criar_schema(self) -> None:
         with self._sessao() as db:
+            versao_atual = int(db.execute("PRAGMA user_version").fetchone()[0])
+            if versao_atual > VERSAO_SCHEMA:
+                raise RuntimeError(
+                    f"Banco usa schema {versao_atual}, mas este programa suporta até {VERSAO_SCHEMA}."
+                )
             db.executescript(
                 """
                 CREATE TABLE IF NOT EXISTS decisoes (
@@ -146,6 +153,15 @@ class RegistroSQLite:
                     close REAL NOT NULL,
                     PRIMARY KEY (ativo, timeframe, ts_unix)
                 );
+
+                CREATE INDEX IF NOT EXISTS idx_operacoes_status_data
+                    ON operacoes(status, enviada_em);
+                CREATE INDEX IF NOT EXISTS idx_operacoes_ativo_data
+                    ON operacoes(ativo, enviada_em);
+                CREATE INDEX IF NOT EXISTS idx_decisoes_ativo_data
+                    ON decisoes(ativo, candle_hora);
+                CREATE INDEX IF NOT EXISTS idx_simulacoes_setup_data
+                    ON simulacoes(setup, candle_hora);
                 """
             )
             colunas_operacoes = {
@@ -161,6 +177,7 @@ class RegistroSQLite:
                 db.execute("ALTER TABLE operacoes ADD COLUMN hora_sinal TEXT")
             if "atraso_envio_ms" not in colunas_operacoes:
                 db.execute("ALTER TABLE operacoes ADD COLUMN atraso_envio_ms INTEGER")
+            db.execute(f"PRAGMA user_version={VERSAO_SCHEMA}")
 
     def registrar_latencia(self, lat, id_ordem: str | None = None) -> None:
         """Persiste um LatenciaSinal no banco. Seguro chamar múltiplas vezes
@@ -347,6 +364,27 @@ class RegistroSQLite:
                 ),
             )
 
+    def registrar_resultado_desconhecido(self, resultado: ResultadoOrdem) -> None:
+        """Fecha a espera operacional sem inventar um resultado financeiro.
+
+        A operação continua elegível para reconciliação posterior, mas fica
+        fora de lucro e win rate enquanto a corretora não devolver o desfecho.
+        """
+        with self._lock, self._sessao() as db:
+            db.execute(
+                """
+                UPDATE operacoes
+                SET encerrada_em=?, lucro=NULL, resultado_bruto=?,
+                    status='resultado_desconhecido'
+                WHERE id_ordem=?
+                """,
+                (
+                    resultado.encerrada_em.isoformat(),
+                    str(resultado.resultado_bruto),
+                    resultado.id_ordem,
+                ),
+            )
+
     def registrar_falha(self, decisao: Decisao, motivo: str) -> None:
         with self._lock, self._sessao() as db:
             db.execute(
@@ -371,21 +409,32 @@ class RegistroSQLite:
         with self._lock, self._sessao() as db:
             linhas = db.execute(
                 """
-                SELECT status, lucro
+                SELECT status, lucro, valor
                 FROM operacoes
-                WHERE date(enviada_em)=? AND status IN ('aberta', 'finalizada')
+                WHERE date(enviada_em)=?
+                  AND status IN ('aberta', 'finalizada', 'resultado_desconhecido')
                 ORDER BY enviada_em ASC
                 """,
                 (hoje,),
             ).fetchall()
         enviadas = len(linhas)
-        finalizadas = sum(1 for status, _ in linhas if status == "finalizada")
-        lucro = sum(float(valor) for status, valor in linhas if status == "finalizada" and valor is not None)
+        finalizadas = sum(1 for status, _, _ in linhas if status == "finalizada")
+        valores_risco = [
+            float(lucro) if status == "finalizada" and lucro is not None else -float(valor)
+            for status, lucro, valor in linhas
+            if status in ("finalizada", "resultado_desconhecido")
+            and (lucro is not None or status == "resultado_desconhecido")
+        ]
+        lucro = sum(valores_risco)
         perdas = 0
-        for status, valor in reversed(linhas):
-            if status != "finalizada" or valor is None:
+        for status, valor_lucro, valor_ordem in reversed(linhas):
+            if status == "resultado_desconhecido":
+                valor_risco = -float(valor_ordem)
+            elif status == "finalizada" and valor_lucro is not None:
+                valor_risco = float(valor_lucro)
+            else:
                 break
-            if float(valor) < 0:
+            if valor_risco < 0:
                 perdas += 1
             else:
                 break
@@ -394,9 +443,9 @@ class RegistroSQLite:
             operacoes_finalizadas=finalizadas,
             perdas_consecutivas=perdas,
             lucro_sessao=lucro,
-            lucro_total=self.lucro_total(),
+            lucro_total=self.lucro_total_risco(),
             ultimo_lucro=self.ultimo_lucro(),
-            ordem_pendente=any(status == "aberta" for status, _ in linhas),
+            ordem_pendente=any(status == "aberta" for status, _, _ in linhas),
         )
 
     def ultimo_lucro(self) -> float:
@@ -425,13 +474,30 @@ class RegistroSQLite:
             ).fetchone()
         return float(linha[0]) if linha and linha[0] is not None else 0.0
 
+    def lucro_total_risco(self) -> float:
+        """Saldo conservador: desconhecidos reservam a perda máxima."""
+        with self._lock, self._sessao() as db:
+            linha = db.execute(
+                """
+                SELECT SUM(
+                    CASE
+                        WHEN status='finalizada' AND lucro IS NOT NULL THEN lucro
+                        WHEN status='resultado_desconhecido' THEN -valor
+                        ELSE 0
+                    END
+                )
+                FROM operacoes
+                """
+            ).fetchone()
+        return float(linha[0]) if linha and linha[0] is not None else 0.0
+
     def operacoes_pendentes(self) -> list[OperacaoPendente]:
         with self._lock, self._sessao() as db:
             linhas = db.execute(
                 """
                 SELECT id_ordem, ativo, direcao, enviada_em, valor, payout
                 FROM operacoes
-                WHERE status='aberta'
+                WHERE status IN ('aberta', 'resultado_desconhecido')
                 ORDER BY enviada_em ASC
                 """
             ).fetchall()
@@ -453,7 +519,8 @@ class RegistroSQLite:
                 """
                 SELECT enviada_em, direcao, lucro, status, setup, preco_entrada
                 FROM operacoes
-                WHERE ativo=? AND status IN ('aberta', 'finalizada')
+                WHERE ativo=?
+                  AND status IN ('aberta', 'finalizada', 'resultado_desconhecido')
                 ORDER BY enviada_em DESC LIMIT ?
                 """,
                 (ativo, limite),

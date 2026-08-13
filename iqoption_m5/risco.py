@@ -55,7 +55,11 @@ class GerenciadorRisco:
         ):
             self._encerrado = True
             self._motivo_encerramento = "stop_diario"
-        elif not self._encerrado and self._enviadas >= config.max_operacoes_dia:
+        elif (
+            not self._encerrado
+            and config.max_operacoes_dia > 0
+            and self._enviadas >= config.max_operacoes_dia
+        ):
             self._encerrado = True
             self._motivo_encerramento = "limite_diario"
         self._checar_meta_diaria()
@@ -148,7 +152,10 @@ class GerenciadorRisco:
         # 3. Circuit breaker
         if self._circuit_breaker_ate > 0 and time.time() < self._circuit_breaker_ate:
             return Autorizacao(False, "circuit_breaker")
-        if self._enviadas >= self.config.max_operacoes_dia:
+        if (
+            self.config.max_operacoes_dia > 0
+            and self._enviadas >= self.config.max_operacoes_dia
+        ):
             return Autorizacao(False, "limite_diario")
         if (
             self.config.parar_por_perdas
@@ -214,7 +221,10 @@ class GerenciadorRisco:
             elif self.config.parar_por_prejuizo and self._lucro <= self.config.stop_diario:
                 self._encerrado = True
                 self._motivo_encerramento = "stop_diario"
-            elif self._enviadas >= self.config.max_operacoes_dia:
+            elif (
+                self.config.max_operacoes_dia > 0
+                and self._enviadas >= self.config.max_operacoes_dia
+            ):
                 self._encerrado = True
                 self._motivo_encerramento = "limite_diario"
             elif (self.config.drawdown_maximo_percentual > 0
@@ -223,6 +233,16 @@ class GerenciadorRisco:
                 self._motivo_encerramento = "drawdown_maximo"
             self._checar_meta_diaria()
             self._checar_piso_banca()
+
+    def registrar_resultado_desconhecido(self, valor: float, ativo: str) -> None:
+        """Aplica perda máxima somente aos limites conservadores de risco.
+
+        A operação é liberada, mas não entra na contagem de resultados
+        confirmados. O banco poderá reconciliá-la quando a corretora responder.
+        """
+        self.registrar_resultado(-abs(valor), ativo)
+        with self._lock:
+            self._finalizadas = max(0, self._finalizadas - 1)
 
     def resumo(self) -> ResumoRisco:
         with self._lock:

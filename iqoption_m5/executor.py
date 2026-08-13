@@ -1,3 +1,4 @@
+import logging
 import threading
 from datetime import datetime
 
@@ -11,6 +12,8 @@ from .interfaces import MercadoExecutor
 from .modelos import Decisao, ResultadoOrdem, SnapshotMercado
 from .registro import RegistroSQLite
 from .risco import GerenciadorRisco
+
+logger = logging.getLogger(__name__)
 
 
 class ExecutorSeguro:
@@ -98,7 +101,11 @@ class ExecutorSeguro:
         except Exception as e:
             self.risco.cancelar_reserva(decisao.ativo)
             self.registro.registrar_falha(decisao, f"excecao_buy:{e}")
-            print(f">> {decisao.ativo}: erro ao enviar ({e})")
+            logger.exception(
+                "falha_envio ativo=%s signal_id=%s",
+                decisao.ativo,
+                decisao.signal_id,
+            )
             return
 
         if not enviada:
@@ -157,9 +164,18 @@ class ExecutorSeguro:
             lucro = None
 
         if lucro is None:
-            print(f">> {decisao.ativo}: resultado indisponivel pra ordem {id_ordem}; registrada como perda tecnica de {-valor:+.2f}")
-            bruto = f"perda_tecnica_resultado_indisponivel:{bruto}"
-            lucro = -valor
+            logger.warning(
+                "resultado_desconhecido ativo=%s id_ordem=%s valor_risco=%.2f bruto=%s",
+                decisao.ativo,
+                id_ordem,
+                -valor,
+                bruto,
+            )
+            print(
+                f">> {decisao.ativo}: resultado indisponivel pra ordem {id_ordem}; "
+                f"mantido como desconhecido (reserva conservadora de {-valor:+.2f} no risco)"
+            )
+            bruto = f"resultado_desconhecido:{bruto}"
 
         resultado = ResultadoOrdem(
             id_ordem=str(id_ordem),
@@ -172,6 +188,13 @@ class ExecutorSeguro:
             lucro=lucro,
             resultado_bruto=bruto,
         )
+        if lucro is None:
+            try:
+                self.registro.registrar_resultado_desconhecido(resultado)
+            finally:
+                self.risco.registrar_resultado_desconhecido(valor, decisao.ativo)
+            return
+
         try:
             self.registro.registrar_resultado(resultado)
         finally:

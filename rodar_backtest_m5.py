@@ -13,7 +13,7 @@ import argparse
 import pandas as pd
 
 from iqoption_m5 import backtest
-from iqoption_m5.config import Configuracao
+from iqoption_m5.config import configuracao_pesquisa_m5
 from iqoption_m5.mercado_iq import MercadoIQ
 
 
@@ -21,6 +21,18 @@ def analisar_argumentos():
     parser = argparse.ArgumentParser(description="Backtest da estratégia IQ Option M5.")
     parser.add_argument("--candles", type=int, default=5000, help="candles por ativo (padrão: 5000)")
     parser.add_argument("--payout", type=float, default=0.85, help="payout usado no breakeven (padrão: 0.85)")
+    parser.add_argument(
+        "--spread-pips",
+        type=float,
+        default=0.0,
+        help="custo médio de spread por operação (padrão: 0)",
+    )
+    parser.add_argument(
+        "--slippage-pips",
+        type=float,
+        default=0.0,
+        help="slippage médio por operação (padrão: 0)",
+    )
     parser.add_argument("--ativos", nargs="*", default=None, help="ativos a medir (padrão: os do config)")
     parser.add_argument("--offline", action="store_true", help="não baixa nada, usa o cache em disco")
     parser.add_argument(
@@ -43,7 +55,7 @@ def analisar_argumentos():
 
 def main() -> None:
     argumentos = analisar_argumentos()
-    config = Configuracao()
+    config = configuracao_pesquisa_m5()
     ativos = argumentos.ativos or list(config.ativos)
 
     api = None
@@ -72,6 +84,13 @@ def main() -> None:
 
     df = backtest.para_dataframe(todas)
     backtest.imprimir_relatorio(df, argumentos.payout)
+    backtest.BacktestRealista(
+        backtest.CustoOperacao(
+            payout=argumentos.payout,
+            spread_pips=argumentos.spread_pips,
+            slippage_pips=argumentos.slippage_pips,
+        )
+    ).imprimir(todas)
 
     if argumentos.validar and not df.empty:
         backtest.validar_fora_da_amostra(df, argumentos.payout)

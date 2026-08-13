@@ -1,10 +1,11 @@
 @echo off
 chcp 65001 >nul
 cd /d "%~dp0"
-title IQ Option M1 - PRACTICE
+title IQ Option M1 - SOMENTE MONITOR
 if exist ".env.bat" call ".env.bat"
 if "%GROQ_API_KEY%"=="" echo AVISO: GROQ_API_KEY nao definida. IA desativada.
-echo IQ Option M1 - conta de treinamento (candles de 1 minuto)
+echo IQ Option M1 - SOMENTE MONITOR (candles de 1 minuto)
+echo Nenhuma ordem sera enviada neste modo.
 echo.
 echo AVISO: a triagem walk-forward mediu apenas M5.
 echo Os numeros daquele estudo nao valem para M1.

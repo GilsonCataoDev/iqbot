@@ -1,0 +1,12 @@
+[tool.pytest.ini_options]
+testpaths = ["tests_m5"]
+addopts = "-ra"
+
+[tool.ruff]
+target-version = "py311"
+line-length = 100
+exclude = ["graphify-out", "iqoption_m5/dados"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B"]
+ignore = ["E501"]

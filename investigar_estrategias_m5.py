@@ -6,7 +6,7 @@ from pathlib import Path
 import pandas as pd
 
 from iqoption_m5.backtest import carregar_cache
-from iqoption_m5.config import Configuracao
+from iqoption_m5.config import configuracao_pesquisa_m5
 from iqoption_m5.investigacao import avaliar_ativo, classificar
 
 
@@ -29,7 +29,7 @@ def main() -> None:
     )
     argumentos = parser.parse_args()
 
-    config = Configuracao()
+    config = configuracao_pesquisa_m5()
     linhas = []
     print("Investigação M5 — walk-forward por ativo (somente cache local)")
     if argumentos.purgar:

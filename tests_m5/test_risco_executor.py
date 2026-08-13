@@ -12,7 +12,7 @@ import pandas as pd
 from iqoption_m5.config import Configuracao
 from iqoption_m5.app import main
 from iqoption_m5.executor import ExecutorSeguro
-from iqoption_m5.modelos import Decisao, ResultadoOrdem, SnapshotMercado
+from iqoption_m5.modelos import Decisao, EstadoPersistido, ResultadoOrdem, SnapshotMercado
 from iqoption_m5.registro import RegistroSQLite
 from iqoption_m5.recuperacao import recuperar_operacoes_pendentes
 from iqoption_m5.risco import GerenciadorRisco
@@ -34,6 +34,9 @@ class MercadoFalso:
     def consultar_resultado(self, id_ordem):
         return 0.85
 
+    def resultado_por_candle(self, *args, **kwargs):
+        return 0.85
+
     def fechar(self):
         pass
 
@@ -41,7 +44,10 @@ class MercadoFalso:
 class TestRiscoEExecutor(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
-        self.config = Configuracao(pasta_dados=Path(self.temp.name))
+        self.config = Configuracao(
+            pasta_dados=Path(self.temp.name),
+            executar_ordens=True,
+        )
         idx = pd.date_range("2026-01-01", periods=60, freq="5min")
         candles = pd.DataFrame(
             {"Open": 1.0, "High": 1.1, "Low": 0.9, "Close": 1.0, "Volume": 1.0},
@@ -121,15 +127,25 @@ class TestRiscoEExecutor(unittest.TestCase):
         risco.registrar_resultado(500.0, self.decisao.ativo)
         self.assertFalse(risco.resumo().encerrado)
 
-    def test_perdas_consecutivas_nao_encerram_por_padrao(self):
+    def test_limite_diario_zero_nao_bloqueia_historico(self):
+        config = replace(self.config, executar_ordens=False, max_operacoes_dia=0)
+        estado = EstadoPersistido(operacoes_enviadas=44, lucro_sessao=0.34)
+
+        risco = GerenciadorRisco(config, estado)
+
+        self.assertFalse(risco.resumo().encerrado)
+        self.assertTrue(risco.avaliar(self.snapshot, self.decisao).permitida)
+
+    def test_tres_perdas_consecutivas_encerram_por_padrao(self):
         risco = GerenciadorRisco(self.config)
-        for _ in range(10):
+        for _ in range(3):
             self.assertTrue(risco.reservar(self.snapshot, self.decisao).permitida)
             risco.registrar_resultado(-1.0, self.decisao.ativo)
         resumo = risco.resumo()
-        self.assertFalse(resumo.encerrado)
+        self.assertTrue(resumo.encerrado)
+        self.assertEqual(resumo.motivo_encerramento, "limite_perdas_consecutivas")
 
-    def test_perdas_nao_bloqueiam_antes_das_cinco_por_padrao(self):
+    def test_perdas_nao_bloqueiam_antes_das_tres_por_padrao(self):
         risco = GerenciadorRisco(self.config)
         for _ in range(2):
             self.assertTrue(risco.reservar(self.snapshot, self.decisao).permitida)
@@ -153,6 +169,30 @@ class TestRiscoEExecutor(unittest.TestCase):
         with closing(sqlite3.connect(self.config.banco_sqlite)) as db:
             linha = db.execute("SELECT status, lucro FROM operacoes WHERE id_ordem='ordem-teste-1'").fetchone()
         self.assertEqual(linha, ("finalizada", 0.85))
+
+    def test_executor_nao_inventa_perda_quando_resultado_falha(self):
+        class MercadoResultadoIndisponivel(MercadoFalso):
+            def resultado_por_candle(self, *args, **kwargs):
+                raise TimeoutError("sem resposta")
+
+        risco = GerenciadorRisco(self.config)
+        registro = RegistroSQLite(self.config.banco_sqlite)
+        executor = ExecutorSeguro(
+            self.config, MercadoResultadoIndisponivel(), risco, registro
+        )
+
+        self.assertTrue(executor.executar(self.snapshot, self.decisao))
+        executor.aguardar_ordens()
+
+        resumo = risco.resumo()
+        self.assertEqual(resumo.operacoes_finalizadas, 0)
+        self.assertEqual(resumo.lucro_sessao, -1.0)
+        with closing(sqlite3.connect(self.config.banco_sqlite)) as db:
+            status, lucro = db.execute(
+                "SELECT status, lucro FROM operacoes WHERE id_ordem='ordem-teste-1'"
+            ).fetchone()
+        self.assertEqual(status, "resultado_desconhecido")
+        self.assertIsNone(lucro)
 
     def test_limites_do_dia_persistem_apos_reinicio(self):
         registro = RegistroSQLite(self.config.banco_sqlite)
@@ -223,6 +263,20 @@ class TestRiscoEExecutor(unittest.TestCase):
         self.assertEqual(status, "finalizada")
         self.assertEqual(lucro, 0.85)
 
+    def test_schema_sqlite_tem_versao_e_indices(self):
+        RegistroSQLite(self.config.banco_sqlite)
+        with closing(sqlite3.connect(self.config.banco_sqlite)) as db:
+            versao = db.execute("PRAGMA user_version").fetchone()[0]
+            indices = {
+                linha[0]
+                for linha in db.execute(
+                    "SELECT name FROM sqlite_master WHERE type='index'"
+                ).fetchall()
+            }
+        self.assertEqual(versao, 1)
+        self.assertIn("idx_operacoes_status_data", indices)
+        self.assertIn("idx_operacoes_ativo_data", indices)
+
     def test_app_conecta_e_recupera_antes_de_aplicar_bloqueio(self):
         config = Configuracao(
             pasta_dados=Path(self.temp.name),
@@ -276,7 +330,7 @@ class TestRiscoEExecutor(unittest.TestCase):
         self.assertEqual((recuperadas, falhas), (0, 1))
         self.assertTrue(registro.estado_hoje().ordem_pendente)
 
-    def test_ordem_antiga_sem_resposta_vira_perda_tecnica(self):
+    def test_ordem_antiga_sem_resposta_fica_desconhecida(self):
         registro = RegistroSQLite(self.config.banco_sqlite)
         registro.registrar_abertura(
             "antiga-sem-resposta",
@@ -294,15 +348,18 @@ class TestRiscoEExecutor(unittest.TestCase):
             MercadoSemResposta(), registro, timeout_segundos=1
         )
 
-        self.assertEqual((recuperadas, falhas), (1, 0))
+        self.assertEqual((recuperadas, falhas), (0, 1))
         self.assertFalse(registro.estado_hoje().ordem_pendente)
         with closing(sqlite3.connect(self.config.banco_sqlite)) as db:
-            lucro, bruto = db.execute(
-                "SELECT lucro, resultado_bruto FROM operacoes "
+            status, lucro, bruto = db.execute(
+                "SELECT status, lucro, resultado_bruto FROM operacoes "
                 "WHERE id_ordem='antiga-sem-resposta'"
             ).fetchone()
-        self.assertEqual(lucro, -1.0)
-        self.assertEqual(bruto, "perda_tecnica_resultado_indisponivel")
+        self.assertEqual(status, "resultado_desconhecido")
+        self.assertIsNone(lucro)
+        self.assertTrue(bruto.startswith("resultado_desconhecido:"))
+        self.assertEqual(registro.lucro_total(), 0.0)
+        self.assertEqual(registro.lucro_total_risco(), -1.0)
 
 
 if __name__ == "__main__":
