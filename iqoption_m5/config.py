@@ -108,7 +108,8 @@ class Configuracao:
     cooldown_pos_ordem_por_ativo_candles: int = 0  # 0 = desligado; >0 = bloqueia N candles após ordem no mesmo ativo
     filtro_candle_entrada_atr: float = 0.0  # 0 = desligado; >0 = cancela se candle N+1 abre > N×ATR contra o sinal
     bloquear_noticia_alto_impacto: bool = False  # bloqueia entrada em janela de notícia HIGH (ativos reais)
-    ia_como_filtro: bool = True  # True = IA com confianca media/alta bloqueia sinal contrário; False = só exibe parecer
+    ia_como_filtro: bool = True  # True = IA bloqueia sinais contrários (media/alta confiança); False = só exibe parecer
+    ia_filtro_exceto_setups: tuple[str, ...] = ("sr_rejeicao",)  # setups excluídos do bloqueio de IA mesmo com ia_como_filtro=True
 
     # --- Horário bloqueado (UTC) ---
     # Evita operar em janelas de baixa liquidez / mercado OTC suspenso.

@@ -820,7 +820,8 @@ def main(config: Configuracao | None = None) -> None:
                 print(f"    [{setup_nome}] par nao validado, ignorado (use backtest offline)")
                 algum_bloqueio_definitivo = True
             elif ia_discorda and not favorece_noticia:
-                if config.ia_como_filtro:
+                _ia_bloqueia = config.ia_como_filtro and setup_nome not in config.ia_filtro_exceto_setups
+                if _ia_bloqueia:
                     print(
                         f"    [IA] BLOQUEOU [{setup_nome}]: IA sugere {ia_atual.direcao_sugerida} "
                         f"({ia_atual.confianca}) contra o sinal {decisao.direcao.upper()}"
@@ -829,7 +830,7 @@ def main(config: Configuracao | None = None) -> None:
                 else:
                     print(
                         f"    [IA] discorda [{setup_nome}]: sugere {ia_atual.direcao_sugerida} "
-                        f"({ia_atual.confianca}) — filtro desativado, seguindo sinal"
+                        f"({ia_atual.confianca}) — setup excluido do filtro, seguindo sinal"
                     )
             elif autorizacao.permitida:
                 # Marcação universal: valida proximidade do preço ao nível que gerou o sinal.
