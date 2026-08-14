@@ -90,6 +90,10 @@ class Configuracao:
     divergencia_rsi_ativo: bool = False
     bollinger_squeeze_ativo: bool = False
     pin_bar_sr_ativo: bool = False  # False = nunca entra em pin_bar_sr
+    macd_crossover_time_ativo: bool = False        # variante: só 00h-06h UTC
+    macd_crossover_tendencia_ativo: bool = False   # variante: só com TendenciaMacro alinhada
+    divergencia_rsi_time_ativo: bool = False       # variante: só 11h-13h UTC
+    divergencia_rsi_tendencia_ativo: bool = False  # variante: RSI extremo < 25 / > 75
     pullback_ativo: bool = False    # False = bloqueia pullback isolado (pullback_confluencia continua)
     divergencia_rsi_janela_pivos: int = 5
     bollinger_squeeze_percentil_janela: int = 20
@@ -281,6 +285,10 @@ def configuracao_pesquisa_m5(base: Configuracao | None = None) -> Configuracao:
         divergencia_rsi_ativo=True,
         bollinger_squeeze_ativo=True,
         pin_bar_sr_ativo=True,
+        macd_crossover_time_ativo=True,
+        macd_crossover_tendencia_ativo=True,
+        divergencia_rsi_time_ativo=True,
+        divergencia_rsi_tendencia_ativo=True,
         pullback_ativo=True,
     )
 
@@ -304,6 +312,10 @@ def configuracao_practice_m5(base: Configuracao | None = None) -> Configuracao:
         payout_minimo=0.80,
         entrada_max_segundos_no_candle=15,
         pin_bar_sr_ativo=False,
+        macd_crossover_time_ativo=True,
+        macd_crossover_tendencia_ativo=True,
+        divergencia_rsi_time_ativo=True,
+        divergencia_rsi_tendencia_ativo=True,
     )
 
 

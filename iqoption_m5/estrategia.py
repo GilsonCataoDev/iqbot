@@ -1,4 +1,5 @@
 import logging
+from dataclasses import replace as _dc_replace
 
 import numpy as np
 import pandas as pd
@@ -665,6 +666,30 @@ class EstrategiaReversaoM5:
 
         return None
 
+    def _avaliar_macd_time(self, ativo: str, df: pd.DataFrame, indice: int) -> Decisao | None:
+        """macd_crossover restrito a 00h-06h UTC — janela asiática onde o setup historicamente performa."""
+        hora = pd.Timestamp(df.index[indice]).hour
+        if hora > 6:
+            return None
+        d = self._avaliar_macd(ativo, df, indice)
+        if d is None:
+            return None
+        return _dc_replace(d, motivo="macd_crossover_time_m5",
+                           detalhes={**d.detalhes, "setup": "macd_crossover_time"})
+
+    def _avaliar_macd_tendencia(self, ativo: str, df: pd.DataFrame, indice: int) -> Decisao | None:
+        """macd_crossover só quando TendenciaMacro confirma a direção do cruzamento."""
+        d = self._avaliar_macd(ativo, df, indice)
+        if d is None:
+            return None
+        tendencia = str(df.iloc[indice].get("TendenciaMacro", "lateral"))
+        if d.direcao == "call" and tendencia != "alta":
+            return None
+        if d.direcao == "put" and tendencia != "baixa":
+            return None
+        return _dc_replace(d, motivo="macd_crossover_tendencia_m5",
+                           detalhes={**d.detalhes, "setup": "macd_crossover_tendencia"})
+
     def _avaliar_engulfing_sr(self, ativo: str, df: pd.DataFrame, indice: int) -> Decisao | None:
         c = self.config
         if indice < 2 or indice >= len(df):
@@ -791,6 +816,32 @@ class EstrategiaReversaoM5:
                     )
         return None
 
+    def _avaliar_divergencia_rsi_time(self, ativo: str, df: pd.DataFrame, indice: int) -> Decisao | None:
+        """divergencia_rsi restrita a 11h-13h UTC — janela London afternoon que performa bem."""
+        hora = pd.Timestamp(df.index[indice]).hour
+        if not (11 <= hora <= 13):
+            return None
+        d = self._avaliar_divergencia_rsi(ativo, df, indice)
+        if d is None:
+            return None
+        return _dc_replace(d, motivo="divergencia_rsi_time_m5",
+                           detalhes={**d.detalhes, "setup": "divergencia_rsi_time"})
+
+    def _avaliar_divergencia_rsi_tendencia(self, ativo: str, df: pd.DataFrame, indice: int) -> Decisao | None:
+        """divergencia_rsi com RSI extremo (< 25 / > 75) — zona de sobrecompra/venda real."""
+        conf = df.iloc[indice] if indice < len(df) else None
+        if conf is None or pd.isna(conf.get("RSI")):
+            return None
+        rsi = float(conf["RSI"])
+        # Pré-filtra por extremo antes de rodar toda a lógica de divergência
+        if not (rsi < 25 or rsi > 75):
+            return None
+        d = self._avaliar_divergencia_rsi(ativo, df, indice)
+        if d is None:
+            return None
+        return _dc_replace(d, motivo="divergencia_rsi_tendencia_m5",
+                           detalhes={**d.detalhes, "setup": "divergencia_rsi_tendencia"})
+
     def _avaliar_bollinger_squeeze(self, ativo: str, df: pd.DataFrame, indice: int) -> Decisao | None:
         c = self.config
         janela = c.bollinger_squeeze_percentil_janela
@@ -880,8 +931,12 @@ class EstrategiaReversaoM5:
                     )
                     self._estrategias_desativadas.add(nome)
         for ativo_flag, fn in (
-            (c.divergencia_rsi_ativo, self._avaliar_divergencia_rsi),
-            (c.bollinger_squeeze_ativo, self._avaliar_bollinger_squeeze),
+            (c.divergencia_rsi_ativo,           self._avaliar_divergencia_rsi),
+            (c.bollinger_squeeze_ativo,          self._avaliar_bollinger_squeeze),
+            (c.macd_crossover_time_ativo,        self._avaliar_macd_time),
+            (c.macd_crossover_tendencia_ativo,   self._avaliar_macd_tendencia),
+            (c.divergencia_rsi_time_ativo,       self._avaliar_divergencia_rsi_time),
+            (c.divergencia_rsi_tendencia_ativo,  self._avaliar_divergencia_rsi_tendencia),
         ):
             if not ativo_flag:
                 continue
