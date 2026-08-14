@@ -303,6 +303,7 @@ def configuracao_practice_m5(base: Configuracao | None = None) -> Configuracao:
         parar_por_prejuizo=False,
         payout_minimo=0.80,
         entrada_max_segundos_no_candle=15,
+        pin_bar_sr_ativo=False,
     )
 
 
