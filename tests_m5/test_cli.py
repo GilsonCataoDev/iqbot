@@ -1,9 +1,18 @@
 import unittest
+from pathlib import Path
 
 from rodar_iqoption_m5 import analisar_argumentos, selecionar_configuracao
 
 
 class TestCliSegura(unittest.TestCase):
+    def test_iniciador_m5_usa_practice_confirmado(self):
+        iniciador = (Path(__file__).resolve().parents[1] / "INICIAR_IQ_M5.bat").read_text(
+            encoding="utf-8"
+        )
+
+        self.assertIn("--practice --confirmo", iniciador)
+        self.assertIn('set /p CONFIRMA=', iniciador)
+
     def test_sem_perfil_fica_somente_monitor(self):
         config = selecionar_configuracao(analisar_argumentos([]))
         self.assertFalse(config.executar_ordens)

@@ -5,10 +5,10 @@ Ferramenta de pesquisa e validação de estratégias M5 para IQ Option. Analisa 
 ## Começar em 3 passos
 
 1. Execute `INSTALAR_DEPENDENCIAS.bat` uma vez.
-2. Execute `INICIAR_IQ_M5.bat` para validar estratégias sem enviar ordens.
+2. Execute `INICIAR_IQ_M5.bat`, confirme com `SIM` e use a conta PRACTICE.
 3. Informe o e-mail e a senha da IQ Option no terminal.
 
-Para enviar ordens na conta de treinamento, execute `INICIAR_IQ_PRACTICE.bat` e confirme digitando `SIM`. Pela linha de comando: `python rodar_iqoption_m5.py --practice --confirmo`.
+Para somente validar estratégias sem enviar ordens, execute `PESQUISAR_IQ_M5.bat`. Pela linha de comando, o perfil PRACTICE é `python rodar_iqoption_m5.py --practice --confirmo`.
 
 ## M5 ou M1
 
