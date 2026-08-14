@@ -634,7 +634,7 @@ class EstrategiaReversaoM5:
         macd_prev = float(vela_ant["MACD"])
         sig_prev = float(vela_ant["MACD_Signal"])
 
-        if macd_prev < sig_prev and macd_cur > sig_cur:
+        if macd_prev < sig_prev and macd_cur > sig_cur and macd_cur > 0:
             return Decisao(
                 ativo=ativo,
                 direcao="call",
@@ -649,7 +649,7 @@ class EstrategiaReversaoM5:
                 },
             )
 
-        if macd_prev > sig_prev and macd_cur < sig_cur:
+        if macd_prev > sig_prev and macd_cur < sig_cur and macd_cur < 0:
             return Decisao(
                 ativo=ativo,
                 direcao="put",
