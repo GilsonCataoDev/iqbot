@@ -488,6 +488,8 @@ class EstrategiaReversaoM5:
         )
 
     def _avaliar_sr_rejeicao(self, ativo: str, df: pd.DataFrame, indice: int) -> Decisao | None:
+        if not self.config.sr_rejeicao_ativo:
+            return None
         min_candles = self.config.pullback_pivo_raio * 2 + 10
         if indice < min_candles or indice >= len(df):
             return None
@@ -585,6 +587,8 @@ class EstrategiaReversaoM5:
         return None
 
     def _avaliar_fibo_sr_retracao(self, ativo: str, df: pd.DataFrame, indice: int) -> Decisao | None:
+        if not self.config.fibo_sr_retracao_ativo:
+            return None
         if indice < 11 or indice >= len(df):
             return None
         if not self._atr_regime_valido(df, indice):
@@ -617,6 +621,8 @@ class EstrategiaReversaoM5:
         )
 
     def _avaliar_macd(self, ativo: str, df: pd.DataFrame, indice: int) -> Decisao | None:
+        if not self.config.macd_crossover_ativo:
+            return None
         c = self.config
         min_candles = c.macd_slow + c.macd_signal + 5
         if indice < min_candles or indice >= len(df):

@@ -385,7 +385,7 @@ def main(config: Configuracao | None = None) -> None:
                 item["abaixo"] = sugestao["abaixo_do_forecast"]
             proximas_noticias.append(item)
 
-        alerta = detectar_reversao(ativo, indicadores, config.timeframe_segundos)
+        alerta = detectar_reversao(ativo, indicadores, config.timeframe_segundos) if config.reversao_candle_ativo else None
         if alerta is not None:
             alerta = anexar_noticia(alerta, calendario, agora_utc)
 

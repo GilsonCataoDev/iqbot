@@ -85,6 +85,12 @@ class Configuracao:
     macd_slow: int = 16
     macd_signal: int = 9
 
+    # Estratégias — flags globais (True = ativo por padrão)
+    macd_crossover_ativo: bool = True
+    sr_rejeicao_ativo: bool = True
+    fibo_sr_retracao_ativo: bool = True
+    reversao_candle_ativo: bool = True     # inclui reversao_confluencia
+
     # Estratégias opcionais — desativadas por padrão até validação em PRACTICE
     engulfing_sr_ativo: bool = False
     divergencia_rsi_ativo: bool = False
@@ -311,11 +317,19 @@ def configuracao_practice_m5(base: Configuracao | None = None) -> Configuracao:
         parar_por_prejuizo=False,
         payout_minimo=0.80,
         entrada_max_segundos_no_candle=25,
+        # Só os 3 melhores por WR: pullback_confluencia, reversao_confluencia, reversao_bollinger_rsi
+        macd_crossover_ativo=False,
+        macd_crossover_time_ativo=False,
+        macd_crossover_tendencia_ativo=False,
+        sr_rejeicao_ativo=False,
+        fibo_sr_retracao_ativo=False,
+        reversao_candle_ativo=True,   # inclui reversao_confluencia — mantido
         pin_bar_sr_ativo=False,
-        macd_crossover_time_ativo=True,
-        macd_crossover_tendencia_ativo=True,
-        divergencia_rsi_time_ativo=True,
-        divergencia_rsi_tendencia_ativo=True,
+        divergencia_rsi_ativo=False,
+        divergencia_rsi_time_ativo=False,
+        divergencia_rsi_tendencia_ativo=False,
+        bollinger_squeeze_ativo=False,
+        pullback_ativo=False,
     )
 
 
