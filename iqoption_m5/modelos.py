@@ -61,6 +61,7 @@ class ResumoRisco:
     operacoes_enviadas: int
     operacoes_finalizadas: int
     perdas_consecutivas: int
+    wins_consecutivos: int
     lucro_sessao: float
     lucro_total: float
     ultimo_lucro: float
@@ -75,6 +76,7 @@ class EstadoPersistido:
     operacoes_enviadas: int = 0
     operacoes_finalizadas: int = 0
     perdas_consecutivas: int = 0
+    wins_consecutivos: int = 0
     lucro_sessao: float = 0.0
     lucro_total: float = 0.0
     ultimo_lucro: float = 0.0

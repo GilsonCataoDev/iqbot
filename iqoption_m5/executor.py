@@ -77,6 +77,14 @@ class ExecutorSeguro:
             banca_atual = self.risco.resumo().banca_atual
             return max(2.0, round(banca_atual * self.config.valor_percentual_banca, 2))
         base = self.config.valor_por_ordem
+        if self.config.anti_martingale_ativo:
+            niveis = self.config.anti_martingale_niveis
+            wins = self.risco.resumo().wins_consecutivos
+            multiplicador = niveis[min(wins, len(niveis) - 1)]
+            valor = round(base * multiplicador, 2)
+            if self.config.alavancagem_maximo > 0:
+                valor = min(valor, self.config.alavancagem_maximo)
+            return valor
         if not self.config.alavancagem_pyramid:
             return base
         bonus = max(0.0, self.risco.resumo().ultimo_lucro)

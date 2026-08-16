@@ -30,6 +30,7 @@ class GerenciadorRisco:
         self._enviadas = estado.operacoes_enviadas
         self._finalizadas = estado.operacoes_finalizadas
         self._perdas_consecutivas = estado.perdas_consecutivas
+        self._wins_consecutivos = estado.wins_consecutivos
         self._lucro = estado.lucro_sessao
         self._lucro_total = estado.lucro_total
         self._ultimo_lucro = estado.ultimo_lucro
@@ -200,7 +201,12 @@ class GerenciadorRisco:
                 self._lucro += lucro
                 self._lucro_total += lucro
                 self._ultimo_lucro = lucro
-                self._perdas_consecutivas = self._perdas_consecutivas + 1 if lucro < 0 else 0
+                if lucro > 0:
+                    self._perdas_consecutivas = 0
+                    self._wins_consecutivos += 1
+                else:
+                    self._perdas_consecutivas += 1
+                    self._wins_consecutivos = 0
                 # Atualiza pico de banca para drawdown percentual
                 banca_atual = self.config.banca_inicial + self._lucro_total
                 if banca_atual > self._banca_pico:
@@ -250,6 +256,7 @@ class GerenciadorRisco:
                 operacoes_enviadas=self._enviadas,
                 operacoes_finalizadas=self._finalizadas,
                 perdas_consecutivas=self._perdas_consecutivas,
+                wins_consecutivos=self._wins_consecutivos,
                 lucro_sessao=self._lucro,
                 lucro_total=self._lucro_total,
                 ultimo_lucro=self._ultimo_lucro,

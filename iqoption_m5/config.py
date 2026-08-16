@@ -32,6 +32,8 @@ class Configuracao:
     valor_percentual_banca: float = 0.0  # 0 = desativado; se >0, entrada = banca_atual * este percentual (ex: 0.03 = 3%)
     alavancagem_pyramid: bool = False  # proxima entrada = valor_por_ordem + lucro da ultima operacao (min 0)
     alavancagem_maximo: float = 0.0  # 0 = sem teto; senao, nunca deixa a entrada passar disso
+    anti_martingale_ativo: bool = False  # aumenta entrada em streaks de win, reset no loss
+    anti_martingale_niveis: tuple[float, ...] = (1.0, 1.5, 2.25)  # multiplicadores por nivel de wins consecutivos
     timeframe_segundos: int = 300
     limite_candles: int = 120
     expiracao_minutos: int = 5
@@ -317,6 +319,9 @@ def configuracao_practice_m5(base: Configuracao | None = None) -> Configuracao:
         parar_por_prejuizo=False,
         payout_minimo=0.80,
         entrada_max_segundos_no_candle=25,
+        # Anti-martingale: escala nos streaks de win, reset no loss
+        anti_martingale_ativo=True,
+        anti_martingale_niveis=(1.0, 1.5, 2.25),
         # Só os 3 melhores por WR: pullback_confluencia, reversao_confluencia, reversao_bollinger_rsi
         macd_crossover_ativo=False,
         macd_crossover_time_ativo=False,
