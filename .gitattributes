@@ -1,0 +1,10 @@
+﻿# Força CRLF nos arquivos que o Windows precisa
+*.bat text eol=crlf
+*.cmd text eol=crlf
+*.ps1 text eol=crlf
+
+# Python e outros ficam com LF
+*.py text eol=lf
+*.md text eol=lf
+*.json text eol=lf
+*.txt text eol=lf
