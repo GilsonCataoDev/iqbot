@@ -912,7 +912,6 @@ class EstrategiaReversaoM5:
         for fn in (
             self._avaliar_indicadores,
             self._avaliar_pullback_indicadores,
-            self._avaliar_fibo_sr_retracao,
             self._avaliar_macd,
         ):
             nome = fn.__name__
@@ -972,6 +971,7 @@ class EstrategiaReversaoM5:
     def avaliar_reversoes(self, ativo: str, indicadores: pd.DataFrame) -> list[Decisao]:
         """Setups de reversão avaliados no candle EM FORMAÇÃO (entrada na mesma vela).
 
+        fibo_sr_retracao: toca nível fibo+SR e já está rejeitando intra-candle.
         sr_rejeicao: toca suporte/resistência intra-candle e já está voltando.
         pin_bar_sr: pin bar no candle fechado, confirmação parcial no candle atual.
         """
@@ -980,7 +980,7 @@ class EstrategiaReversaoM5:
             return []
         indice = len(indicadores) - 1  # candle em formação
         resultado = []
-        fns_reversao = [self._avaliar_sr_rejeicao]
+        fns_reversao = [self._avaliar_fibo_sr_retracao, self._avaliar_sr_rejeicao]
         if self.config.pin_bar_sr_ativo:
             fns_reversao.append(self._avaliar_pin_bar)
         for fn in fns_reversao:
