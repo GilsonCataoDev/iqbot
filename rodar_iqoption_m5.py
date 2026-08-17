@@ -12,6 +12,7 @@ from iqoption_m5.config import (
     configuracao_real_m5,
     configuracao_scalping_60,
 )
+from dataclasses import replace
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 
@@ -33,7 +34,13 @@ def analisar_argumentos(argv=None):
     parser.add_argument(
         "--scalping",
         action="store_true",
-        help="perfil scalping R$60 real: R$1/entrada, stop -R$6/dia, 5 pares selecionados. Exige --confirmo.",
+        help="perfil scalping R$60 REAL: anti-martingale 15/20/25, stop -R$30, meta +R$25. Exige --confirmo.",
+    )
+    parser.add_argument(
+        "--scalping-practice",
+        dest="scalping_practice",
+        action="store_true",
+        help="mesmo perfil scalping R$60 mas na conta PRACTICE para validar antes do real. Exige --confirmo.",
     )
     parser.add_argument(
         "--practice",
@@ -50,14 +57,18 @@ def analisar_argumentos(argv=None):
 
 def selecionar_configuracao(argumentos) -> Configuracao:
     """Transforma argumentos validados em um único perfil de execução."""
-    perfis_execucao = sum(bool(v) for v in (argumentos.practice, argumentos.real, argumentos.scalping))
+    perfis_execucao = sum(bool(v) for v in (
+        argumentos.practice, argumentos.real, argumentos.scalping, argumentos.scalping_practice
+    ))
     if perfis_execucao > 1:
-        raise SystemExit("Escolha apenas um perfil: --practice, --real ou --scalping.")
+        raise SystemExit("Escolha apenas um perfil: --practice, --real, --scalping ou --scalping-practice.")
     if perfis_execucao and not argumentos.confirmo:
         raise SystemExit(
             "Para enviar ordens, use o perfil desejado junto com --confirmo. "
             "Sem confirmação o programa permanece somente monitor."
         )
+    if argumentos.scalping_practice:
+        return replace(configuracao_scalping_60(), conta="PRACTICE", confirmo_conta_real=False, piso_banca=0.0)
     if argumentos.scalping:
         return configuracao_scalping_60()
     if argumentos.real:
