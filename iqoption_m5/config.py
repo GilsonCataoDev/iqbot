@@ -393,6 +393,7 @@ def configuracao_scalping_60(base: Configuracao | None = None) -> Configuracao:
         circuit_breaker_cooldown_minutos=60,
         payout_minimo=0.80,
         max_ordens_paralelas=1,
+        cooldown_pos_ordem_por_ativo_candles=2,
         entrada_max_segundos_no_candle=25,
         executar_estrategias_nao_validadas=False,
         # Opção A: só pullback (trend-following). Sem reversal contra-tendência.
