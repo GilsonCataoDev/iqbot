@@ -339,12 +339,21 @@ def configuracao_practice_m5(base: Configuracao | None = None) -> Configuracao:
 
 
 def configuracao_scalping_60(base: Configuracao | None = None) -> Configuracao:
-    """Perfil scalping para banca inicial de R$60 em conta REAL.
+    """Perfil scalping R$60 — anti-martingale 15/20/25 buscando 3 wins seguidos.
 
-    Entrada fixa de R$1 (≈1.7% da banca), stop diário −R$6, meta +R$5.
-    Monitora 5 pares; ordens OTC permanecem bloqueadas em conta REAL.
-    Proteções extras: circuit breaker, cooldown por ativo, filtro de abertura,
-    bloqueio de notícia HIGH.
+    Lógica de entrada:
+      0 wins consecutivos → R$15
+      1 win  consecutivo  → R$20
+      2 wins consecutivos → R$25  (ao atingir 3 wins para o dia)
+    Qualquer loss reseta para R$15.
+
+    Proteções:
+      - Stop diário: -R$30 (2 losses de R$15 → para)
+      - Meta diária: +R$25
+      - Circuit breaker: 2 losses → cooldown 1h
+      - Máximo 5 operações/dia
+      - Piso de banca: R$30 (para definitivo se banca cair à metade)
+      - OTC habilitado (mercado 24/7)
     """
     return replace(
         base or Configuracao(),
@@ -354,33 +363,38 @@ def configuracao_scalping_60(base: Configuracao | None = None) -> Configuracao:
         confirmo_conta_real=True,
         executar_ordens=True,
         ativos=(
+            "EURUSD-OTC",
+            "GBPUSD-OTC",
+            "EURGBP-OTC",
             "EURUSD",
             "GBPUSD",
-            "EURGBP",
-            "EURUSD-OTC",
-            "EURGBP-OTC",
         ),
-        pares_validados=(),
-        bloquear_otc_real=True,
+        bloquear_otc_real=False,
         banca_inicial=60.0,
-        piso_banca=40.0,
-        valor_por_ordem=1.0,
+        piso_banca=30.0,
+        valor_por_ordem=15.0,
         valor_percentual_banca=0.0,
-        stop_diario=-6.0,
-        meta_diaria=5.0,
-        parar_por_prejuizo=True,
-        parar_por_perdas=True,
-        max_operacoes_dia=10,
-        max_perdas_consecutivas=3,
-        drawdown_maximo_percentual=0.20,
-        circuit_breaker_max_perdas=3,
-        circuit_breaker_cooldown_minutos=60,
-        cooldown_pos_ordem_por_ativo_candles=2,
-        filtro_candle_entrada_atr=0.3,
-        bloquear_noticia_alto_impacto=True,
+        # Anti-martingale: 15 → 20 → 25 nos wins consecutivos
+        anti_martingale_ativo=True,
+        anti_martingale_niveis=(1.0, 1.333, 1.667),
+        alavancagem_maximo=25.0,
         alavancagem_pyramid=False,
-        alavancagem_maximo=0.0,
+        stop_diario=-30.0,
+        meta_diaria=25.0,
+        parar_por_prejuizo=True,
+        max_operacoes_dia=5,
+        max_perdas_consecutivas=9999,
+        parar_por_perdas=False,
+        drawdown_maximo_percentual=0.50,
+        circuit_breaker_max_perdas=2,
+        circuit_breaker_cooldown_minutos=60,
+        payout_minimo=0.80,
+        entrada_max_segundos_no_candle=25,
         executar_estrategias_nao_validadas=False,
+        reversao_candle_ativo=True,
+        pullback_ativo=True,
+        fibo_sr_retracao_ativo=True,
+        macd_crossover_ativo=False,
         confiar_resultado_automatico=False,
         verificar_resultado_por_candle=True,
         porta_grafico=8770,
