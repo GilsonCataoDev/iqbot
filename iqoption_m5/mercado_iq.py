@@ -369,12 +369,11 @@ class MercadoIQ:
             time.sleep(0.02)
         return api_baixo_nivel.result, api_baixo_nivel.buy_multi_option[req_id]["id"]
 
-    def aguardar_resultado(self, id_ordem: object) -> object:
+    def aguardar_resultado(self, id_ordem: object, expiracao_minutos: int | None = None) -> object:
         if not self.config.confiar_resultado_automatico:
             return None
-        # Aguarda a maior parte do tempo de expiração antes de checar —
-        # a IQ retorna win="win" para opções ainda abertas, causando falso-positivo.
-        espera_inicial = max(0.0, self.config.expiracao_minutos * 60 - 30)
+        minutos = expiracao_minutos if expiracao_minutos is not None else self.config.expiracao_minutos
+        espera_inicial = max(0.0, minutos * 60 - 30)
         time.sleep(espera_inicial)
         limite = time.monotonic() + 120
         while time.monotonic() < limite:

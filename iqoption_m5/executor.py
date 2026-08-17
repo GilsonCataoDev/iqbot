@@ -1,4 +1,5 @@
 import logging
+import math
 import threading
 from datetime import datetime
 
@@ -72,6 +73,21 @@ class ExecutorSeguro:
         thread.start()
         return True
 
+    def _expiracao_dinamica(self, snapshot: SnapshotMercado) -> int:
+        """Minutos até o fechamento do candle atual — alinha a expiração com a vela.
+
+        Se restar menos de 60s no candle (não caberia nem 1 min de expiração),
+        pula para o fechamento do candle seguinte.
+        """
+        tf = self.config.timeframe_segundos
+        segundo_atual = snapshot.timestamp_servidor % tf
+        restante = tf - segundo_atual
+        if restante < 60:
+            restante += tf
+        minutos = math.ceil(restante / 60)
+        # Nunca menos que 1 ou mais que o dobro do timeframe configurado
+        return max(1, min(minutos, self.config.expiracao_minutos * 2))
+
     def _valor_da_entrada(self) -> float:
         if self.config.valor_percentual_banca > 0:
             banca_atual = self.risco.resumo().banca_atual
@@ -94,17 +110,17 @@ class ExecutorSeguro:
         valor = self._valor_da_entrada()
         payout = float(snapshot.payout)
         enviada_em = datetime.now()
+        expiracao = self._expiracao_dinamica(snapshot)
 
-        # Diagnóstico completo antes de enviar
         print(f" [EXEC] {decisao.ativo}: preparando ordem | direcao={decisao.direcao.upper()} | "
-              f"valor={valor} | exp={self.config.expiracao_minutos}min | payout={payout}")
+              f"valor={valor} | exp={expiracao}min (dinamico) | payout={payout}")
 
         try:
             enviada, id_ordem = self.mercado.comprar(
                 valor,
                 decisao.ativo,
                 decisao.direcao,
-                self.config.expiracao_minutos,
+                expiracao,
             )
         except Exception as e:
             self.risco.cancelar_reserva(decisao.ativo)
@@ -150,9 +166,6 @@ class ExecutorSeguro:
 
         try:
             if self.config.verificar_resultado_por_candle:
-                # Usa o preço corrente do tick (Close do candle formando) como referência
-                # de entrada — mais preciso que o preço teórico da estratégia quando a
-                # entrada ocorre no meio da vela (não apenas nos primeiros segundos).
                 try:
                     preco_ref = float(snapshot.candles.iloc[-1]["Close"])
                 except Exception:
@@ -162,10 +175,10 @@ class ExecutorSeguro:
                     decisao.direcao,
                     preco_ref,
                     decisao.candle_hora,
-                    timeout_segundos=self.config.expiracao_minutos * 60 + 90,
+                    timeout_segundos=expiracao * 60 + 90,
                 )
             else:
-                bruto = self.mercado.aguardar_resultado(id_ordem)
+                bruto = self.mercado.aguardar_resultado(id_ordem, expiracao_minutos=expiracao)
             lucro = self.lucro_numerico(bruto, valor, payout)
         except Exception as e:
             bruto = f"erro_resultado:{e}"
