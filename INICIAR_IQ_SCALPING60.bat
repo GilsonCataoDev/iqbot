@@ -1,4 +1,4 @@
-@echo off
+﻿@echo off
 chcp 65001 >nul
 cd /d "%~dp0"
 title IQ Option M5 - SCALPING R$60
@@ -9,7 +9,7 @@ if "%IQ_OPTION_EMAIL%"=="" (
     exit /b 1
 )
 echo ============================================================
-echo  SCALPING R$60 — Anti-Martingale 15 / 20 / 25
+echo  SCALPING R$60 - Anti-Martingale 15 / 20 / 25
 echo  Buscando 3 wins seguidos. Reset no loss.
 echo  Stop diario: -R$30  ^|  Meta: +R$25
 echo  Circuit breaker: 2 losses seguidos = cooldown 1h
