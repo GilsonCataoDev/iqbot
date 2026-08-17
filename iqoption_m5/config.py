@@ -118,6 +118,7 @@ class Configuracao:
     parar_por_prejuizo: bool = True
     cooldown_pos_ordem_segundos: float = 0.0  # 0 = desligado; >0 = bloqueia nova entrada por N segundos após resultado
     cooldown_pos_ordem_por_ativo_candles: int = 0  # 0 = desligado; >0 = bloqueia N candles após ordem no mesmo ativo
+    max_ordens_paralelas: int = 0  # 0 = sem limite; 1 = só 1 ativo por vez (anti-race no anti-martingale)
     filtro_candle_entrada_atr: float = 0.0  # 0 = desligado; >0 = cancela se candle N+1 abre > N×ATR contra o sinal
     bloquear_noticia_alto_impacto: bool = False  # bloqueia entrada em janela de notícia HIGH (ativos reais)
     ia_como_filtro: bool = True  # True = IA bloqueia sinais contrários (media/alta confiança); False = só exibe parecer
@@ -197,12 +198,14 @@ class Configuracao:
     keepalive_intervalo_segundos: float = 30.0  # ping periódico para manter WebSocket ativo; 0=desativado
 
     pasta_dados: Path = Path(__file__).resolve().parent / "dados"
+    sufixo_banco: str = ""  # ex: "scalping" → iqoption_m5_practice_scalping.sqlite3
 
     @property
     def banco_sqlite(self) -> Path:
-        # Banco separado por conta: dado de PRACTICE nao pode se misturar com
-        # REAL, senao o piso de banca e o winrate ficam calculados errado.
-        return self.pasta_dados / f"iqoption_m5_{self.conta.lower()}.sqlite3"
+        base = f"iqoption_m5_{self.conta.lower()}"
+        if self.sufixo_banco:
+            base = f"{base}_{self.sufixo_banco}"
+        return self.pasta_dados / f"{base}.sqlite3"
 
     @property
     def rotulo_timeframe(self) -> str:
@@ -389,15 +392,20 @@ def configuracao_scalping_60(base: Configuracao | None = None) -> Configuracao:
         circuit_breaker_max_perdas=2,
         circuit_breaker_cooldown_minutos=60,
         payout_minimo=0.80,
+        max_ordens_paralelas=1,
         entrada_max_segundos_no_candle=25,
         executar_estrategias_nao_validadas=False,
-        reversao_candle_ativo=True,
+        # Opção A: só pullback (trend-following). Sem reversal contra-tendência.
+        reversao_candle_ativo=False,
         pullback_ativo=True,
-        fibo_sr_retracao_ativo=True,
+        fibo_sr_retracao_ativo=False,
+        sr_rejeicao_ativo=False,
         macd_crossover_ativo=False,
+        bollinger_aceitar_tendencia=False,
         confiar_resultado_automatico=False,
         verificar_resultado_por_candle=True,
         porta_grafico=8770,
+        sufixo_banco="scalping",
     )
 
 

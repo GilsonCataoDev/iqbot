@@ -1,4 +1,4 @@
-﻿@echo off
+@echo off
 chcp 65001 >nul
 cd /d "%~dp0"
 title IQ Option M5 - SCALPING R$60 [PRACTICE]

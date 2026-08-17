@@ -148,6 +148,9 @@ class GerenciadorRisco:
             return Autorizacao(False, "entrada_atrasada")
         if snapshot.ativo in self._ordens_abertas:
             return Autorizacao(False, "ordem_ja_aberta")
+        if (self.config.max_ordens_paralelas > 0
+                and len(self._ordens_abertas) >= self.config.max_ordens_paralelas):
+            return Autorizacao(False, "limite_paralelas")
         if self.config.cooldown_pos_ordem_segundos > 0 and time.time() < self._cooldown_ate:
             return Autorizacao(False, "cooldown_pos_ordem")
         # 3. Circuit breaker

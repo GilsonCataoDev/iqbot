@@ -11,7 +11,7 @@ from dataclasses import dataclass, field
 import requests as _req
 
 URL_GROQ = "https://api.groq.com/openai/v1/chat/completions"
-MODELO = "llama-3.3-70b-versatile"
+MODELO = ""  # desativado — nenhum modelo Groq disponível na conta atual
 TIMEOUT_SEGUNDOS = 15
 MAX_TOKENS_RESPOSTA = 400
 
@@ -87,6 +87,8 @@ Regras:
 
 
 def analisar(contexto: dict) -> ParecerIA | None:
+    if not MODELO:
+        return None
     global _bloqueado_ate
     if time.time() < _bloqueado_ate:
         return None

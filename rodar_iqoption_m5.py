@@ -68,7 +68,18 @@ def selecionar_configuracao(argumentos) -> Configuracao:
             "Sem confirmação o programa permanece somente monitor."
         )
     if argumentos.scalping_practice:
-        return replace(configuracao_scalping_60(), conta="PRACTICE", confirmo_conta_real=False, piso_banca=0.0)
+        return replace(
+            configuracao_scalping_60(),
+            conta="PRACTICE",
+            confirmo_conta_real=False,
+            piso_banca=0.0,
+            max_operacoes_dia=0,
+            meta_diaria=0.0,
+            stop_diario=-99999.0,
+            parar_por_prejuizo=False,
+            circuit_breaker_max_perdas=0,
+            drawdown_maximo_percentual=0.0,
+        )
     if argumentos.scalping:
         return configuracao_scalping_60()
     if argumentos.real:
