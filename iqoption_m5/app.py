@@ -102,7 +102,7 @@ def _notificar_desktop(titulo: str, mensagem: str) -> None:
 from .noticias import CalendarioEconomico, e_sintetico
 from .recuperacao import recuperar_operacoes_pendentes
 from .registro import RegistroSQLite
-from .risco import GerenciadorRisco, kill_switch_ativo
+from .risco import GerenciadorRisco, kill_switch_ativo, _base_ativo as _base_ativo_risco
 
 
 def main(config: Configuracao | None = None) -> None:
@@ -721,8 +721,8 @@ def main(config: Configuracao | None = None) -> None:
 
         # Reversões entram na mesma vela em formação — candle_hora já aponta para
         # indicadores.index[-1], que é o mesmo valor que proxima_vela abaixo.
-        if config.cooldown_pos_ordem_por_ativo_candles > 0 and ativo in _cooldown_ativo:
-            _elapsed = snapshot.timestamp_servidor - _cooldown_ativo[ativo]
+        if config.cooldown_pos_ordem_por_ativo_candles > 0 and _base_ativo_risco(ativo) in _cooldown_ativo:
+            _elapsed = snapshot.timestamp_servidor - _cooldown_ativo[_base_ativo_risco(ativo)]
             _required = config.cooldown_pos_ordem_por_ativo_candles * config.timeframe_segundos
             if _elapsed < _required:
                 _restantes = math.ceil((_required - _elapsed) / config.timeframe_segundos)
@@ -914,7 +914,7 @@ def main(config: Configuracao | None = None) -> None:
                 houve_execucao = True
                 _retry_mercado_fechado_inicio.pop(ativo, None)
                 if config.cooldown_pos_ordem_por_ativo_candles > 0:
-                    _cooldown_ativo[ativo] = snapshot.timestamp_servidor
+                    _cooldown_ativo[_base_ativo_risco(ativo)] = snapshot.timestamp_servidor
             elif autorizacao.motivo == "mercado_fechado" and e_sintetico(ativo):
                 # OTC fechado temporariamente (manutenção IQ) — retry dentro da janela
                 if config.max_retry_mercado_fechado_segundos > 0:

@@ -10,6 +10,11 @@ from .modelos import Autorizacao, Decisao, EstadoPersistido, ResumoRisco, Snapsh
 KILL_SWITCH_ARQUIVO = Path(__file__).resolve().parent.parent / "kill_switch.json"
 
 
+def _base_ativo(ativo: str) -> str:
+    """EURUSD e EURUSD-OTC compartilham id_ativo na IQ → trata como mesmo instrumento."""
+    return ativo.upper().replace("-OTC", "")
+
+
 def kill_switch_ativo() -> bool:
     """Retorna True se o arquivo kill_switch.json existir com {"ativo": false}."""
     try:
@@ -146,7 +151,7 @@ class GerenciadorRisco:
         segundo_no_candle = snapshot.timestamp_servidor % self.config.timeframe_segundos
         if segundo_no_candle > self.config.entrada_max_segundos_no_candle:
             return Autorizacao(False, "entrada_atrasada")
-        if snapshot.ativo in self._ordens_abertas:
+        if _base_ativo(snapshot.ativo) in self._ordens_abertas:
             return Autorizacao(False, "ordem_ja_aberta")
         if (self.config.max_ordens_paralelas > 0
                 and len(self._ordens_abertas) >= self.config.max_ordens_paralelas):
@@ -184,19 +189,20 @@ class GerenciadorRisco:
         with self._lock:
             autorizacao = self._avaliar_sem_lock(snapshot, decisao)
             if autorizacao.permitida:
-                self._ordens_abertas.add(snapshot.ativo)
+                self._ordens_abertas.add(_base_ativo(snapshot.ativo))
                 self._enviadas += 1
             return autorizacao
 
     def cancelar_reserva(self, ativo: str) -> None:
         with self._lock:
-            if ativo in self._ordens_abertas:
-                self._ordens_abertas.discard(ativo)
+            key = _base_ativo(ativo)
+            if key in self._ordens_abertas:
+                self._ordens_abertas.discard(key)
                 self._enviadas = max(0, self._enviadas - 1)
 
     def registrar_resultado(self, lucro: float | None, ativo: str) -> None:
         with self._lock:
-            self._ordens_abertas.discard(ativo)
+            self._ordens_abertas.discard(_base_ativo(ativo))
             if self.config.cooldown_pos_ordem_segundos > 0:
                 self._cooldown_ate = time.time() + self.config.cooldown_pos_ordem_segundos
             self._finalizadas += 1
