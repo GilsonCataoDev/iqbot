@@ -327,14 +327,14 @@ def configuracao_practice_m5(base: Configuracao | None = None) -> Configuracao:
         macd_crossover_time_ativo=False,
         macd_crossover_tendencia_ativo=False,
         sr_rejeicao_ativo=False,
-        fibo_sr_retracao_ativo=False,
+        fibo_sr_retracao_ativo=True,
         reversao_candle_ativo=True,   # inclui reversao_confluencia — mantido
         pin_bar_sr_ativo=False,
         divergencia_rsi_ativo=False,
         divergencia_rsi_time_ativo=False,
         divergencia_rsi_tendencia_ativo=False,
         bollinger_squeeze_ativo=False,
-        pullback_ativo=False,
+        pullback_ativo=True,
     )
 
 
