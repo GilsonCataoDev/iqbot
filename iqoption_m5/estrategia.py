@@ -106,6 +106,8 @@ class EstrategiaReversaoM5:
         return df
 
     def _avaliar_indicadores(self, ativo: str, df: pd.DataFrame, indice_confirmacao: int) -> Decisao | None:
+        if not self.config.reversao_bollinger_rsi_ativo:
+            return None
         minimo = max(self.config.ema_macro_periodo, self.config.atr_regime_janela) + 1
         if indice_confirmacao < minimo or indice_confirmacao >= len(df):
             return None

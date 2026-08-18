@@ -92,6 +92,7 @@ class Configuracao:
     sr_rejeicao_ativo: bool = True
     fibo_sr_retracao_ativo: bool = True
     reversao_candle_ativo: bool = True     # inclui reversao_confluencia
+    reversao_bollinger_rsi_ativo: bool = True  # retorno à banda de Bollinger com RSI extremo
 
     # Estratégias opcionais — desativadas por padrão até validação em PRACTICE
     engulfing_sr_ativo: bool = False
@@ -398,6 +399,7 @@ def configuracao_scalping_60(base: Configuracao | None = None) -> Configuracao:
         executar_estrategias_nao_validadas=False,
         # Opção A: só pullback (trend-following). Sem reversal contra-tendência.
         reversao_candle_ativo=False,
+        reversao_bollinger_rsi_ativo=False,
         pullback_ativo=True,
         fibo_sr_retracao_ativo=False,
         sr_rejeicao_ativo=False,
