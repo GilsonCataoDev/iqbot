@@ -299,6 +299,21 @@ class GraficoM5:
         with self._lock:
             self._json_atomico(self.pasta_dados / f"{ativo}.json", dados)
 
+    def semear_historico(self, registro) -> None:
+        """Escreve historico_hoje.json com statsGlobais e entradasDetalhadas do SQLite.
+
+        Chamado logo após iniciar() para que o frontend mostre o histórico do dia
+        imediatamente, mesmo antes do primeiro ciclo de candle carregar os JSONs ao vivo.
+        """
+        try:
+            stats = registro.stats_globais()
+            entradas = registro.entradas_hoje_detalhadas()
+        except Exception as erro:
+            print(f"[grafico] semear_historico falhou: {erro}")
+            return
+        dados = {"statsGlobais": stats, "entradasDetalhadas": entradas}
+        self._json_atomico(self.pasta_dados / "historico_hoje.json", dados)
+
     def fechar(self) -> None:
         if self.servidor is not None:
             self.servidor.shutdown()

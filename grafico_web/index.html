@@ -923,12 +923,69 @@ function renderizarPainel(dados) {
   }
 }
 
+async function carregarHistoricoHoje() {
+  try {
+    const hist = await buscarJson(`${fonte}/historico_hoje.json?_=` + Date.now());
+    const stats = hist.statsGlobais;
+    const entradas = hist.entradasDetalhadas;
+
+    const cartaoStats = document.getElementById('cartao-stats');
+    if (stats && (stats.otc.entradas > 0 || stats.normal.entradas > 0)) {
+      const fmtRow = (label, s) => {
+        if (s.entradas === 0) return `<div class="stats-row"><span class="stats-label">${label}</span><span style="color:var(--muted);font-size:11px">nenhuma</span></div>`;
+        const semResultado = s.winrate === null || s.winrate === undefined;
+        const wr = semResultado ? 0 : s.winrate;
+        const barColor = semResultado ? 'var(--muted)' : wr >= 60 ? 'var(--green)' : wr >= 45 ? 'var(--yellow)' : 'var(--red)';
+        const wrStr = semResultado ? '--' : `${wr}%`;
+        const lucroStr = s.lucro >= 0 ? `+${s.lucro.toFixed(2)}` : s.lucro.toFixed(2);
+        const lucroClass = s.lucro >= 0 ? 'win-color' : 'loss-color';
+        const abertas = s.entradas - (s.finalizadas ?? s.entradas);
+        const abertasStr = abertas > 0 ? ` <span style="color:var(--muted);font-size:10px">(${abertas} ag.)</span>` : '';
+        return `<div class="stats-row">` +
+          `<span class="stats-label">${label}</span>` +
+          `<div class="stats-bar-wrap"><div class="stats-bar" style="width:${wr}%;background:${barColor}"></div></div>` +
+          `<span class="stats-nums">${s.wins}/${s.entradas}${abertasStr} &nbsp;<strong style="color:${barColor}">${wrStr}</strong> &nbsp;<span class="${lucroClass}">${lucroStr}</span></span>` +
+          `</div>`;
+      };
+      cartaoStats.innerHTML = '<h3>Entradas hoje</h3>' + fmtRow('OTC', stats.otc) + fmtRow('Normal', stats.normal);
+    }
+
+    const cartaoEntradas = document.getElementById('cartao-entradas');
+    if (entradas && entradas.length > 0) {
+      const fmtEntrada = e => {
+        const dirCls = e.direcao === 'call' ? 'entrada-dir-call' : 'entrada-dir-put';
+        const dirLabel = e.direcao === 'call' ? '▲ CALL' : '▼ PUT';
+        let statusStr, statusCls;
+        if (e.status === 'aberta') { statusStr = '⏳ aguardando'; statusCls = 'entrada-status-aberta'; }
+        else if (e.lucro !== null && e.lucro > 0) { statusStr = `✓ +${e.lucro.toFixed(2)}`; statusCls = 'entrada-status-ganho'; }
+        else if (e.lucro !== null && e.lucro < 0) { statusStr = `✗ ${e.lucro.toFixed(2)}`; statusCls = 'entrada-status-perda'; }
+        else if (e.lucro === 0) { statusStr = '= empate'; statusCls = 'entrada-status-outro'; }
+        else { statusStr = escapar(e.status); statusCls = 'entrada-status-outro'; }
+        const motivosHtml = (e.motivos || []).length
+          ? `<div class="entrada-motivos">${e.motivos.map(m => `• ${escapar(m)}`).join('<br>')}</div>` : '';
+        return `<div class="entrada-item">` +
+          `<div class="entrada-cabecalho">` +
+          `<span class="entrada-hora">${escapar(e.hora)}</span>` +
+          `<span class="entrada-ativo">${escapar(e.ativo)}</span>` +
+          `<span class="${dirCls}">${dirLabel}</span>` +
+          `<span class="entrada-setup">${escapar(e.setup)}</span>` +
+          `<span class="${statusCls}" style="margin-left:auto">${statusStr}</span>` +
+          `</div>${motivosHtml}</div>`;
+      };
+      cartaoEntradas.innerHTML = '<h3>Detalhes das entradas</h3>' + [...entradas].reverse().map(fmtEntrada).join('');
+    }
+  } catch (_) { /* historico_hoje.json ainda não existe — silencioso */ }
+}
+
 (async () => {
   await carregarManifesto();
+  await carregarHistoricoHoje();
   atualizar();
   atualizarResumo();
   setInterval(atualizar, 1000);
   setInterval(atualizarResumo, 3000);
+  // Atualiza o histórico a cada 30s enquanto o bot estiver rodando
+  setInterval(carregarHistoricoHoje, 30000);
 })();
 </script>
 </body>
