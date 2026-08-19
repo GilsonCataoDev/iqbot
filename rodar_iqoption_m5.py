@@ -78,6 +78,12 @@ def analisar_argumentos(argv=None):
         action="store_true",
         help="confirmação explícita exigida para qualquer perfil que envie ordens",
     )
+    parser.add_argument(
+        "--no-browser",
+        dest="no_browser",
+        action="store_true",
+        help="não abre o browser automaticamente (modo headless/VPS); gráfico ainda disponível via SSH tunnel",
+    )
     return parser.parse_args(argv)
 
 
@@ -134,4 +140,8 @@ def selecionar_configuracao(argumentos) -> Configuracao:
 
 
 if __name__ == "__main__":
-    main(selecionar_configuracao(analisar_argumentos()))
+    args = analisar_argumentos()
+    config = selecionar_configuracao(args)
+    if args.no_browser:
+        config = replace(config, abrir_navegador=False)
+    main(config)

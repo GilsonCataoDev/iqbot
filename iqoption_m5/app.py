@@ -261,8 +261,8 @@ def main(config: Configuracao | None = None) -> None:
 
     if grafico is not None:
         try:
-            url_grafico = grafico.iniciar()
-            print(f"Gráfico M5 aberto: {url_grafico}")
+            url_grafico = grafico.iniciar(abrir_navegador=config.abrir_navegador)
+            print(f"Gráfico aberto: {url_grafico}")
             grafico.semear_historico(registro)
         except Exception as erro:
             print(f"Gráfico indisponível ({erro}); o robô continuará protegido no terminal.")

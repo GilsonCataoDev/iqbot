@@ -42,6 +42,7 @@ class Configuracao:
     min_segundos_ate_expiracao: int = 120  # não entra se restar < 2 min até o mark de 5min
     marcacao_tolerancia_atr: float = 2.0   # reversão: cancela se preço afastou > N×ATR do nível
     abrir_grafico: bool = True
+    abrir_navegador: bool = True   # False = sobe o servidor mas não abre o browser (headless/VPS)
     porta_grafico: int = 8767
     alerta_preco_tolerancia_atr: float = 0.25
     alerta_rsi_margem: float = 5.0
