@@ -413,13 +413,14 @@ def configuracao_scalping_60(base: Configuracao | None = None) -> Configuracao:
 
 
 def configuracao_scalping_m15(base: Configuracao | None = None) -> Configuracao:
-    """Scalping M15 — Opção B: pullback + padrões de vela em S/R.
+    """Scalping M15 — Opção B+: pullback + padrões de vela em S/R + MACD.
 
     No M15 os padrões de vela têm peso real (no M5 são ruído):
     - pin_bar_sr: pino tocando S/R = sinal de exaustão confiável
     - engulfing_sr: engolfo em S/R = mudança de momentum confirmada
     - sr_rejeicao: corpo rejeitando nível = pressão direcional clara
     - pullback/pullback_confluencia: base trend-following (herdado do M5)
+    - macd_crossover_tendencia: cruzamento MACD com zero-line + TendenciaMacro alinhada
 
     Money management: R$15→R$20 (sem 3º nível — igual ao M5 atual).
     Cooldown 1 candle = 15 min (suficiente para evitar entradas repetidas).
@@ -434,11 +435,18 @@ def configuracao_scalping_m15(base: Configuracao | None = None) -> Configuracao:
         limite_candles=120,
         porta_grafico=8771,
         sufixo_banco="scalping_m15",
-        # Opção B: padrões de vela em S/R — confiáveis no M15, ruído no M5
+        # EMA_Macro(50) no M15 = EMA de 12.5h — slope sempre parece forte vs ATR.
+        # 0.5 (default M5) bloqueava ~39% dos pullbacks válidos no M15.
+        pullback_slope_forte_multiplo_atr=1.0,
+        # Opção B+: padrões de vela em S/R — confiáveis no M15, ruído no M5
         pin_bar_sr_ativo=True,
         engulfing_sr_ativo=True,
         sr_rejeicao_ativo=True,
-        executar_estrategias_nao_validadas=True,  # pin_bar e engulfing ainda não validados
+        # MACD crossover com filtro de TendenciaMacro: zero-line + trend alinhado.
+        # No M15 os crossovers têm mais follow-through que no M5.
+        macd_crossover_ativo=True,
+        macd_crossover_tendencia_ativo=True,
+        executar_estrategias_nao_validadas=True,
     )
 
 
