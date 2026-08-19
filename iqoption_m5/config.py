@@ -380,7 +380,7 @@ def configuracao_scalping_60(base: Configuracao | None = None) -> Configuracao:
         valor_percentual_banca=0.0,
         # Anti-martingale: 15 → 20 → 25 nos wins consecutivos
         anti_martingale_ativo=True,
-        anti_martingale_niveis=(1.0, 1.333, 1.667),
+        anti_martingale_niveis=(1.0, 1.333),  # R$15 → R$20; sem 3º nível até WR ≥ 60%
         alavancagem_maximo=25.0,
         alavancagem_pyramid=False,
         stop_diario=-30.0,
