@@ -442,6 +442,36 @@ def configuracao_scalping_m15(base: Configuracao | None = None) -> Configuracao:
     )
 
 
+def configuracao_scalping_m1(base: Configuracao | None = None) -> Configuracao:
+    """Scalping M1 — Opção A: só pullback em micro-tendência.
+
+    M1 é puro ruído: nenhum padrão de vela tem peso estatístico confiável.
+    Estratégia única: pullback na EMA em candle com RSI controlado.
+    - Entrada em até 5s após abertura do candle (janela mínima)
+    - Cooldown 3 candles = 3 min (evita entradas em sequência)
+    - Expiracao 1 minuto (vence no fechamento do próprio candle)
+    - Banco isolado: iqoption_m5_practice_scalping_m1.sqlite3
+    - Porta gráfico: 8772
+
+    Money management: R$15→R$20 (igual M5/M15, sem 3º nível).
+    """
+    return replace(
+        configuracao_scalping_60(base),
+        timeframe_segundos=60,
+        expiracao_minutos=1,
+        entrada_max_segundos_no_candle=5,
+        cooldown_pos_ordem_por_ativo_candles=3,
+        limite_candles=240,
+        porta_grafico=8772,
+        sufixo_banco="scalping_m1",
+        # M1: padrões de vela são ruído — só pullback
+        pin_bar_sr_ativo=False,
+        engulfing_sr_ativo=False,
+        sr_rejeicao_ativo=False,
+        executar_estrategias_nao_validadas=False,
+    )
+
+
 def configuracao_real_m5(base: Configuracao | None = None) -> Configuracao:
     """Perfil conta real com execução limitada aos ativos não OTC.
 

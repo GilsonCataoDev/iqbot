@@ -11,6 +11,7 @@ from iqoption_m5.config import (
     configuracao_practice_m5,
     configuracao_real_m5,
     configuracao_scalping_60,
+    configuracao_scalping_m1,
     configuracao_scalping_m15,
 )
 from dataclasses import replace
@@ -56,6 +57,18 @@ def analisar_argumentos(argv=None):
         help="mesmo perfil scalping M15 mas na conta PRACTICE, sem limites de sessão. Exige --confirmo.",
     )
     parser.add_argument(
+        "--scalping-m1",
+        dest="scalping_m1",
+        action="store_true",
+        help="perfil scalping M1 REAL: candles 1 min, expiração 1 min, só pullback. Exige --confirmo.",
+    )
+    parser.add_argument(
+        "--scalping-m1-practice",
+        dest="scalping_m1_practice",
+        action="store_true",
+        help="mesmo perfil scalping M1 mas na conta PRACTICE, sem limites de sessão. Exige --confirmo.",
+    )
+    parser.add_argument(
         "--practice",
         action="store_true",
         help="envia ordens na conta PRACTICE. Exige --confirmo; sem esta opção apenas monitora.",
@@ -87,6 +100,7 @@ def selecionar_configuracao(argumentos) -> Configuracao:
         argumentos.practice, argumentos.real,
         argumentos.scalping, argumentos.scalping_practice,
         argumentos.scalping_m15, argumentos.scalping_m15_practice,
+        argumentos.scalping_m1, argumentos.scalping_m1_practice,
     ))
     if perfis_execucao > 1:
         raise SystemExit("Escolha apenas um perfil por vez.")
@@ -95,6 +109,10 @@ def selecionar_configuracao(argumentos) -> Configuracao:
             "Para enviar ordens, use o perfil desejado junto com --confirmo. "
             "Sem confirmação o programa permanece somente monitor."
         )
+    if argumentos.scalping_m1_practice:
+        return replace(configuracao_scalping_m1(), **_PRATICA_SEM_LIMITES)
+    if argumentos.scalping_m1:
+        return configuracao_scalping_m1()
     if argumentos.scalping_m15_practice:
         return replace(configuracao_scalping_m15(), **_PRATICA_SEM_LIMITES)
     if argumentos.scalping_m15:
