@@ -201,7 +201,10 @@ class GraficoM5:
         ultimo = indicadores.iloc[-1]
         tendencia_macro = str(ultimo.get("TendenciaMacro", "lateral"))
         tendencia_micro = "alta" if ultimo.get("EMA_Micro", 0) > ultimo.get("EMA_Macro", 0) else "baixa"
-        janela_niveis = indicadores.tail(60)
+        # Janela de S/R equivalente a ~5h independente do timeframe.
+        # M1=300, M5=60, M15=20 — tail(N) em DataFrame menor retorna tudo.
+        candles_sr = max(20, round(18000 // max(1, self.config.timeframe_segundos)))
+        janela_niveis = indicadores.tail(candles_sr)
         suporte = float(janela_niveis["Low"].min())
         resistencia = float(janela_niveis["High"].max())
         amplitude = resistencia - suporte

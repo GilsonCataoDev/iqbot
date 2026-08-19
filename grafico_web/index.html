@@ -614,6 +614,10 @@ async function atualizar() {
       `${dados.sinais.length} sinal(is), ${(dados.pullbacks || []).length} pullback(s) no histórico${winrateTexto}`;
     document.getElementById('status').textContent = ultimoStatusValido;
     document.getElementById('status').style.color = '';
+    if (dados.timeframe) {
+      document.getElementById('barra-logo').textContent = `IQ ${dados.timeframe}`;
+      document.title = `IQ Option ${dados.timeframe} — sinais ao vivo`;
+    }
     renderizarPainel(dados);
   } catch (e) {
     if (ativoSolicitado !== ativoAtual) return;
