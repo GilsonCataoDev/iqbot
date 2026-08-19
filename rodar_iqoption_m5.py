@@ -11,6 +11,7 @@ from iqoption_m5.config import (
     configuracao_practice_m5,
     configuracao_real_m5,
     configuracao_scalping_60,
+    configuracao_scalping_m15,
 )
 from dataclasses import replace
 
@@ -40,7 +41,19 @@ def analisar_argumentos(argv=None):
         "--scalping-practice",
         dest="scalping_practice",
         action="store_true",
-        help="mesmo perfil scalping R$60 mas na conta PRACTICE para validar antes do real. Exige --confirmo.",
+        help="mesmo perfil scalping M5 R$60 mas na conta PRACTICE. Exige --confirmo.",
+    )
+    parser.add_argument(
+        "--scalping-m15",
+        dest="scalping_m15",
+        action="store_true",
+        help="perfil scalping M15 REAL: candles 15 min, anti-martingale 15/20/25. Exige --confirmo.",
+    )
+    parser.add_argument(
+        "--scalping-m15-practice",
+        dest="scalping_m15_practice",
+        action="store_true",
+        help="mesmo perfil scalping M15 mas na conta PRACTICE, sem limites de sessão. Exige --confirmo.",
     )
     parser.add_argument(
         "--practice",
@@ -55,31 +68,39 @@ def analisar_argumentos(argv=None):
     return parser.parse_args(argv)
 
 
+_PRATICA_SEM_LIMITES = dict(
+    conta="PRACTICE",
+    confirmo_conta_real=False,
+    piso_banca=0.0,
+    max_operacoes_dia=0,
+    meta_diaria=0.0,
+    stop_diario=-99999.0,
+    parar_por_prejuizo=False,
+    circuit_breaker_max_perdas=0,
+    drawdown_maximo_percentual=0.0,
+)
+
+
 def selecionar_configuracao(argumentos) -> Configuracao:
     """Transforma argumentos validados em um único perfil de execução."""
     perfis_execucao = sum(bool(v) for v in (
-        argumentos.practice, argumentos.real, argumentos.scalping, argumentos.scalping_practice
+        argumentos.practice, argumentos.real,
+        argumentos.scalping, argumentos.scalping_practice,
+        argumentos.scalping_m15, argumentos.scalping_m15_practice,
     ))
     if perfis_execucao > 1:
-        raise SystemExit("Escolha apenas um perfil: --practice, --real, --scalping ou --scalping-practice.")
+        raise SystemExit("Escolha apenas um perfil por vez.")
     if perfis_execucao and not argumentos.confirmo:
         raise SystemExit(
             "Para enviar ordens, use o perfil desejado junto com --confirmo. "
             "Sem confirmação o programa permanece somente monitor."
         )
+    if argumentos.scalping_m15_practice:
+        return replace(configuracao_scalping_m15(), **_PRATICA_SEM_LIMITES)
+    if argumentos.scalping_m15:
+        return configuracao_scalping_m15()
     if argumentos.scalping_practice:
-        return replace(
-            configuracao_scalping_60(),
-            conta="PRACTICE",
-            confirmo_conta_real=False,
-            piso_banca=0.0,
-            max_operacoes_dia=0,
-            meta_diaria=0.0,
-            stop_diario=-99999.0,
-            parar_por_prejuizo=False,
-            circuit_breaker_max_perdas=0,
-            drawdown_maximo_percentual=0.0,
-        )
+        return replace(configuracao_scalping_60(), **_PRATICA_SEM_LIMITES)
     if argumentos.scalping:
         return configuracao_scalping_60()
     if argumentos.real:

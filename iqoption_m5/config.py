@@ -2,7 +2,7 @@ import os
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 
-TIMEFRAMES_SUPORTADOS = {60: "M1", 300: "M5"}
+TIMEFRAMES_SUPORTADOS = {60: "M1", 300: "M5", 900: "M15"}
 
 
 @dataclass(frozen=True)
@@ -233,7 +233,7 @@ class Configuracao:
                 "de vez se a banca cair demais)."
             )
         if self.timeframe_segundos not in TIMEFRAMES_SUPORTADOS:
-            raise RuntimeError("Timeframe suportado: M1 (60s) ou M5 (300s).")
+            raise RuntimeError("Timeframe suportado: M1 (60s), M5 (300s) ou M15 (900s).")
         if self.expiracao_minutos * 60 < self.timeframe_segundos:
             raise RuntimeError("A expiração não pode ser menor que um candle do timeframe.")
         if not 0 < self.entrada_max_segundos_no_candle < self.timeframe_segundos:
@@ -409,6 +409,30 @@ def configuracao_scalping_60(base: Configuracao | None = None) -> Configuracao:
         verificar_resultado_por_candle=True,
         porta_grafico=8770,
         sufixo_banco="scalping",
+    )
+
+
+def configuracao_scalping_m15(base: Configuracao | None = None) -> Configuracao:
+    """Scalping em M15 (candles de 15 min, expiração 15 min).
+
+    Vantagens vs M5:
+    - Menos ruído: tendência e pullback mais limpos
+    - 3-6 entradas/dia vs 5-10 no M5
+    - Cooldown de 1 candle = 15 min já é suficiente
+    - entrada_max_segundos_no_candle mais folgado (60s)
+
+    Mesmo money management: anti-martingale R$15→R$20→R$25.
+    Banco isolado em iqoption_m5_practice_scalping_m15.sqlite3.
+    """
+    return replace(
+        configuracao_scalping_60(base),
+        timeframe_segundos=900,
+        expiracao_minutos=15,
+        entrada_max_segundos_no_candle=60,
+        cooldown_pos_ordem_por_ativo_candles=1,  # 1 candle = 15 min já é cooldown suficiente
+        limite_candles=120,                      # 120 × 15 min = 30 h de histórico
+        porta_grafico=8771,
+        sufixo_banco="scalping_m15",
     )
 
 
