@@ -465,6 +465,12 @@ def configuracao_scalping_m1(base: Configuracao | None = None) -> Configuracao:
         limite_candles=240,
         porta_grafico=8772,
         sufixo_banco="scalping_m1",
+        # M1: EMA_Macro(50) move lentamente → slope sempre parece "forte" vs ATR
+        # Threshold de 0.5 (M5) bloquearia ~45% dos candidatos no M1
+        pullback_slope_forte_multiplo_atr=1.5,
+        # M1: zona Fibonacci mais larga — retrações no M1 raramente acertam 38-62%
+        pullback_fib_min=0.236,
+        pullback_fib_max=0.764,
         # M1: padrões de vela são ruído — só pullback
         pin_bar_sr_ativo=False,
         engulfing_sr_ativo=False,
