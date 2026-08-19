@@ -413,26 +413,32 @@ def configuracao_scalping_60(base: Configuracao | None = None) -> Configuracao:
 
 
 def configuracao_scalping_m15(base: Configuracao | None = None) -> Configuracao:
-    """Scalping em M15 (candles de 15 min, expiração 15 min).
+    """Scalping M15 — Opção B: pullback + padrões de vela em S/R.
 
-    Vantagens vs M5:
-    - Menos ruído: tendência e pullback mais limpos
-    - 3-6 entradas/dia vs 5-10 no M5
-    - Cooldown de 1 candle = 15 min já é suficiente
-    - entrada_max_segundos_no_candle mais folgado (60s)
+    No M15 os padrões de vela têm peso real (no M5 são ruído):
+    - pin_bar_sr: pino tocando S/R = sinal de exaustão confiável
+    - engulfing_sr: engolfo em S/R = mudança de momentum confirmada
+    - sr_rejeicao: corpo rejeitando nível = pressão direcional clara
+    - pullback/pullback_confluencia: base trend-following (herdado do M5)
 
-    Mesmo money management: anti-martingale R$15→R$20→R$25.
-    Banco isolado em iqoption_m5_practice_scalping_m15.sqlite3.
+    Money management: R$15→R$20 (sem 3º nível — igual ao M5 atual).
+    Cooldown 1 candle = 15 min (suficiente para evitar entradas repetidas).
+    Banco isolado: iqoption_m5_practice_scalping_m15.sqlite3.
     """
     return replace(
         configuracao_scalping_60(base),
         timeframe_segundos=900,
         expiracao_minutos=15,
         entrada_max_segundos_no_candle=60,
-        cooldown_pos_ordem_por_ativo_candles=1,  # 1 candle = 15 min já é cooldown suficiente
-        limite_candles=120,                      # 120 × 15 min = 30 h de histórico
+        cooldown_pos_ordem_por_ativo_candles=1,
+        limite_candles=120,
         porta_grafico=8771,
         sufixo_banco="scalping_m15",
+        # Opção B: padrões de vela em S/R — confiáveis no M15, ruído no M5
+        pin_bar_sr_ativo=True,
+        engulfing_sr_ativo=True,
+        sr_rejeicao_ativo=True,
+        executar_estrategias_nao_validadas=True,  # pin_bar e engulfing ainda não validados
     )
 
 
