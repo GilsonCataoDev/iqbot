@@ -459,7 +459,8 @@ def configuracao_scalping_m1(base: Configuracao | None = None) -> Configuracao:
         configuracao_scalping_60(base),
         timeframe_segundos=60,
         expiracao_minutos=1,
-        entrada_max_segundos_no_candle=5,
+        entrada_max_segundos_no_candle=15,  # 5s era apertado demais para o pipeline processar
+        min_segundos_ate_expiracao=5,       # default 120s bloquearia tudo (expiry=60s no M1)
         cooldown_pos_ordem_por_ativo_candles=3,
         limite_candles=240,
         porta_grafico=8772,
