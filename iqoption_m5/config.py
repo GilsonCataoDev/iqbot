@@ -439,13 +439,16 @@ def configuracao_scalping_m15(base: Configuracao | None = None) -> Configuracao:
         # EMA_Macro(50) no M15 = EMA de 12.5h — slope sempre parece forte vs ATR.
         # 0.5 (default M5) bloqueava ~39% dos pullbacks válidos no M15.
         pullback_slope_forte_multiplo_atr=1.0,
+        # pullback standalone: 25% WR em amostra real — desabilitado.
+        # pullback_confluencia (fibo + SR simultâneos) continua ativo via padrão.
+        pullback_ativo=False,
         # Opção B+: padrões de vela em S/R — confiáveis no M15, ruído no M5
         pin_bar_sr_ativo=True,
         engulfing_sr_ativo=True,
         sr_rejeicao_ativo=True,
-        # MACD crossover com filtro de TendenciaMacro: zero-line + trend alinhado.
-        # No M15 os crossovers têm mais follow-through que no M5.
-        macd_crossover_ativo=True,
+        # MACD sem filtro de tendência: 33% WR — desabilitado.
+        # macd_crossover_tendencia (zero-line + TendenciaMacro): mantido.
+        macd_crossover_ativo=False,
         macd_crossover_tendencia_ativo=True,
         executar_estrategias_nao_validadas=True,
     )
