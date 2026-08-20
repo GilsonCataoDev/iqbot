@@ -35,7 +35,8 @@ class EstrategiaReversaoM5:
         self._cache_ultimo_fechado: dict[str, pd.Timestamp] = {}
         self._erros_consecutivos: dict[str, int] = {}
         self._estrategias_desativadas: set[str] = set()
-        self._tendencia_h1: dict[str, str] = {}  # ativo -> "alta"|"baixa"|"lateral"
+        self._tendencia_h1: dict[str, str] = {}   # ativo -> "alta"|"baixa"|"lateral"
+        self._estrutura_m5: dict[str, str] = {}  # ativo -> "alta"|"baixa"|"lateral"
 
     def calcular_tendencia_h1(self, candles_h1: pd.DataFrame) -> str:
         """Calcula a tendência do H1 pela inclinação da EMA no H1.
@@ -62,6 +63,40 @@ class EstrategiaReversaoM5:
 
     def atualizar_contexto_h1(self, ativo: str, tendencia: str) -> None:
         self._tendencia_h1[ativo] = tendencia
+
+    def calcular_estrutura_m5(self, candles_m5: pd.DataFrame) -> str:
+        """Calcula a estrutura direcional do M5 pela inclinação da EMA.
+
+        Usa EMA(m5_ema_periodo) e mede inclinação em m5_slope_janela candles.
+        Retorna 'alta', 'baixa' ou 'lateral'.
+        """
+        c = self.config
+        min_c = c.m5_ema_periodo + c.m5_slope_janela + 1
+        if candles_m5 is None or len(candles_m5) < min_c:
+            return "lateral"
+        close = candles_m5["Close"]
+        ema = close.ewm(span=c.m5_ema_periodo, adjust=False).mean()
+        inclinacao = ema.diff(c.m5_slope_janela).iloc[-1]
+        atr_m5 = (candles_m5["High"] - candles_m5["Low"]).rolling(c.atr_periodo).mean().iloc[-1]
+        if pd.isna(inclinacao) or pd.isna(atr_m5) or atr_m5 <= 0:
+            return "lateral"
+        limiar = c.slope_limiar_atr * atr_m5
+        if inclinacao > limiar:
+            return "alta"
+        if inclinacao < -limiar:
+            return "baixa"
+        return "lateral"
+
+    def atualizar_contexto_m5(self, ativo: str, estrutura: str) -> None:
+        self._estrutura_m5[ativo] = estrutura
+
+    def _m5_alinha(self, ativo: str, direcao: str) -> bool:
+        if not self.config.filtro_m5_ativo:
+            return True
+        estrutura = self._estrutura_m5.get(ativo, "lateral")
+        if estrutura == "lateral":
+            return True
+        return not (estrutura == "alta" and direcao == "put") and not (estrutura == "baixa" and direcao == "call")
 
     def _h1_permite(self, ativo: str, direcao: str) -> bool:
         if not self.config.filtro_h1_ativo:
@@ -198,12 +233,21 @@ class EstrategiaReversaoM5:
         atr = df.iloc[indice].get("ATR")
         if pd.isna(atr):
             return False
+        atr_f = float(atr)
         inicio = max(0, indice - self.config.atr_regime_janela)
         historico = df["ATR"].iloc[inicio:indice].dropna()
         if not len(historico):
             return True
         mediana = float(historico.median())
-        return mediana <= 0 or float(atr) <= self.config.atr_max_multiplo_mediana * mediana
+        if mediana <= 0:
+            return True
+        # Bloqueia volatilidade excessiva
+        if atr_f > self.config.atr_max_multiplo_mediana * mediana:
+            return False
+        # Bloqueia volatilidade muito baixa (spread domina no M1)
+        if self.config.atr_min_multiplo_mediana > 0 and atr_f < self.config.atr_min_multiplo_mediana * mediana:
+            return False
+        return True
 
     def _pivos(self, df: pd.DataFrame, indice_fim: int) -> tuple[list[float], list[float]]:
         c = self.config
@@ -323,6 +367,15 @@ class EstrategiaReversaoM5:
         tendencia = str(recuo["TendenciaMacro"])
         if tendencia not in {"alta", "baixa"}:
             return None
+
+        # Bloqueia quando EMA_Micro ≈ EMA_Macro (mercado lateral — EMAs convergindo)
+        if self.config.bloquear_emas_proximas_atr > 0:
+            _ema_m = recuo.get("EMA_Micro")
+            _ema_M = recuo.get("EMA_Macro")
+            _atr_r = recuo.get("ATR")
+            if not any(pd.isna(x) for x in (_ema_m, _ema_M, _atr_r)) and float(_atr_r) > 0:
+                if abs(float(_ema_m) - float(_ema_M)) < self.config.bloquear_emas_proximas_atr * float(_atr_r):
+                    return None
 
         inclinacao = recuo.get("InclinacaoMacro")
         if inclinacao is not None and not pd.isna(inclinacao):
@@ -1003,6 +1056,15 @@ class EstrategiaReversaoM5:
                         nome, n,
                     )
                     self._estrategias_desativadas.add(nome)
+        # Filtro M5: remove sinais contra a estrutura direcional do M5
+        if self.config.filtro_m5_ativo:
+            est_m5 = self._estrutura_m5.get(ativo, "lateral")
+            if est_m5 != "lateral":
+                antes = len(resultado)
+                resultado = [d for d in resultado if self._m5_alinha(ativo, d.direcao)]
+                bloqueados = antes - len(resultado)
+                if bloqueados:
+                    logger.info("[M5] %s: bloqueou %d sinal(is) contra EstruturaM5=%s", ativo, bloqueados, est_m5)
         # Filtro H1: remove sinais contra a tendência do timeframe superior
         if self.config.filtro_h1_ativo:
             th1 = self._tendencia_h1.get(ativo, "lateral")
@@ -1072,6 +1134,15 @@ class EstrategiaReversaoM5:
                             nome, n,
                         )
                         self._estrategias_desativadas.add(nome)
+        # Filtro M5: remove reversões contra a estrutura direcional do M5
+        if self.config.filtro_m5_ativo:
+            est_m5 = self._estrutura_m5.get(ativo, "lateral")
+            if est_m5 != "lateral":
+                antes = len(resultado)
+                resultado = [d for d in resultado if self._m5_alinha(ativo, d.direcao)]
+                bloqueados = antes - len(resultado)
+                if bloqueados:
+                    logger.info("[M5] %s: bloqueou %d reversão(ões) contra EstruturaM5=%s", ativo, bloqueados, est_m5)
         # Filtro H1: remove sinais de reversão contra a tendência do timeframe superior
         if self.config.filtro_h1_ativo:
             th1 = self._tendencia_h1.get(ativo, "lateral")

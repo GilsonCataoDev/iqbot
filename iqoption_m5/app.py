@@ -180,7 +180,8 @@ def main(config: Configuracao | None = None) -> None:
     ultimo_candle_processado = {ativo: None for ativo in config.ativos}
     _candle_guard = CandleGuard()  # deduplicação e validação de ordem/fechamento
     _cooldown_ativo: dict[str, float] = {}
-    _ultima_h1_por_ativo: dict[str, float] = {}  # ativo -> unix timestamp da última ordem executada
+    _ultima_h1_por_ativo: dict[str, float] = {}
+    _ultima_m5_por_ativo: dict[str, float] = {}  # ativo -> unix timestamp da última ordem executada
     candle_historico_grafico = {ativo: None for ativo in config.ativos}
     sinais_historicos_cache = {ativo: [] for ativo in config.ativos}
     ultimo_alerta_avisado = {ativo: None for ativo in config.ativos}
@@ -346,6 +347,19 @@ def main(config: Configuracao | None = None) -> None:
         print(f"[{datetime.now():%H:%M:%S}] [INICIO] {ativo}")
         indicadores = estrategia.calcular_indicadores(snapshot.candles, ativo)
 
+        # Contexto M5: atualiza estrutura direcional do M5 quando configurado.
+        # Throttle: refetch só após m5_atualizar_segundos (padrão 5min = 1 candle M5).
+        if config.filtro_m5_ativo:
+            _agora_m5 = time.time()
+            if _agora_m5 - _ultima_m5_por_ativo.get(ativo, 0) >= config.m5_atualizar_segundos:
+                try:
+                    _candles_m5 = mercado.buscar_m5(ativo, config.m5_num_candles)
+                    _estrutura_m5 = estrategia.calcular_estrutura_m5(_candles_m5)
+                    estrategia.atualizar_contexto_m5(ativo, _estrutura_m5)
+                    _ultima_m5_por_ativo[ativo] = _agora_m5
+                    print(f"    [M5] {ativo}: EstruturaM5={_estrutura_m5}")
+                except Exception as _e_m5:
+                    print(f"    [M5] falha ao buscar M5 para {ativo}: {_e_m5}")
         # Contexto H1: atualiza tendência do timeframe superior quando configurado.
         # Throttle: refetch só após h1_atualizar_segundos (padrão 15min = 1 candle M15).
         if config.filtro_h1_ativo:

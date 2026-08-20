@@ -177,6 +177,19 @@ class Configuracao:
         "bollinger_squeeze":       ("LATERAL",),
     })
 
+    # --- ATR mínimo (bloqueia baixíssima volatilidade — spread domina) ---
+    atr_min_multiplo_mediana: float = 0.0  # 0=desativado; >0=bloqueia se ATR < N*mediana
+
+    # --- Filtro EMA convergência (mercado lateral — EMA_Micro ≈ EMA_Macro) ---
+    bloquear_emas_proximas_atr: float = 0.0  # 0=desativado; >0=bloqueia quando |EMA20-EMA50| < N*ATR
+
+    # --- M5 structure filter (confirma estrutura direcional antes do M1/M15) ---
+    filtro_m5_ativo: bool = False
+    m5_num_candles: int = 20              # candles M5 para calcular estrutura (~100min)
+    m5_atualizar_segundos: float = 300.0  # refetch M5 a cada 5min (1 candle M5)
+    m5_ema_periodo: int = 21              # EMA(21) no M5 para avaliar estrutura
+    m5_slope_janela: int = 3             # janela de inclinação no M5
+
     # --- H1 context (filtro multi-timeframe) ---
     # Bloqueia entradas contra a tendência do H1 (timeframe superior ao M15/M5).
     # Ex: M15 em alta mas H1 em baixa → CALL bloqueado.
@@ -504,8 +517,9 @@ def configuracao_scalping_m1(base: Configuracao | None = None) -> Configuracao:
         limite_candles=240,
         porta_grafico=8772,
         sufixo_banco="scalping_m1",
+        # EMA 20 como âncora de pullback (era 9 — muito rápido pro M1)
+        ema_micro_periodo=20,
         # M1: EMA_Macro(50) move lentamente → slope sempre parece "forte" vs ATR
-        # Threshold de 0.5 (M5) bloquearia ~45% dos candidatos no M1
         pullback_slope_forte_multiplo_atr=1.5,
         # M1: zona Fibonacci mais larga — retrações no M1 raramente acertam 38-62%
         pullback_fib_min=0.236,
@@ -515,6 +529,19 @@ def configuracao_scalping_m1(base: Configuracao | None = None) -> Configuracao:
         engulfing_sr_ativo=False,
         sr_rejeicao_ativo=False,
         executar_estrategias_nao_validadas=False,
+        # Hierarquia multi-timeframe: H1 direção → M5 estrutura → M1 gatilho
+        filtro_h1_ativo=True,
+        filtro_m5_ativo=True,
+        # Bloqueio de mercado lateral: EMA20 ≈ EMA50 → não operar
+        bloquear_emas_proximas_atr=0.5,
+        # Bloqueio de volatilidade: ATR muito baixo (spread domina) ou muito alto
+        atr_min_multiplo_mediana=0.3,
+        atr_max_multiplo_mediana=2.5,
+        # Risk management: 2 perdas consecutivas → pausa 1h
+        circuit_breaker_max_perdas=2,
+        circuit_breaker_cooldown_minutos=60,
+        # Bloqueio de notícias de alto impacto (NFP, CPI, FOMC, etc.)
+        bloquear_noticia_alto_impacto=True,
     )
 
 

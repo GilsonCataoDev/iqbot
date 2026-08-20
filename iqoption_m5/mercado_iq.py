@@ -98,6 +98,14 @@ class MercadoIQ:
             dados = self._api.get_candles(ativo, 3600, n, timestamp)
         return self._candles_para_df(dados)
 
+    def buscar_m5(self, ativo: str, n: int | None = None) -> pd.DataFrame:
+        """Busca N candles M5 sem stream (leitura pontual para estrutura M5)."""
+        n = n if n is not None else self.config.m5_num_candles
+        with self._lock_api:
+            timestamp = self._api.get_server_timestamp()
+            dados = self._api.get_candles(ativo, 300, n, timestamp)
+        return self._candles_para_df(dados)
+
     def _iniciar_streams(self) -> None:
         for ativo in self.config.ativos:
             self._api.start_candles_stream(
