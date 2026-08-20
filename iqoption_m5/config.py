@@ -177,6 +177,20 @@ class Configuracao:
         "bollinger_squeeze":       ("LATERAL",),
     })
 
+    # --- H1 context (filtro multi-timeframe) ---
+    # Bloqueia entradas contra a tendência do H1 (timeframe superior ao M15/M5).
+    # Ex: M15 em alta mas H1 em baixa → CALL bloqueado.
+    filtro_h1_ativo: bool = False
+    h1_num_candles: int = 12               # candles H1 a buscar (~12h de contexto)
+    h1_atualizar_segundos: float = 900.0   # refetch H1 a cada N segundos (1 candle M15)
+    h1_ema_periodo: int = 5                # EMA(5) no H1 ≈ tendência das últimas 5h
+    h1_slope_janela: int = 3              # mede inclinação em 3 candles H1
+
+    # --- Expiração por setup ---
+    # Permite usar expiração diferente da padrão de acordo com o setup.
+    # None = usa expiracao_minutos para todos. Ex: {"pullback_confluencia": 30, "sr_rejeicao": 15}
+    expiracao_por_setup: dict | None = None
+
     # --- Drawdown máximo percentual ---
     # Para o bot quando (banca_pico - banca_atual) / banca_pico >= este valor.
     # 0.0 = desativado.
@@ -436,6 +450,8 @@ def configuracao_scalping_m15(base: Configuracao | None = None) -> Configuracao:
         limite_candles=120,
         porta_grafico=8771,
         sufixo_banco="scalping_m15",
+        # EMA 21 (em vez de EMA 9) — alinha com setup padrão do usuário (EMA 21 + 50)
+        ema_micro_periodo=21,
         # EMA_Macro(50) no M15 = EMA de 12.5h — slope sempre parece forte vs ATR.
         # 0.5 (default M5) bloqueava ~39% dos pullbacks válidos no M15.
         pullback_slope_forte_multiplo_atr=1.0,
@@ -451,6 +467,17 @@ def configuracao_scalping_m15(base: Configuracao | None = None) -> Configuracao:
         macd_crossover_ativo=False,
         macd_crossover_tendencia_ativo=True,
         executar_estrategias_nao_validadas=True,
+        # Filtro H1: bloqueia entradas contra tendência do timeframe superior
+        filtro_h1_ativo=True,
+        # Expiração variável por setup: pullbacks e padrões merecem 30 min no M15
+        expiracao_por_setup={
+            "pullback_confluencia":     30,
+            "fibo_sr_retracao":         30,
+            "pin_bar_sr":               30,
+            "engulfing_sr":             30,
+            "sr_rejeicao":              15,
+            "macd_crossover_tendencia": 15,
+        },
     )
 
 

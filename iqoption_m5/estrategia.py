@@ -35,6 +35,41 @@ class EstrategiaReversaoM5:
         self._cache_ultimo_fechado: dict[str, pd.Timestamp] = {}
         self._erros_consecutivos: dict[str, int] = {}
         self._estrategias_desativadas: set[str] = set()
+        self._tendencia_h1: dict[str, str] = {}  # ativo -> "alta"|"baixa"|"lateral"
+
+    def calcular_tendencia_h1(self, candles_h1: pd.DataFrame) -> str:
+        """Calcula a tendência do H1 pela inclinação da EMA no H1.
+
+        Usa EMA(h1_ema_periodo) e mede inclinação em h1_slope_janela candles.
+        Retorna 'alta', 'baixa' ou 'lateral'.
+        """
+        c = self.config
+        min_c = c.h1_ema_periodo + c.h1_slope_janela + 1
+        if candles_h1 is None or len(candles_h1) < min_c:
+            return "lateral"
+        close = candles_h1["Close"]
+        ema = close.ewm(span=c.h1_ema_periodo, adjust=False).mean()
+        inclinacao = ema.diff(c.h1_slope_janela).iloc[-1]
+        atr_h1 = (candles_h1["High"] - candles_h1["Low"]).rolling(c.atr_periodo).mean().iloc[-1]
+        if pd.isna(inclinacao) or pd.isna(atr_h1) or atr_h1 <= 0:
+            return "lateral"
+        limiar = c.slope_limiar_atr * atr_h1
+        if inclinacao > limiar:
+            return "alta"
+        if inclinacao < -limiar:
+            return "baixa"
+        return "lateral"
+
+    def atualizar_contexto_h1(self, ativo: str, tendencia: str) -> None:
+        self._tendencia_h1[ativo] = tendencia
+
+    def _h1_permite(self, ativo: str, direcao: str) -> bool:
+        if not self.config.filtro_h1_ativo:
+            return True
+        th1 = self._tendencia_h1.get(ativo, "lateral")
+        if th1 == "lateral":
+            return True
+        return not (th1 == "alta" and direcao == "put") and not (th1 == "baixa" and direcao == "call")
 
     def calcular_indicadores(self, candles: pd.DataFrame, ativo: str = "") -> pd.DataFrame:
         if not ativo or len(candles) < 3:
@@ -968,6 +1003,15 @@ class EstrategiaReversaoM5:
                         nome, n,
                     )
                     self._estrategias_desativadas.add(nome)
+        # Filtro H1: remove sinais contra a tendência do timeframe superior
+        if self.config.filtro_h1_ativo:
+            th1 = self._tendencia_h1.get(ativo, "lateral")
+            if th1 != "lateral":
+                antes = len(resultado)
+                resultado = [d for d in resultado if self._h1_permite(ativo, d.direcao)]
+                bloqueados = antes - len(resultado)
+                if bloqueados:
+                    logger.info("[H1] %s: bloqueou %d sinal(is) contra TendenciaH1=%s", ativo, bloqueados, th1)
         return resultado
 
     def avaliar_reversoes(self, ativo: str, indicadores: pd.DataFrame) -> list[Decisao]:
@@ -1028,6 +1072,15 @@ class EstrategiaReversaoM5:
                             nome, n,
                         )
                         self._estrategias_desativadas.add(nome)
+        # Filtro H1: remove sinais de reversão contra a tendência do timeframe superior
+        if self.config.filtro_h1_ativo:
+            th1 = self._tendencia_h1.get(ativo, "lateral")
+            if th1 != "lateral":
+                antes = len(resultado)
+                resultado = [d for d in resultado if self._h1_permite(ativo, d.direcao)]
+                bloqueados = antes - len(resultado)
+                if bloqueados:
+                    logger.info("[H1] %s: bloqueou %d reversão(ões) contra TendenciaH1=%s", ativo, bloqueados, th1)
         return resultado
 
     def _avaliar_estrategias(

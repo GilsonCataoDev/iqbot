@@ -90,6 +90,14 @@ class MercadoIQ:
         )
         return self._candles_para_df(dados)
 
+    def buscar_h1(self, ativo: str, n: int | None = None) -> pd.DataFrame:
+        """Busca N candles H1 sem stream (leitura pontual para contexto H1)."""
+        n = n if n is not None else self.config.h1_num_candles
+        with self._lock_api:
+            timestamp = self._api.get_server_timestamp()
+            dados = self._api.get_candles(ativo, 3600, n, timestamp)
+        return self._candles_para_df(dados)
+
     def _iniciar_streams(self) -> None:
         for ativo in self.config.ativos:
             self._api.start_candles_stream(

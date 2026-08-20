@@ -73,19 +73,24 @@ class ExecutorSeguro:
         thread.start()
         return True
 
-    def _expiracao_dinamica(self, snapshot: SnapshotMercado) -> int:
-        """Minutos até o fechamento do candle atual — alinha a expiração com a vela.
+    def _expiracao_dinamica(self, snapshot: SnapshotMercado, decisao: Decisao | None = None) -> int:
+        """Minutos de expiração para a ordem.
 
-        Se restar menos de 60s no candle (não caberia nem 1 min de expiração),
-        pula para o fechamento do candle seguinte.
+        Se `expiracao_por_setup` estiver configurado e o setup da decisão estiver na tabela,
+        usa o valor fixo do setup (ex: pullback=30min, sr_rejeicao=15min).
+        Caso contrário, calcula dinamicamente com base no fechamento do candle atual.
         """
+        if decisao is not None and self.config.expiracao_por_setup:
+            setup = decisao.detalhes.get("setup", "")
+            override = self.config.expiracao_por_setup.get(setup)
+            if override is not None:
+                return int(override)
         tf = self.config.timeframe_segundos
         segundo_atual = snapshot.timestamp_servidor % tf
         restante = tf - segundo_atual
         if restante < 60:
             restante += tf
         minutos = math.ceil(restante / 60)
-        # Nunca menos que 1 ou mais que o dobro do timeframe configurado
         return max(1, min(minutos, self.config.expiracao_minutos * 2))
 
     def _valor_da_entrada(self) -> float:
@@ -110,7 +115,7 @@ class ExecutorSeguro:
         valor = self._valor_da_entrada()
         payout = float(snapshot.payout)
         enviada_em = datetime.now()
-        expiracao = self._expiracao_dinamica(snapshot)
+        expiracao = self._expiracao_dinamica(snapshot, decisao)
 
         print(f" [EXEC] {decisao.ativo}: preparando ordem | direcao={decisao.direcao.upper()} | "
               f"valor={valor} | exp={expiracao}min (dinamico) | payout={payout}")
