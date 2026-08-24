@@ -259,7 +259,7 @@ def main(config: Configuracao | None = None) -> None:
         return
 
     if not mercado_conectado:
-        print("Conectando e carregando candles M5...")
+        print(f"Conectando e carregando candles {config.rotulo_timeframe}...")
         mercado.iniciar()
 
     if grafico is not None:
