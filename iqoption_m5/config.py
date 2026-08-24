@@ -469,7 +469,7 @@ def configuracao_scalping_m15(base: Configuracao | None = None) -> Configuracao:
         expiracao_minutos=15,
         # Só normais: EURUSD 88% WR, GBPUSD 70% WR — OTCs todos negativos no M15
         # USDJPY adicionado para diversificação
-        ativos=("EURUSD", "GBPUSD", "USDJPY", "EURUSD-OTC", "GBPUSD-OTC", "USDJPY-OTC"),
+        ativos=("EURUSD", "GBPUSD", "USDJPY"),
         entrada_max_segundos_no_candle=60,
         cooldown_pos_ordem_por_ativo_candles=1,
         limite_candles=120,
@@ -558,7 +558,7 @@ def configuracao_scalping_m1(base: Configuracao | None = None) -> Configuracao:
         valor_por_ordem=5.0,
         timeframe_segundos=60,
         expiracao_minutos=2,  # 2 min — nova estratégia de rejeição M1 exige vela pra confirmar
-        ativos=("EURUSD", "GBPUSD", "EURUSD-OTC", "GBPUSD-OTC", "EURGBP-OTC"),
+        ativos=("EURUSD", "GBPUSD"),
         entrada_max_segundos_no_candle=25,  # IQ leva 11-25s pra entregar dado; 15s bloqueava tudo
         min_segundos_ate_expiracao=5,       # default 120s bloquearia tudo (expiry curto no M1)
         cooldown_pos_ordem_por_ativo_candles=3,
