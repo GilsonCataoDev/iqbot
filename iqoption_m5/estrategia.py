@@ -10,6 +10,7 @@ from .modelos import Decisao
 logger = logging.getLogger(__name__)
 
 PRIORIDADE_SETUP: dict[str, int] = {
+    "rejeicao_m1_hierarquico": 0,  # nova — hierarquia M15→M5→M1 com scoring
     "pullback_confluencia":   1,
     "fibo_sr_retracao":       2,
     "reversao_confluencia":   3,
@@ -36,7 +37,8 @@ class EstrategiaReversaoM5:
         self._erros_consecutivos: dict[str, int] = {}
         self._estrategias_desativadas: set[str] = set()
         self._tendencia_h1: dict[str, str] = {}   # ativo -> "alta"|"baixa"|"lateral"
-        self._estrutura_m5: dict[str, str] = {}  # ativo -> "alta"|"baixa"|"lateral"
+        self._estrutura_m5: dict[str, str] = {}   # ativo -> "alta"|"baixa"|"lateral"
+        self._contexto_m15: dict[str, str] = {}   # ativo -> "alta"|"baixa"|"lateral"
 
     def calcular_tendencia_h1(self, candles_h1: pd.DataFrame) -> str:
         """Calcula a tendência do H1 pela inclinação da EMA no H1.
@@ -89,6 +91,37 @@ class EstrategiaReversaoM5:
 
     def atualizar_contexto_m5(self, ativo: str, estrutura: str) -> None:
         self._estrutura_m5[ativo] = estrutura
+
+    def calcular_contexto_m15(self, candles_m15: pd.DataFrame) -> str:
+        """Calcula contexto de tendência M15 via EMA200. Retorna 'alta', 'baixa' ou 'lateral'."""
+        c = self.config
+        min_c = c.m15_ema200_periodo + c.m15_slope_janela + 1
+        if candles_m15 is None or len(candles_m15) < min_c:
+            return "lateral"
+        close = candles_m15["Close"]
+        ema200 = close.ewm(span=c.m15_ema200_periodo, adjust=False).mean()
+        inclinacao = ema200.diff(c.m15_slope_janela).iloc[-1]
+        atr_m15 = (candles_m15["High"] - candles_m15["Low"]).rolling(14).mean().iloc[-1]
+        if pd.isna(inclinacao) or pd.isna(atr_m15) or atr_m15 <= 0:
+            return "lateral"
+        limiar = 0.05 * float(atr_m15)
+        inclinacao_f = float(inclinacao)
+        if inclinacao_f > limiar:
+            return "alta"
+        if inclinacao_f < -limiar:
+            return "baixa"
+        return "lateral"
+
+    def atualizar_contexto_m15(self, ativo: str, contexto: str) -> None:
+        self._contexto_m15[ativo] = contexto
+
+    def _m15_permite(self, ativo: str, direcao: str) -> bool:
+        if not self.config.filtro_m15_ativo:
+            return True
+        ctx = self._contexto_m15.get(ativo, "lateral")
+        if ctx == "lateral":
+            return True
+        return not (ctx == "alta" and direcao == "put") and not (ctx == "baixa" and direcao == "call")
 
     def _m5_alinha(self, ativo: str, direcao: str) -> bool:
         if not self.config.filtro_m5_ativo:
@@ -375,6 +408,16 @@ class EstrategiaReversaoM5:
             _atr_r = recuo.get("ATR")
             if not any(pd.isna(x) for x in (_ema_m, _ema_M, _atr_r)) and float(_atr_r) > 0:
                 if abs(float(_ema_m) - float(_ema_M)) < self.config.bloquear_emas_proximas_atr * float(_atr_r):
+                    return None
+
+        # Bloqueia quando EMA_Micro cruzou contra a tendência (mercado reverteu mas TendenciaMacro ainda não virou)
+        if self.config.pullback_filtro_cruzamento_ema:
+            _ema_m = recuo.get("EMA_Micro")
+            _ema_M = recuo.get("EMA_Macro")
+            if not any(pd.isna(x) for x in (_ema_m, _ema_M)):
+                if tendencia == "alta" and float(_ema_m) < float(_ema_M):
+                    return None
+                if tendencia == "baixa" and float(_ema_m) > float(_ema_M):
                     return None
 
         inclinacao = recuo.get("InclinacaoMacro")
@@ -991,6 +1034,163 @@ class EstrategiaReversaoM5:
             )
         return None
 
+    def _avaliar_rejeicao_m1_hierarquico(
+        self, ativo: str, df: pd.DataFrame, indice: int
+    ) -> Decisao | None:
+        """Estratégia M1 hierárquica: M15 contexto → M5 estrutura → M1 candle de rejeição.
+
+        Scoring 0-11 pontos; entra se score >= rejeicao_m1_score_minimo (padrão 9).
+        """
+        if not self.config.rejeicao_m1_hierarquico_ativo:
+            return None
+
+        minimo = max(self.config.ema_macro_periodo, self.config.atr_regime_janela) + 5
+        if indice < minimo or indice >= len(df):
+            return None
+
+        rejeicao = df.iloc[indice]
+        confirmacao = df.iloc[indice + 1] if indice + 1 < len(df) else None
+
+        campos = ("Open", "High", "Low", "Close", "ATR", "EMA_Micro", "EMA_Macro")
+        if any(pd.isna(rejeicao.get(c)) for c in campos):
+            return None
+
+        r_open  = float(rejeicao["Open"])
+        r_close = float(rejeicao["Close"])
+        r_high  = float(rejeicao["High"])
+        r_low   = float(rejeicao["Low"])
+        r_ema20 = float(rejeicao["EMA_Micro"])  # EMA20 no M1
+        r_ema50 = float(rejeicao["EMA_Macro"])  # EMA50 no M1
+        atr     = float(rejeicao["ATR"])
+
+        total_candle = r_high - r_low
+        if total_candle <= 0 or atr <= 0:
+            return None
+
+        corpo     = abs(r_close - r_open)
+        sombra_inf = min(r_open, r_close) - r_low
+        sombra_sup = r_high - max(r_open, r_close)
+        corpo_min  = max(corpo, atr * 0.001)
+
+        # Candle de rejeição CALL: martelo (sombra inf ≥ 2× corpo, fecha acima da metade)
+        eh_call = (
+            sombra_inf >= 2.0 * corpo_min
+            and sombra_inf > sombra_sup
+            and r_close >= r_low + 0.5 * total_candle
+        )
+        # Candle de rejeição PUT: estrela cadente (sombra sup ≥ 2× corpo, fecha abaixo da metade)
+        eh_put = (
+            sombra_sup >= 2.0 * corpo_min
+            and sombra_sup > sombra_inf
+            and r_close <= r_low + 0.5 * total_candle
+        )
+
+        if not eh_call and not eh_put:
+            return None
+
+        direcao: str = "call" if eh_call else "put"
+
+        # Confirma: próxima vela rompe high/low do candle de rejeição
+        if confirmacao is not None and not any(
+            pd.isna(confirmacao.get(c)) for c in ("High", "Low", "Close")
+        ):
+            if direcao == "call":
+                if not (float(confirmacao["High"]) > r_high):
+                    return None
+            else:
+                if not (float(confirmacao["Low"]) < r_low):
+                    return None
+
+        # --- Scoring ---
+        score = 0
+        det: dict = {}
+
+        # +2: M15 contexto favorável (bloqueia se contra)
+        ctx_m15 = self._contexto_m15.get(ativo, "lateral")
+        if (direcao == "call" and ctx_m15 == "alta") or (direcao == "put" and ctx_m15 == "baixa"):
+            score += 2
+            det["m15_ctx"] = ctx_m15
+        elif ctx_m15 != "lateral":
+            return None  # sinal contra o contexto M15 — bloqueado
+
+        # +2: M5 estrutura favorável
+        est_m5 = self._estrutura_m5.get(ativo, "lateral")
+        if (direcao == "call" and est_m5 == "alta") or (direcao == "put" and est_m5 == "baixa"):
+            score += 2
+            det["m5_est"] = est_m5
+
+        # +2: nível S/R próximo do ponto de rejeição
+        suportes, resistencias = self._pivos(df, indice)
+        tolerancia = self.config.pullback_tolerancia_atr * atr
+        nivel_sr = None
+        if direcao == "call" and suportes:
+            n_sr = min(suportes, key=lambda p: abs(p - r_low))
+            if abs(n_sr - r_low) <= tolerancia:
+                score += 2
+                nivel_sr = n_sr
+                det["sr"] = round(n_sr, 6)
+        elif direcao == "put" and resistencias:
+            n_sr = min(resistencias, key=lambda p: abs(p - r_high))
+            if abs(n_sr - r_high) <= tolerancia:
+                score += 2
+                nivel_sr = n_sr
+                det["sr"] = round(n_sr, 6)
+
+        # +1: pullback toca EMA20 no M1 (ponto de rejeição ≈ EMA)
+        if direcao == "call" and r_low <= r_ema20 + tolerancia:
+            score += 1
+            det["pullback_ema"] = round(r_ema20, 6)
+        elif direcao == "put" and r_high >= r_ema20 - tolerancia:
+            score += 1
+            det["pullback_ema"] = round(r_ema20, 6)
+
+        # +1: EMA20 alinhada com a direção no M1
+        if direcao == "call" and r_ema20 > r_ema50:
+            score += 1
+            det["ema_alinhada"] = True
+        elif direcao == "put" and r_ema20 < r_ema50:
+            score += 1
+            det["ema_alinhada"] = True
+
+        # +2: candle de rejeição confirmado (critério já satisfeito acima)
+        score += 2
+        det["rejeicao"] = "martelo" if direcao == "call" else "estrela_cadente"
+        det["sombra_inf"] = round(sombra_inf, 6)
+        det["sombra_sup"] = round(sombra_sup, 6)
+
+        # +1: RSI não exausto (40-65 para call; 35-60 para put)
+        rsi = rejeicao.get("RSI")
+        if rsi is not None and not pd.isna(rsi):
+            rsi_f = float(rsi)
+            if direcao == "call" and 30 <= rsi_f <= 65:
+                score += 1
+                det["rsi"] = round(rsi_f, 1)
+            elif direcao == "put" and 35 <= rsi_f <= 70:
+                score += 1
+                det["rsi"] = round(rsi_f, 1)
+
+        if score < self.config.rejeicao_m1_score_minimo:
+            return None
+
+        return Decisao(
+            ativo=ativo,
+            direcao=direcao,
+            preco=float(r_close),
+            candle_hora=pd.Timestamp(df.index[indice]),
+            motivo="rejeicao_m1_hierarquico",
+            detalhes={
+                "setup": "rejeicao_m1_hierarquico",
+                "score": score,
+                "score_max": 11,
+                "ctx_m15": ctx_m15,
+                "est_m5": est_m5,
+                "nivel_sr": nivel_sr,
+                "corpo": round(corpo, 6),
+                "atr": round(atr, 6),
+                **det,
+            },
+        )
+
     def _avaliar_todas_estrategias(
         self, ativo: str, df: pd.DataFrame, indice: int
     ) -> list[Decisao]:
@@ -1025,6 +1225,26 @@ class EstrategiaReversaoM5:
                         nome, n,
                     )
                     self._estrategias_desativadas.add(nome)
+        # Nova estratégia de rejeição M1 hierárquica (M15→M5→M1)
+        if c.rejeicao_m1_hierarquico_ativo:
+            nome = self._avaliar_rejeicao_m1_hierarquico.__name__
+            if nome not in self._estrategias_desativadas:
+                try:
+                    d = self._avaliar_rejeicao_m1_hierarquico(ativo, df, indice)
+                    if d is not None:
+                        resultado.append(d)
+                    self._erros_consecutivos[nome] = 0
+                except Exception as exc:
+                    n = self._erros_consecutivos.get(nome, 0) + 1
+                    self._erros_consecutivos[nome] = n
+                    if n == 1:
+                        logger.warning("[%s] erro #%d: %s", nome, n, exc)
+                    elif n >= 3:
+                        logger.error(
+                            "[%s] desativada após %d erros consecutivos.", nome, n,
+                        )
+                        self._estrategias_desativadas.add(nome)
+
         for ativo_flag, fn in (
             (c.divergencia_rsi_ativo,           self._avaliar_divergencia_rsi),
             (c.bollinger_squeeze_ativo,          self._avaliar_bollinger_squeeze),
@@ -1056,6 +1276,19 @@ class EstrategiaReversaoM5:
                         nome, n,
                     )
                     self._estrategias_desativadas.add(nome)
+        # Filtro M15: remove sinais contra o contexto M15 (exceto rejeicao_m1_hierarquico que já filtra internamente)
+        if self.config.filtro_m15_ativo:
+            ctx_m15 = self._contexto_m15.get(ativo, "lateral")
+            if ctx_m15 != "lateral":
+                antes = len(resultado)
+                resultado = [
+                    d for d in resultado
+                    if d.detalhes.get("setup") == "rejeicao_m1_hierarquico"  # já filtrou internamente
+                    or self._m15_permite(ativo, d.direcao)
+                ]
+                bloqueados = antes - len(resultado)
+                if bloqueados:
+                    logger.info("[M15] %s: bloqueou %d sinal(is) contra ContextoM15=%s", ativo, bloqueados, ctx_m15)
         # Filtro M5: remove sinais contra a estrutura direcional do M5
         if self.config.filtro_m5_ativo:
             est_m5 = self._estrutura_m5.get(ativo, "lateral")
@@ -1134,6 +1367,15 @@ class EstrategiaReversaoM5:
                             nome, n,
                         )
                         self._estrategias_desativadas.add(nome)
+        # Filtro M15: remove reversões contra o contexto M15
+        if self.config.filtro_m15_ativo:
+            ctx_m15 = self._contexto_m15.get(ativo, "lateral")
+            if ctx_m15 != "lateral":
+                antes = len(resultado)
+                resultado = [d for d in resultado if self._m15_permite(ativo, d.direcao)]
+                bloqueados = antes - len(resultado)
+                if bloqueados:
+                    logger.info("[M15] %s: bloqueou %d reversão(ões) contra ContextoM15=%s", ativo, bloqueados, ctx_m15)
         # Filtro M5: remove reversões contra a estrutura direcional do M5
         if self.config.filtro_m5_ativo:
             est_m5 = self._estrutura_m5.get(ativo, "lateral")

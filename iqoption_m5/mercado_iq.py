@@ -90,21 +90,43 @@ class MercadoIQ:
         )
         return self._candles_para_df(dados)
 
+    def _buscar_com_timeout(self, ativo: str, tf: int, n: int, timeout: float = 12.0) -> list:
+        """get_candles com timeout — evita travar o loop quando o WebSocket cai."""
+        result: list = [None]
+        exc: list = [None]
+
+        def _run() -> None:
+            try:
+                ts = self._api.get_server_timestamp()
+                result[0] = self._api.get_candles(ativo, tf, n, ts)
+            except Exception as e:
+                exc[0] = e
+
+        t = threading.Thread(target=_run, daemon=True)
+        t.start()
+        t.join(timeout)
+        if t.is_alive():
+            raise MercadoIndisponivel(f"Timeout ({timeout:.0f}s) buscando tf={tf}s para {ativo}")
+        if exc[0] is not None:
+            raise MercadoIndisponivel(str(exc[0]))
+        if result[0] is None:
+            raise MercadoIndisponivel(f"Sem dados para {ativo} tf={tf}")
+        return result[0]
+
     def buscar_h1(self, ativo: str, n: int | None = None) -> pd.DataFrame:
         """Busca N candles H1 sem stream (leitura pontual para contexto H1)."""
         n = n if n is not None else self.config.h1_num_candles
-        with self._lock_api:
-            timestamp = self._api.get_server_timestamp()
-            dados = self._api.get_candles(ativo, 3600, n, timestamp)
-        return self._candles_para_df(dados)
+        return self._candles_para_df(self._buscar_com_timeout(ativo, 3600, n))
 
     def buscar_m5(self, ativo: str, n: int | None = None) -> pd.DataFrame:
         """Busca N candles M5 sem stream (leitura pontual para estrutura M5)."""
         n = n if n is not None else self.config.m5_num_candles
-        with self._lock_api:
-            timestamp = self._api.get_server_timestamp()
-            dados = self._api.get_candles(ativo, 300, n, timestamp)
-        return self._candles_para_df(dados)
+        return self._candles_para_df(self._buscar_com_timeout(ativo, 300, n))
+
+    def buscar_m15(self, ativo: str, n: int | None = None) -> pd.DataFrame:
+        """Busca N candles M15 sem stream (leitura pontual para contexto M15)."""
+        n = n if n is not None else self.config.m15_num_candles
+        return self._candles_para_df(self._buscar_com_timeout(ativo, 900, n))
 
     def _iniciar_streams(self) -> None:
         for ativo in self.config.ativos:
@@ -147,15 +169,21 @@ class MercadoIQ:
             for chave, detalhe in secoes.items():
                 if not isinstance(detalhe, dict):
                     continue
-                nome = str(detalhe.get("name", "")).split(".", 1)[-1]
+                nome = str(detalhe.get("name", "")).split(".", 1)[-1].upper()
                 nomes_vistos.append(nome)
-                candidatos = {nome}
-                if nome.endswith("-op"):
-                    base = nome[: -len("-op")]
-                    candidatos.add(base)
-                    candidatos.add(f"{base}-OTC")
+                # A resposta atual da IQ distingue os mercados assim:
+                # GBPUSD-OTC = sintético OTC; GBPUSD-op = mercado normal.
+                # Tratar "-op" como OTC troca o instrumento no buyv3.
+                if nome.endswith("-OTC"):
+                    candidato = nome
+                    is_otc_entry = True
+                elif nome.endswith("-OP"):
+                    candidato = nome[: -len("-OP")]
+                    is_otc_entry = False
+                else:
+                    candidato = nome
+                    is_otc_entry = False
                 enabled = bool(detalhe.get("enabled", False))
-                is_otc_entry = nome.endswith("-op") or any(c.upper().endswith("-OTC") for c in candidatos)
                 # OTC: is_suspended é frequentemente incorreto — a IQ marca suspended
                 # quando o mercado regular equivalente está aberto, mas o OTC pode
                 # continuar disponível. Usa só enabled; a rejeição real vem do buyv3.
@@ -163,10 +191,9 @@ class MercadoIQ:
                     aberto = enabled
                 else:
                     aberto = enabled and not bool(detalhe.get("is_suspended", False))
-                for candidato in candidatos:
-                    if candidato in abertos:
-                        abertos[candidato] = aberto
-                        resolvidos.add(candidato)
+                if candidato in abertos:
+                    abertos[candidato] = aberto
+                    resolvidos.add(candidato)
                     try:
                         self._ids_ativos[candidato] = int(chave)
                     except (TypeError, ValueError):
@@ -294,6 +321,11 @@ class MercadoIQ:
             return self._snapshot_uma_vez(ativo)
         except Exception as erro:
             raise MercadoIndisponivel(f"Falha ao ler snapshot de {ativo}: {erro}") from erro
+
+    def timestamp_servidor(self) -> float:
+        """Lê o relógio atual da IQ no último instante antes de uma ordem."""
+        with self._lock_api:
+            return float(self._api.get_server_timestamp())
 
     def reconectar_se_necessario(self) -> bool:
         """Tenta reconectar se a conexão parece morta. Thread-safe."""

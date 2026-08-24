@@ -179,6 +179,15 @@ class RegistroSwing:
             for r in rows
         ]
 
+    def tem_sinal_pendente(self, ativo: str) -> bool:
+        """True se já existe sinal sem resolução para esse ativo no monitor."""
+        with self._lock, self._sessao() as db:
+            n = db.execute(
+                "SELECT COUNT(*) FROM sinais_monitor WHERE ativo=? AND resultado IS NULL",
+                (ativo,),
+            ).fetchone()[0]
+        return n > 0
+
     def resolver_sinal_monitor(self, id_sinal: int, resultado: str) -> None:
         with self._lock, self._sessao() as db:
             db.execute(

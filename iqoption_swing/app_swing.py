@@ -4,6 +4,8 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 
+import pandas as pd
+
 from .calendario_swing import verificar_noticias
 from .config_swing import SwingConfig
 from .estrategia_swing import EstrategiaSwing
@@ -57,16 +59,8 @@ def main(config: SwingConfig) -> None:
                 try:
                     ts_sinal = pd.Timestamp(s["registrado_em"])
                     _apos_raw = df_h4[df_h4.index > ts_sinal]
-                    # Exclui o último candle: ainda em formação (open, High/Low incompletos)
+                    # Exclui o último candle: ainda em formação (High/Low incompletos)
                     apos = _apos_raw.iloc[:-1]
-                    if not _apos_raw.empty:
-                        _ult = _apos_raw.iloc[-1]
-                        print(
-                            f"[SWING-DBG] {s['ativo']} ts_sinal={ts_sinal} "
-                            f"raw_apos={len(_apos_raw)} apos_filtrado={len(apos)} "
-                            f"ultimo_candle_idx={_apos_raw.index[-1]} "
-                            f"H={float(_ult['High']):.5f} L={float(_ult['Low']):.5f}"
-                        )
                 except Exception:
                     apos = df_h4
 
@@ -192,12 +186,20 @@ def main(config: SwingConfig) -> None:
 
                 for sinal, atr_h4 in sinais_hora:
                     try:
+                        # Deduplicação: bloqueia novo sinal se mesmo ativo já tem pendente
+                        if registro.tem_sinal_pendente(sinal.ativo):
+                            print(
+                                f"[SWING] {sinal.ativo}: sinal IGNORADO — já existe pendente "
+                                f"não resolvido (evita entradas repetidas)"
+                            )
+                            continue
+
                         executor.executar(sinal, atr_h4=atr_h4)
 
                     except MercadoSwingIndisponivel as e:
-                        print(f"[SWING] {ativo}: dados indisponíveis — {e}")
+                        print(f"[SWING] {sinal.ativo}: dados indisponíveis — {e}")
                     except Exception as e:
-                        print(f"[SWING] {ativo}: erro inesperado — {e!r}")
+                        print(f"[SWING] {sinal.ativo}: erro inesperado — {e!r}")
 
             reconexoes = 0
 

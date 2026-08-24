@@ -31,6 +31,38 @@ class ApiSemListaDigital:
 
 
 class TestMercadoIQ(unittest.TestCase):
+    def test_ids_separam_otc_explicito_de_mercado_normal_op(self):
+        class ApiComNormalEOTC:
+            def get_all_init_v2(self):
+                return {
+                    "turbo": {
+                        "actives": {
+                            "81": {
+                                "name": "front.GBPUSD-OTC",
+                                "enabled": True,
+                                "is_suspended": True,
+                            },
+                            "1867": {
+                                "name": "front.GBPUSD-op",
+                                "enabled": True,
+                                "is_suspended": False,
+                            },
+                        }
+                    }
+                }
+
+        mercado = MercadoIQ(
+            Configuracao(ativos=("GBPUSD-OTC", "GBPUSD"))
+        )
+        mercado._api = ApiComNormalEOTC()
+
+        abertos = mercado._obter_abertura_turbo()
+
+        self.assertEqual(mercado._ids_ativos["GBPUSD-OTC"], 81)
+        self.assertEqual(mercado._ids_ativos["GBPUSD"], 1867)
+        self.assertTrue(abertos["GBPUSD-OTC"])
+        self.assertTrue(abertos["GBPUSD"])
+
     def test_cache_usa_apenas_turbo_quando_lista_digital_falha(self):
         mercado = MercadoIQ(Configuracao())
         mercado._api = ApiSemListaDigital()

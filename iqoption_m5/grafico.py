@@ -71,7 +71,9 @@ class GraficoM5:
         self.config = config
         self.pasta_web_origem = Path(__file__).resolve().parent.parent / "grafico_web"
         raiz_local = Path(os.environ.get("LOCALAPPDATA") or tempfile.gettempdir())
-        self.pasta_web = raiz_local / "IQOptionM5" / "grafico_web"
+        # Diretório separado por bot para evitar conflito de dados entre M1/M15/M5
+        sufixo = config.sufixo_banco or "default"
+        self.pasta_web = raiz_local / "IQOptionM5" / f"grafico_web_{sufixo}"
         self.pasta_dados = self.pasta_web / "iqoption_m5"
         self.servidor: _ServidorReutilizavel | None = None
         self.porta: int | None = None

@@ -6,7 +6,18 @@ echo ============================================================
 echo  M1 + M15 - CONTA PRACTICE (janelas separadas)
 echo  M15 -^> porta 8771  ^|  M1 -^> porta 8772
 echo  Bancos: scalping_m15 / scalping_m1
+echo  PRACTICE: sem limites de sessao (operacoes, stop, meta ou perdas)
 echo ============================================================
+echo.
+
+echo ATENCAO: este teste envia ordens de R$15 na conta PRACTICE.
+set "CONFIRMA="
+set /p CONFIRMA=Digite SIM para iniciar M1 e M15:
+if /I not "%CONFIRMA%"=="SIM" (
+    echo Inicio cancelado. Nenhuma ordem foi enviada.
+    pause
+    exit /b 0
+)
 echo.
 
 :: Abre M15 em janela separada (sem quoting aninhado)

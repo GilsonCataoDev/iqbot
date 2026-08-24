@@ -19,6 +19,9 @@ from iqoption_m5.risco import GerenciadorRisco
 
 
 class MercadoFalso:
+    def timestamp_servidor(self):
+        return 1_800_000_000
+
     def iniciar(self):
         pass
 
@@ -39,6 +42,21 @@ class MercadoFalso:
 
     def fechar(self):
         pass
+
+
+class MercadoComRelogio(MercadoFalso):
+    """Relógio controlável para reproduzir atraso entre reserva e envio."""
+
+    def __init__(self, *timestamps):
+        self._timestamps = iter(timestamps)
+        self.compras = 0
+
+    def timestamp_servidor(self):
+        return next(self._timestamps)
+
+    def comprar(self, valor, ativo, direcao, expiracao_minutos):
+        self.compras += 1
+        return super().comprar(valor, ativo, direcao, expiracao_minutos)
 
 
 class TestRiscoEExecutor(unittest.TestCase):
@@ -82,6 +100,48 @@ class TestRiscoEExecutor(unittest.TestCase):
         risco.reservar(self.snapshot, self.decisao)
         risco.registrar_resultado(50.0, self.decisao.ativo)  # banca sobe pra 150
         self.assertAlmostEqual(executor._valor_da_entrada(), 4.5)
+
+    def test_revalida_janela_imediatamente_antes_do_envio(self):
+        base_candle = self.snapshot.timestamp_servidor
+        base_candle -= base_candle % 60
+        config = replace(
+            self.config,
+            timeframe_segundos=60,
+            expiracao_minutos=1,
+            entrada_max_segundos_no_candle=15,
+            min_segundos_ate_expiracao=5,
+        )
+        snapshot = replace(self.snapshot, timestamp_servidor=base_candle + 10)
+        mercado = MercadoComRelogio(base_candle + 14, base_candle + 16)
+        risco = GerenciadorRisco(config)
+        registro = RegistroSQLite(config.banco_sqlite)
+        executor = ExecutorSeguro(config, mercado, risco, registro)
+
+        self.assertTrue(executor.executar(snapshot, self.decisao))
+        executor.aguardar_ordens()
+
+        self.assertEqual(mercado.compras, 0)
+        self.assertEqual(risco.resumo().operacoes_enviadas, 0)
+
+    def test_bloqueia_na_borda_da_janela_antes_de_reservar(self):
+        base_candle = self.snapshot.timestamp_servidor
+        base_candle -= base_candle % 60
+        config = replace(
+            self.config,
+            timeframe_segundos=60,
+            expiracao_minutos=1,
+            entrada_max_segundos_no_candle=15,
+            min_segundos_ate_expiracao=5,
+        )
+        snapshot = replace(self.snapshot, timestamp_servidor=base_candle + 10)
+        mercado = MercadoComRelogio(base_candle + 15)
+        risco = GerenciadorRisco(config)
+        registro = RegistroSQLite(config.banco_sqlite)
+        executor = ExecutorSeguro(config, mercado, risco, registro)
+
+        self.assertFalse(executor.executar(snapshot, self.decisao))
+        self.assertEqual(mercado.compras, 0)
+        self.assertEqual(risco.resumo().operacoes_enviadas, 0)
 
     def test_valor_percentual_banca_respeita_minimo_de_dois_reais(self):
         cfg = replace(self.config, valor_percentual_banca=0.03, banca_inicial=10.0)

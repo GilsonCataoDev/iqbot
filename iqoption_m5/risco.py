@@ -149,7 +149,7 @@ class GerenciadorRisco:
         if snapshot.payout is not None and snapshot.payout < self.config.payout_minimo:
             return Autorizacao(False, "payout_abaixo_minimo")
         segundo_no_candle = snapshot.timestamp_servidor % self.config.timeframe_segundos
-        if segundo_no_candle > self.config.entrada_max_segundos_no_candle:
+        if segundo_no_candle >= self.config.entrada_max_segundos_no_candle:
             return Autorizacao(False, "entrada_atrasada")
         if _base_ativo(snapshot.ativo) in self._ordens_abertas:
             return Autorizacao(False, "ordem_ja_aberta")
