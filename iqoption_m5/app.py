@@ -181,7 +181,8 @@ def main(config: Configuracao | None = None) -> None:
     _candle_guard = CandleGuard()  # deduplicação e validação de ordem/fechamento
     _cooldown_ativo: dict[str, float] = {}
     _ultima_h1_por_ativo: dict[str, float] = {}
-    _ultima_m5_por_ativo: dict[str, float] = {}  # ativo -> unix timestamp da última ordem executada
+    _ultima_m5_por_ativo: dict[str, float] = {}
+    _ultima_m15_por_ativo: dict[str, float] = {}
     candle_historico_grafico = {ativo: None for ativo in config.ativos}
     sinais_historicos_cache = {ativo: [] for ativo in config.ativos}
     ultimo_alerta_avisado = {ativo: None for ativo in config.ativos}
@@ -311,7 +312,7 @@ def main(config: Configuracao | None = None) -> None:
     def _avaliar_ativo(ativo: str, snapshot, agora_utc: datetime) -> None:
         # --- Instrumentação de latência ---
         ts_recebimento = time.time()
-        ts_inicio_calculo = time.monotonic()
+        ts_inicio_calculo = time.time()
         _offset_srv = obter_offset_servidor(ts_recebimento, snapshot.timestamp_servidor)
 
         # Fix: recaptura agora_utc aqui para eliminar drift entre ativos avaliados
@@ -361,6 +362,18 @@ def main(config: Configuracao | None = None) -> None:
                 except Exception as _e_m5:
                     print(f"    [M5] falha ao buscar M5 para {ativo}: {_e_m5}")
         # Contexto H1: atualiza tendência do timeframe superior quando configurado.
+        # Throttle: refetch M15 context a cada candle M15 (contexto para nova estratégia M1)
+        if config.filtro_m15_ativo:
+            _agora_m15 = time.time()
+            if _agora_m15 - _ultima_m15_por_ativo.get(ativo, 0) >= config.m15_atualizar_segundos:
+                try:
+                    _candles_m15 = mercado.buscar_m15(ativo, config.m15_num_candles)
+                    _ctx_m15 = estrategia.calcular_contexto_m15(_candles_m15)
+                    estrategia.atualizar_contexto_m15(ativo, _ctx_m15)
+                    _ultima_m15_por_ativo[ativo] = _agora_m15
+                    print(f"    [M15] {ativo}: ContextoM15={_ctx_m15}")
+                except Exception as _e_m15:
+                    print(f"    [M15] falha ao buscar M15 para {ativo}: {_e_m15}")
         # Throttle: refetch só após h1_atualizar_segundos (padrão 15min = 1 candle M15).
         if config.filtro_h1_ativo:
             _agora_h1 = time.time()
@@ -374,7 +387,7 @@ def main(config: Configuracao | None = None) -> None:
                 except Exception as _e_h1:
                     print(f"    [H1] falha ao buscar H1 para {ativo}: {_e_h1}")
 
-        ts_fim_calculo = time.monotonic()
+        ts_fim_calculo = time.time()
 
         segundo_no_candle = snapshot.timestamp_servidor % config.timeframe_segundos
         segundos_restantes = config.timeframe_segundos - segundo_no_candle
@@ -663,7 +676,7 @@ def main(config: Configuracao | None = None) -> None:
         # 'entrada_atrasada'. Se marcarmos o candle como processado aqui, o
         # próximo tick (já no candle seguinte) vai avaliar o candle recém-fechado
         # em vez do candle cujo sinal ainda estava pendente — entrada uma vela atrasada.
-        if segundo_no_candle > config.entrada_max_segundos_no_candle:
+        if segundo_no_candle >= config.entrada_max_segundos_no_candle:
             print(f"[{datetime.now():%H:%M:%S}] [FIM] {ativo} (fora da janela, slot preservado)")
             return
 
@@ -1045,12 +1058,12 @@ def main(config: Configuracao | None = None) -> None:
                 sono = seg_restantes + 5.0
 
             # Se algum ativo ficou bloqueado por razão temporária dentro da janela,
-            # acorda em 5s para retry sem esperar o próximo candle.
+            # acorda em 2s para retry — reduz latência de entrada pós-fechamento do candle.
             if _retry_ativos:
-                sono = min(sono, 5.0)
+                sono = min(sono, 2.0)
             _retry_ativos.clear()
 
-            sono = max(3.0, sono)
+            sono = max(1.0, sono)
 
             while sono > 0.5:
                 pedaco = min(10.0, sono)

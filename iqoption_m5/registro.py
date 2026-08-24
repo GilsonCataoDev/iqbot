@@ -385,20 +385,21 @@ class RegistroSQLite:
                 ),
             )
 
-    def registrar_falha(self, decisao: Decisao, motivo: str) -> None:
+    def registrar_falha(self, decisao: Decisao, motivo: str, valor: float = 0.0) -> None:
         with self._lock, self._sessao() as db:
             db.execute(
                 """
                 INSERT INTO operacoes (
                     id_ordem, ativo, direcao, enviada_em, valor, payout, setup,
                     resultado_bruto, status
-                ) VALUES (?, ?, ?, ?, 0, 0, ?, ?, 'falha_envio')
+                ) VALUES (?, ?, ?, ?, ?, 0, ?, ?, 'falha_envio')
                 """,
                 (
                     f"falha-{decisao.ativo}-{decisao.candle_hora.isoformat()}-{datetime.now().timestamp()}",
                     decisao.ativo,
                     decisao.direcao,
                     datetime.now().isoformat(),
+                    valor,
                     decisao.detalhes.get("setup", "desconhecido"),
                     motivo,
                 ),

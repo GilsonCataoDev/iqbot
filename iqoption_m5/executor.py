@@ -1,6 +1,7 @@
 import logging
 import math
 import threading
+import time
 from datetime import datetime
 
 try:
@@ -33,6 +34,34 @@ class ExecutorSeguro:
         self.registro = registro
         self._threads: list[threading.Thread] = []
         self._lock = threading.Lock()
+        self._suspenso_ate: dict[str, float] = {}  # ativo → timestamp até quando está suspenso
+
+    def _validar_instante_envio(self) -> tuple[bool, str, float | None]:
+        """Valida o relógio atual da IQ, sem reutilizar o snapshot antigo."""
+        try:
+            timestamp = float(self.mercado.timestamp_servidor())
+        except Exception as erro:
+            logger.warning("relogio_servidor_indisponivel_pre_envio: %s", erro)
+            return False, "relogio_servidor_indisponivel_pre_envio", None
+
+        segundo = timestamp % self.config.timeframe_segundos
+        if segundo >= self.config.entrada_max_segundos_no_candle:
+            return False, "entrada_atrasada_pre_envio", segundo
+        return True, "ok", segundo
+
+    def _registrar_bloqueio_tempo(
+        self,
+        decisao: Decisao,
+        motivo: str,
+        segundo: float | None,
+    ) -> None:
+        detalhe = (
+            f"{segundo:.1f}s >= janela {self.config.entrada_max_segundos_no_candle}s"
+            if segundo is not None
+            else "relógio atual da IQ indisponível"
+        )
+        print(f">> {decisao.ativo}: bloqueada ({motivo}: {detalhe})")
+        self.registro.registrar_falha(decisao, motivo)
 
     @staticmethod
     def lucro_numerico(resultado, valor: float, payout: float) -> float | None:
@@ -57,6 +86,17 @@ class ExecutorSeguro:
         if not self.config.executar_ordens:
             print(f">> {decisao.ativo}: sinal {decisao.direcao.upper()} — modo somente monitor")
             return False
+
+        # Cooldown de suspensão: IQ retornou "active is suspended" → aguarda 10 min
+        _suspenso_ate = self._suspenso_ate.get(decisao.ativo, 0.0)
+        if time.time() < _suspenso_ate:
+            return False  # silencioso — não gera log de falha
+
+        no_prazo, motivo_tempo, segundo = self._validar_instante_envio()
+        if not no_prazo:
+            self._registrar_bloqueio_tempo(decisao, motivo_tempo, segundo)
+            return False
+
         autorizacao = self.risco.reservar(snapshot, decisao)
         if not autorizacao.permitida:
             print(f">> {decisao.ativo}: bloqueada ({autorizacao.motivo})")
@@ -91,7 +131,7 @@ class ExecutorSeguro:
         if restante < 60:
             restante += tf
         minutos = math.ceil(restante / 60)
-        return max(1, min(minutos, self.config.expiracao_minutos * 2))
+        return max(1, min(minutos, self.config.expiracao_minutos))
 
     def _valor_da_entrada(self) -> float:
         if self.config.valor_percentual_banca > 0:
@@ -114,12 +154,20 @@ class ExecutorSeguro:
     def _processar(self, snapshot: SnapshotMercado, decisao: Decisao) -> None:
         valor = self._valor_da_entrada()
         payout = float(snapshot.payout)
-        enviada_em = datetime.now()
         expiracao = self._expiracao_dinamica(snapshot, decisao)
 
         print(f" [EXEC] {decisao.ativo}: preparando ordem | direcao={decisao.direcao.upper()} | "
               f"valor={valor} | exp={expiracao}min (dinamico) | payout={payout}")
 
+        # A thread pode começar depois da janela mesmo que a reserva tenha sido
+        # feita a tempo. Revalida no último ponto antes de chamar a compra.
+        no_prazo, motivo_tempo, segundo = self._validar_instante_envio()
+        if not no_prazo:
+            self.risco.cancelar_reserva(decisao.ativo)
+            self._registrar_bloqueio_tempo(decisao, motivo_tempo, segundo)
+            return
+
+        enviada_em = datetime.now()
         try:
             enviada, id_ordem = self.mercado.comprar(
                 valor,
@@ -129,7 +177,7 @@ class ExecutorSeguro:
             )
         except Exception as e:
             self.risco.cancelar_reserva(decisao.ativo)
-            self.registro.registrar_falha(decisao, f"excecao_buy:{e}")
+            self.registro.registrar_falha(decisao, f"excecao_buy:{e}", valor=valor)
             logger.exception(
                 "falha_envio ativo=%s signal_id=%s",
                 decisao.ativo,
@@ -139,8 +187,14 @@ class ExecutorSeguro:
 
         if not enviada:
             self.risco.cancelar_reserva(decisao.ativo)
-            self.registro.registrar_falha(decisao, f"buy_recusado:{id_ordem}")
-            print(f">> {decisao.ativo}: IQ recusou a ordem — ERRO BRUTO: {id_ordem}")
+            erro_str = str(id_ordem).lower()
+            if "suspended" in erro_str:
+                # IQ suspendeu o ativo → cooldown 10 min, sem tentar de novo até lá
+                self._suspenso_ate[decisao.ativo] = time.time() + 600
+                print(f">> {decisao.ativo}: ativo suspenso pela IQ — cooldown 10 min")
+            else:
+                print(f">> {decisao.ativo}: IQ recusou a ordem — ERRO BRUTO: {id_ordem}")
+            self.registro.registrar_falha(decisao, f"buy_recusado:{id_ordem}", valor=valor)
             return
 
         self.registro.registrar_abertura(id_ordem, decisao, valor, payout, enviada_em)

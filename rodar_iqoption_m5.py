@@ -13,6 +13,7 @@ from iqoption_m5.config import (
     configuracao_scalping_60,
     configuracao_scalping_m1,
     configuracao_scalping_m15,
+    configuracao_scalping_m15_r5,
 )
 from dataclasses import replace
 
@@ -57,6 +58,18 @@ def analisar_argumentos(argv=None):
         help="mesmo perfil scalping M15 mas na conta PRACTICE, sem limites de sessão. Exige --confirmo.",
     )
     parser.add_argument(
+        "--scalping-m15-r5",
+        dest="scalping_m15_r5",
+        action="store_true",
+        help="perfil scalping M15 R$5 REAL: anti-martingale 5→7.50→11.25, stop -R$10, meta +R$9. Exige --confirmo.",
+    )
+    parser.add_argument(
+        "--scalping-m15-r5-practice",
+        dest="scalping_m15_r5_practice",
+        action="store_true",
+        help="mesmo perfil scalping M15 R$5 mas na conta PRACTICE, sem limites de sessão. Exige --confirmo.",
+    )
+    parser.add_argument(
         "--scalping-m1",
         dest="scalping_m1",
         action="store_true",
@@ -90,10 +103,14 @@ def analisar_argumentos(argv=None):
 _PRATICA_SEM_LIMITES = dict(
     conta="PRACTICE",
     confirmo_conta_real=False,
+    # No PRACTICE, nenhum limite de sessão deve interromper os testes.
+    # As validações técnicas de horário e envio de ordem continuam ativas.
     piso_banca=0.0,
     max_operacoes_dia=0,
+    max_perdas_consecutivas=0,
+    stop_diario=-999999.0,
     meta_diaria=0.0,
-    stop_diario=-99999.0,
+    parar_por_perdas=False,
     parar_por_prejuizo=False,
     circuit_breaker_max_perdas=0,
     drawdown_maximo_percentual=0.0,
@@ -106,6 +123,7 @@ def selecionar_configuracao(argumentos) -> Configuracao:
         argumentos.practice, argumentos.real,
         argumentos.scalping, argumentos.scalping_practice,
         argumentos.scalping_m15, argumentos.scalping_m15_practice,
+        argumentos.scalping_m15_r5, argumentos.scalping_m15_r5_practice,
         argumentos.scalping_m1, argumentos.scalping_m1_practice,
     ))
     if perfis_execucao > 1:
@@ -119,6 +137,10 @@ def selecionar_configuracao(argumentos) -> Configuracao:
         return replace(configuracao_scalping_m1(), **_PRATICA_SEM_LIMITES)
     if argumentos.scalping_m1:
         return configuracao_scalping_m1()
+    if argumentos.scalping_m15_r5_practice:
+        return replace(configuracao_scalping_m15_r5(), **_PRATICA_SEM_LIMITES)
+    if argumentos.scalping_m15_r5:
+        return configuracao_scalping_m15_r5()
     if argumentos.scalping_m15_practice:
         return replace(configuracao_scalping_m15(), **_PRATICA_SEM_LIMITES)
     if argumentos.scalping_m15:

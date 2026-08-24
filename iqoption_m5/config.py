@@ -83,6 +83,9 @@ class Configuracao:
     pullback_confirmacao_corpo_atr: float = 0.0
     # Toggle: exige RSI sobrevendido no recuo (CALL) ou sobrecomprado (PUT).
     pullback_recuo_rsi_filtro: bool = False
+    # Toggle: exige EMA_Micro alinhada com a tendência (micro > macro em alta, micro < macro em baixa).
+    # Bloqueia pullbacks onde o mercado já cruzou contra a TendenciaMacro.
+    pullback_filtro_cruzamento_ema: bool = True
 
     macd_fast: int = 6
     macd_slow: int = 16
@@ -198,6 +201,17 @@ class Configuracao:
     h1_atualizar_segundos: float = 900.0   # refetch H1 a cada N segundos (1 candle M15)
     h1_ema_periodo: int = 5                # EMA(5) no H1 ≈ tendência das últimas 5h
     h1_slope_janela: int = 3              # mede inclinação em 3 candles H1
+
+    # --- M15 context (contexto superior para nova estratégia M1 hierárquica) ---
+    filtro_m15_ativo: bool = False
+    m15_num_candles: int = 50              # ~12h de contexto M15
+    m15_atualizar_segundos: float = 900.0  # refetch a cada candle M15
+    m15_ema200_periodo: int = 200          # EMA200 para contexto de tendência M15
+    m15_slope_janela: int = 5             # inclinação em 5 candles M15 (~75min)
+
+    # --- Estratégia de rejeição M1 hierárquica (M15→M5→M1) ---
+    rejeicao_m1_hierarquico_ativo: bool = False
+    rejeicao_m1_score_minimo: int = 9     # mínimo de 9/11 pontos para entrar
 
     # --- Expiração por setup ---
     # Permite usar expiração diferente da padrão de acordo com o setup.
@@ -394,17 +408,11 @@ def configuracao_scalping_60(base: Configuracao | None = None) -> Configuracao:
         conta="REAL",
         confirmo_conta_real=True,
         executar_ordens=True,
-        ativos=(
-            "EURUSD-OTC",
-            "GBPUSD-OTC",
-            "EURGBP-OTC",
-            "EURUSD",
-            "GBPUSD",
-        ),
+        ativos=("EURUSD", "GBPUSD", "EURGBP", "EURUSD-OTC", "GBPUSD-OTC", "EURGBP-OTC"),
         bloquear_otc_real=False,
         banca_inicial=60.0,
         piso_banca=30.0,
-        valor_por_ordem=15.0,
+        valor_por_ordem=5.0,
         valor_percentual_banca=0.0,
         # Anti-martingale: 15 → 20 → 25 nos wins consecutivos
         anti_martingale_ativo=True,
@@ -423,7 +431,7 @@ def configuracao_scalping_60(base: Configuracao | None = None) -> Configuracao:
         payout_minimo=0.80,
         max_ordens_paralelas=1,
         cooldown_pos_ordem_por_ativo_candles=2,
-        entrada_max_segundos_no_candle=25,
+        entrada_max_segundos_no_candle=40,
         executar_estrategias_nao_validadas=False,
         # Opção A: só pullback (trend-following). Sem reversal contra-tendência.
         reversao_candle_ativo=False,
@@ -456,8 +464,12 @@ def configuracao_scalping_m15(base: Configuracao | None = None) -> Configuracao:
     """
     return replace(
         configuracao_scalping_60(base),
+        valor_por_ordem=5.0,
         timeframe_segundos=900,
         expiracao_minutos=15,
+        # Só normais: EURUSD 88% WR, GBPUSD 70% WR — OTCs todos negativos no M15
+        # USDJPY adicionado para diversificação
+        ativos=("EURUSD", "GBPUSD", "USDJPY", "EURUSD-OTC", "GBPUSD-OTC", "USDJPY-OTC"),
         entrada_max_segundos_no_candle=60,
         cooldown_pos_ordem_por_ativo_candles=1,
         limite_candles=120,
@@ -468,29 +480,63 @@ def configuracao_scalping_m15(base: Configuracao | None = None) -> Configuracao:
         # EMA_Macro(50) no M15 = EMA de 12.5h — slope sempre parece forte vs ATR.
         # 0.5 (default M5) bloqueava ~39% dos pullbacks válidos no M15.
         pullback_slope_forte_multiplo_atr=1.0,
-        # pullback standalone: 25% WR em amostra real — desabilitado.
+        # pullback standalone: 25% WR histórico — desabilitado.
         # pullback_confluencia (fibo + SR simultâneos) continua ativo via padrão.
         pullback_ativo=False,
         # Opção B+: padrões de vela em S/R — confiáveis no M15, ruído no M5
         pin_bar_sr_ativo=True,
         engulfing_sr_ativo=True,
         sr_rejeicao_ativo=True,
-        # MACD sem filtro de tendência: 33% WR — desabilitado.
-        # macd_crossover_tendencia (zero-line + TendenciaMacro): mantido.
+        # macd_crossover: 33% WR (-R$17/dia) — desabilitado ambas as variantes.
         macd_crossover_ativo=False,
-        macd_crossover_tendencia_ativo=True,
+        macd_crossover_tendencia_ativo=False,
         executar_estrategias_nao_validadas=True,
         # Filtro H1: bloqueia entradas contra tendência do timeframe superior
         filtro_h1_ativo=True,
-        # Expiração variável por setup: pullbacks e padrões merecem 30 min no M15
+        # Filtro cruzamento EMA no pullback — bloqueia entrada quando micro < macro
+        pullback_filtro_cruzamento_ema=True,
+        # Sem filtro de horário em testes — None = aceita qualquer hora
+        horario_por_setup=None,
+        # Expiração variável por setup
         expiracao_por_setup={
-            "pullback_confluencia":     30,
-            "fibo_sr_retracao":         30,
-            "pin_bar_sr":               30,
-            "engulfing_sr":             30,
-            "sr_rejeicao":              15,
-            "macd_crossover_tendencia": 15,
+            "pullback_confluencia": 30,
+            "fibo_sr_retracao":     30,
+            "pin_bar_sr":           30,
+            "engulfing_sr":         30,
+            "sr_rejeicao":          15,
         },
+    )
+
+
+def configuracao_scalping_m15_r5(base: Configuracao | None = None) -> Configuracao:
+    """Scalping M15 — R$5 entrada, anti-martingale 3 níveis (5→7.50→11.25).
+
+    Mesmo setup do M15 (pin_bar_sr, engulfing_sr, sr_rejeicao, pullback_confluencia + filtro H1).
+    Capital reduzido para validação ao vivo com banca de R$20.
+
+    Anti-martingale:
+      0 wins consecutivos → R$5.00
+      1 win  consecutivo  → R$7.50  (×1.5)
+      2 wins consecutivos → R$11.25 (×2.25) — objetivo da sequência
+    Qualquer loss reseta para R$5.
+
+    Proteções:
+      Banca: R$20 | Piso: R$10
+      Stop: -R$10/dia | Meta: +R$9/dia
+      Circuit breaker: 2 losses → pausa 1h
+      Máximo 5 operações/dia
+    """
+    return replace(
+        configuracao_scalping_m15(base),
+        valor_por_ordem=5.0,
+        anti_martingale_niveis=(1.0, 1.5, 2.25),  # R$5 → R$7.50 → R$11.25
+        alavancagem_maximo=12.0,
+        banca_inicial=20.0,
+        piso_banca=10.0,
+        stop_diario=-10.0,
+        meta_diaria=9.0,
+        sufixo_banco="scalping_m15_r5",
+        porta_grafico=8773,
     )
 
 
@@ -509,10 +555,12 @@ def configuracao_scalping_m1(base: Configuracao | None = None) -> Configuracao:
     """
     return replace(
         configuracao_scalping_60(base),
+        valor_por_ordem=5.0,
         timeframe_segundos=60,
-        expiracao_minutos=1,
-        entrada_max_segundos_no_candle=15,  # 5s era apertado demais para o pipeline processar
-        min_segundos_ate_expiracao=5,       # default 120s bloquearia tudo (expiry=60s no M1)
+        expiracao_minutos=2,  # 2 min — nova estratégia de rejeição M1 exige vela pra confirmar
+        ativos=("EURUSD", "GBPUSD", "EURGBP", "EURUSD-OTC", "GBPUSD-OTC", "EURGBP-OTC"),
+        entrada_max_segundos_no_candle=25,  # IQ leva 11-25s pra entregar dado; 15s bloqueava tudo
+        min_segundos_ate_expiracao=5,       # default 120s bloquearia tudo (expiry curto no M1)
         cooldown_pos_ordem_por_ativo_candles=3,
         limite_candles=240,
         porta_grafico=8772,
@@ -524,14 +572,18 @@ def configuracao_scalping_m1(base: Configuracao | None = None) -> Configuracao:
         # M1: zona Fibonacci mais larga — retrações no M1 raramente acertam 38-62%
         pullback_fib_min=0.236,
         pullback_fib_max=0.764,
-        # M1: padrões de vela são ruído — só pullback
+        # M1: padrões de vela são ruído — só pullback e nova rejeição hierárquica
         pin_bar_sr_ativo=False,
         engulfing_sr_ativo=False,
         sr_rejeicao_ativo=False,
         executar_estrategias_nao_validadas=False,
-        # Hierarquia multi-timeframe: H1 direção → M5 estrutura → M1 gatilho
+        # Hierarquia multi-timeframe: M15 contexto → M5 estrutura → M1 rejeição
+        filtro_m15_ativo=True,
         filtro_h1_ativo=True,
         filtro_m5_ativo=True,
+        # Nova estratégia de rejeição M1 hierárquica (M15→M5→M1, scoring 9-11/11)
+        rejeicao_m1_hierarquico_ativo=True,
+        rejeicao_m1_score_minimo=9,
         # Bloqueio de mercado lateral: EMA20 ≈ EMA50 → não operar
         bloquear_emas_proximas_atr=0.5,
         # Bloqueio de volatilidade: ATR muito baixo (spread domina) ou muito alto
@@ -542,6 +594,8 @@ def configuracao_scalping_m1(base: Configuracao | None = None) -> Configuracao:
         circuit_breaker_cooldown_minutos=60,
         # Bloqueio de notícias de alto impacto (NFP, CPI, FOMC, etc.)
         bloquear_noticia_alto_impacto=True,
+        # Sem filtro de horário em testes
+        horario_por_setup=None,
     )
 
 
