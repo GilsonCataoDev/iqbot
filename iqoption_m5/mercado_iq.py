@@ -163,7 +163,11 @@ class MercadoIQ:
                 if isinstance(parte, dict):
                     secoes.update(parte)
             if not secoes:
-                print(f" [mercado] get_all_init_v2 sem actives. Chaves: {list(dados.keys())}")
+                print(f" [mercado] get_all_init_v2 sem actives. Mantendo estados anteriores.")
+                # Resposta vazia — não resetar pares normais para fechado
+                for ativo in self.config.ativos:
+                    abertos[ativo] = self._mercado_aberto.get(ativo, ativo.upper().endswith("-OTC"))
+                return abertos
             nomes_vistos = []
             resolvidos = set()
             for chave, detalhe in secoes.items():

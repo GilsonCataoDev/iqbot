@@ -115,7 +115,7 @@ class Configuracao:
     meta_diaria: float = 0.0  # 0 = desativado; se >0, encerra o dia ao atingir esse lucro
     payout_minimo: float = 0.80
     bloquear_otc_real: bool = True
-    cache_mercado_segundos: int = 60
+    cache_mercado_segundos: int = 300
     max_operacoes_dia: int = 5
     max_perdas_consecutivas: int = 3
     stop_diario: float = -5.0
