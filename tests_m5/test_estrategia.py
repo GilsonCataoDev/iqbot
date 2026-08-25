@@ -121,13 +121,21 @@ class TestEstrategiaM5(unittest.TestCase):
 
     def test_pullback_sem_confirmacao_aciona_fibo_sr_retracao(self):
         # Vela bearish em uptrend tocando Fib+S/R = fibo_sr_retracao (entra sem confirmação).
-        # O pullback com confirmação não dispara; a nova estratégia sim.
+        # Desde 21706d8 esse setup é intra-candle: avaliado no candle EM FORMAÇÃO
+        # via avaliar_reversoes(), não no candle fechado de avaliar().
         df = self._cenario_pullback("call")
-        df.loc[df.index[-2], ["Open", "Close", "RSI"]] = [104.6, 104.2, 44.0]
-        decisao = self.estrategia.avaliar("EURUSD-OTC", df)
-        self.assertIsNotNone(decisao)
-        self.assertEqual(decisao.direcao, "call")
-        self.assertEqual(decisao.detalhes["setup"], "fibo_sr_retracao")
+        idx = df.index
+        df.loc[idx[-2], ["Open", "High", "Low", "Close", "RSI"]] = [104.4, 104.5, 104.0, 104.1, 45.0]
+        df.loc[idx[-1], ["Open", "High", "Low", "Close", "RSI"]] = [104.6, 104.6, 104.0, 104.2, 44.0]
+        decisoes = self.estrategia.avaliar_reversoes("EURUSD-OTC", df)
+        fibo = [d for d in decisoes if d.detalhes.get("setup") == "fibo_sr_retracao"]
+        self.assertTrue(fibo, "vela bearish tocando fibo+suporte deve gerar fibo_sr_retracao")
+        self.assertEqual(fibo[0].direcao, "call")
+        self.assertEqual(set(fibo[0].detalhes["fatores"]), {"fibo", "suporte"})
+        # o setup de confirmação (candle fechado) não dispara nesse cenário
+        decisao_fechado = self.estrategia.avaliar("EURUSD-OTC", df)
+        if decisao_fechado is not None:
+            self.assertNotEqual(decisao_fechado.detalhes.get("setup"), "fibo_sr_retracao")
 
 
 class TestEstrategiasOpcionais(unittest.TestCase):
