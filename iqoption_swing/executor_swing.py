@@ -46,9 +46,17 @@ class ExecutorSwing:
         self, sinal: SinalSwing, preco_entrada: float, atr_h4: float
     ) -> tuple[float, float, str]:
         """SL baseado na zona Fibonacci (melhor estrutura), fallback ATR.
-        Retorna (sl, tp, metodo)."""
+        Retorna (sl, tp, metodo).
+
+        Piso de SL (sl_min_atr): quando o preco entra praticamente colado na
+        borda da zona Fib, o SL derivado da zona fica minusculo — no backtest de
+        10 meses o SL chegou a 0.00xATR, e a faixa SL<0.5xATR rendeu 4% de WR
+        contra 33.3% de breakeven (-0.885R por trade, n=26). Sem piso, o stop
+        cabe dentro do ruido de um unico candle H4.
+        """
         zona = sinal.detalhes.get("zona_fib") if isinstance(sinal.detalhes, dict) else None
         buffer = atr_h4 * 0.3  # buffer abaixo/acima da zona
+        piso = atr_h4 * getattr(self.config, "sl_min_atr", 0.0)
         if zona and len(zona) == 2 and buffer > 0:
             zona_low, zona_high = float(zona[0]), float(zona[1])
             if sinal.direcao == "call":
@@ -56,6 +64,9 @@ class ExecutorSwing:
             else:
                 sl = zona_high + buffer
             sl_dist = abs(preco_entrada - sl)
+            if sl_dist < piso:
+                sl_dist = piso
+                sl = preco_entrada - piso if sinal.direcao == "call" else preco_entrada + piso
             tp_dist = sl_dist * self.config.rr_ratio
             if sinal.direcao == "call":
                 return sl, preco_entrada + tp_dist, "fib"

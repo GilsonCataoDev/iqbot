@@ -329,6 +329,32 @@ class EstrategiaSwing:
         df_h4: pd.DataFrame,
         df_h1: pd.DataFrame,
     ) -> SinalSwing | None:
+        """AVISO — premissa FALSIFICADA pelo backtest. Ver backtest_swing.py.
+
+        Backtest de 10 meses (jan-ago/2026), 12 pares, 313 sinais:
+            WR 18.4% contra breakeven 33.3% (R:R 2.0) -> -0.33R por trade, -102R
+            IC95% [13.4%, 23.5%] — inteiramente abaixo do breakeven.
+            Perde nas duas metades do periodo (21.1% e 15.8%): nao e regime.
+
+        Nao e falta de calibracao. Testado e descartado:
+          - score_min 7/8/9 ......... 18.9% / 18.4% / 18.3%
+          - R:R 1.5 ................. 28.5% vs breakeven 40.0%
+          - confirmacao de entrada .. rejeicao/saiu_zona/ambas: 18-21%
+          - horizonte 12/24/36 H4 ... 20.6% / 22.9% / 25.4%
+          - piso de SL .............. +15R, longe de fechar a diferenca de -87R
+
+        O que enterra a premissa: quanto MAIS forte a tendencia D1, PIOR o
+        resultado — ADX 20-25 da 32.8%, ADX 40+ da 20.0%. Um sistema de
+        continuacao de tendencia teria o gradiente oposto.
+
+        Inverter a direcao da +32R no agregado, mas so no regime recente
+        (1a metade -11R / 2a metade +43R; Q1 28% -> Q2 41% -> Q3 51%).
+        Nao e edge estavel — por isso NAO foi invertida.
+
+        Consequencia: manter em executar_ordens=False ate existir uma tese
+        nova validada no backtest. Rode RODAR_BACKTEST_SWING.bat antes de
+        confiar em qualquer alteracao aqui.
+        """
         tendencia, adx_d1 = self._tendencia_d1(df_d1)
         if tendencia is None:
             return None

@@ -28,6 +28,7 @@ class SwingConfig:
     banca_inicial: float = 500.0        # forex: referência de banca para cálculo de lote
     rr_ratio: float = 2.0               # forex: R:R mínimo (TP = rr_ratio × SL)
     sl_atr_multiplo: float = 1.5        # forex: SL = N × ATR do H4
+    sl_min_atr: float = 0.5             # piso do SL em múltiplos de ATR H4 (ver _calcular_sl_tp)
     alavancagem: int = 100              # forex: alavancagem CFD (50, 100, 200...)
     max_operacoes_dia: int = 3
     max_perdas_consecutivas: int = 2
