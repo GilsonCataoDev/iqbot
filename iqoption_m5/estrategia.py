@@ -36,9 +36,32 @@ class EstrategiaReversaoM5:
         self._cache_ultimo_fechado: dict[str, pd.Timestamp] = {}
         self._erros_consecutivos: dict[str, int] = {}
         self._estrategias_desativadas: set[str] = set()
+        self._tendencia_h4: dict[str, str] = {}   # ativo -> "alta"|"baixa"|"lateral"
         self._tendencia_h1: dict[str, str] = {}   # ativo -> "alta"|"baixa"|"lateral"
         self._estrutura_m5: dict[str, str] = {}   # ativo -> "alta"|"baixa"|"lateral"
         self._contexto_m15: dict[str, str] = {}   # ativo -> "alta"|"baixa"|"lateral"
+
+    def calcular_tendencia_h4(self, candles_h4: pd.DataFrame) -> str:
+        """Tendência macro via EMA(h4_ema_periodo) no H4. Retorna 'alta', 'baixa' ou 'lateral'."""
+        c = self.config
+        min_c = c.h4_ema_periodo + c.h4_slope_janela + 1
+        if candles_h4 is None or len(candles_h4) < min_c:
+            return "lateral"
+        close = candles_h4["Close"]
+        ema = close.ewm(span=c.h4_ema_periodo, adjust=False).mean()
+        inclinacao = ema.diff(c.h4_slope_janela).iloc[-1]
+        atr_h4 = (candles_h4["High"] - candles_h4["Low"]).rolling(c.atr_periodo).mean().iloc[-1]
+        if pd.isna(inclinacao) or pd.isna(atr_h4) or atr_h4 <= 0:
+            return "lateral"
+        limiar = c.slope_limiar_atr * atr_h4
+        if inclinacao > limiar:
+            return "alta"
+        if inclinacao < -limiar:
+            return "baixa"
+        return "lateral"
+
+    def atualizar_contexto_h4(self, ativo: str, tendencia: str) -> None:
+        self._tendencia_h4[ativo] = tendencia
 
     def calcular_tendencia_h1(self, candles_h1: pd.DataFrame) -> str:
         """Calcula a tendência do H1 pela inclinação da EMA no H1.
@@ -114,6 +137,14 @@ class EstrategiaReversaoM5:
 
     def atualizar_contexto_m15(self, ativo: str, contexto: str) -> None:
         self._contexto_m15[ativo] = contexto
+
+    def _h4_permite(self, ativo: str, direcao: str) -> bool:
+        if not self.config.filtro_h4_ativo:
+            return True
+        th4 = self._tendencia_h4.get(ativo, "lateral")
+        if th4 == "lateral":
+            return True
+        return not (th4 == "alta" and direcao == "put") and not (th4 == "baixa" and direcao == "call")
 
     def _m15_permite(self, ativo: str, direcao: str) -> bool:
         if not self.config.filtro_m15_ativo:
@@ -1276,6 +1307,15 @@ class EstrategiaReversaoM5:
                         nome, n,
                     )
                     self._estrategias_desativadas.add(nome)
+        # Filtro H4: remove sinais contra a tendência macro do H4
+        if self.config.filtro_h4_ativo:
+            th4 = self._tendencia_h4.get(ativo, "lateral")
+            if th4 != "lateral":
+                antes = len(resultado)
+                resultado = [d for d in resultado if self._h4_permite(ativo, d.direcao)]
+                bloqueados = antes - len(resultado)
+                if bloqueados:
+                    logger.info("[H4] %s: bloqueou %d sinal(is) contra TendenciaH4=%s", ativo, bloqueados, th4)
         # Filtro M15: remove sinais contra o contexto M15 (exceto rejeicao_m1_hierarquico que já filtra internamente)
         if self.config.filtro_m15_ativo:
             ctx_m15 = self._contexto_m15.get(ativo, "lateral")
@@ -1367,6 +1407,15 @@ class EstrategiaReversaoM5:
                             nome, n,
                         )
                         self._estrategias_desativadas.add(nome)
+        # Filtro H4: remove reversões contra a tendência macro do H4
+        if self.config.filtro_h4_ativo:
+            th4 = self._tendencia_h4.get(ativo, "lateral")
+            if th4 != "lateral":
+                antes = len(resultado)
+                resultado = [d for d in resultado if self._h4_permite(ativo, d.direcao)]
+                bloqueados = antes - len(resultado)
+                if bloqueados:
+                    logger.info("[H4] %s: bloqueou %d reversão(ões) contra TendenciaH4=%s", ativo, bloqueados, th4)
         # Filtro M15: remove reversões contra o contexto M15
         if self.config.filtro_m15_ativo:
             ctx_m15 = self._contexto_m15.get(ativo, "lateral")

@@ -202,6 +202,13 @@ class Configuracao:
     h1_ema_periodo: int = 5                # EMA(5) no H1 ≈ tendência das últimas 5h
     h1_slope_janela: int = 3              # mede inclinação em 3 candles H1
 
+    # --- H4 context (filtro de tendência macro — bloqueia contra-tendência D1/H4) ---
+    filtro_h4_ativo: bool = False
+    h4_num_candles: int = 20               # candles H4 a buscar (~80h = ~2 semanas)
+    h4_atualizar_segundos: float = 14400.0 # refetch H4 a cada 4h (1 candle H4)
+    h4_ema_periodo: int = 9                # EMA(9) no H4 ≈ tendência das últimas ~36h
+    h4_slope_janela: int = 3              # mede inclinação em 3 candles H4
+
     # --- M15 context (contexto superior para nova estratégia M1 hierárquica) ---
     filtro_m15_ativo: bool = False
     m15_num_candles: int = 50              # ~12h de contexto M15
@@ -491,6 +498,8 @@ def configuracao_scalping_m15(base: Configuracao | None = None) -> Configuracao:
         macd_crossover_ativo=False,
         macd_crossover_tendencia_ativo=False,
         executar_estrategias_nao_validadas=True,
+        # Filtro H4: tendência macro bloqueia contra-tendência
+        filtro_h4_ativo=True,
         # Filtro H1: bloqueia entradas contra tendência do timeframe superior
         filtro_h1_ativo=True,
         # Filtro cruzamento EMA no pullback — bloqueia entrada quando micro < macro
@@ -558,7 +567,7 @@ def configuracao_scalping_m1(base: Configuracao | None = None) -> Configuracao:
         valor_por_ordem=5.0,
         timeframe_segundos=60,
         expiracao_minutos=2,  # 2 min — nova estratégia de rejeição M1 exige vela pra confirmar
-        ativos=("EURUSD", "GBPUSD"),
+        ativos=("EURUSD", "USDJPY"),
         entrada_max_segundos_no_candle=25,  # IQ leva 11-25s pra entregar dado; 15s bloqueava tudo
         min_segundos_ate_expiracao=5,       # default 120s bloquearia tudo (expiry curto no M1)
         cooldown_pos_ordem_por_ativo_candles=3,
@@ -577,7 +586,8 @@ def configuracao_scalping_m1(base: Configuracao | None = None) -> Configuracao:
         engulfing_sr_ativo=False,
         sr_rejeicao_ativo=False,
         executar_estrategias_nao_validadas=False,
-        # Hierarquia multi-timeframe: M15 contexto → M5 estrutura → M1 rejeição
+        # Hierarquia multi-timeframe: H4 macro → M15 contexto → M5 estrutura → M1 rejeição
+        filtro_h4_ativo=True,
         filtro_m15_ativo=True,
         filtro_h1_ativo=True,
         filtro_m5_ativo=True,

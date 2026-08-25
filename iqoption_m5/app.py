@@ -180,6 +180,7 @@ def main(config: Configuracao | None = None) -> None:
     ultimo_candle_processado = {ativo: None for ativo in config.ativos}
     _candle_guard = CandleGuard()  # deduplicação e validação de ordem/fechamento
     _cooldown_ativo: dict[str, float] = {}
+    _ultima_h4_por_ativo: dict[str, float] = {}
     _ultima_h1_por_ativo: dict[str, float] = {}
     _ultima_m5_por_ativo: dict[str, float] = {}
     _ultima_m15_por_ativo: dict[str, float] = {}
@@ -348,6 +349,18 @@ def main(config: Configuracao | None = None) -> None:
         print(f"[{datetime.now():%H:%M:%S}] [INICIO] {ativo}")
         indicadores = estrategia.calcular_indicadores(snapshot.candles, ativo)
 
+        # Contexto H4: atualiza tendência macro a cada 4h (1 candle H4).
+        if config.filtro_h4_ativo:
+            _agora_h4 = time.time()
+            if _agora_h4 - _ultima_h4_por_ativo.get(ativo, 0) >= config.h4_atualizar_segundos:
+                try:
+                    _candles_h4 = mercado.buscar_h4(ativo, config.h4_num_candles)
+                    _tendencia_h4 = estrategia.calcular_tendencia_h4(_candles_h4)
+                    estrategia.atualizar_contexto_h4(ativo, _tendencia_h4)
+                    _ultima_h4_por_ativo[ativo] = _agora_h4
+                    print(f"    [H4] {ativo}: TendenciaH4={_tendencia_h4}")
+                except Exception as _e_h4:
+                    print(f"    [H4] falha ao buscar H4 para {ativo}: {_e_h4}")
         # Contexto M5: atualiza estrutura direcional do M5 quando configurado.
         # Throttle: refetch só após m5_atualizar_segundos (padrão 5min = 1 candle M5).
         if config.filtro_m5_ativo:

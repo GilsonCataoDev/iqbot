@@ -113,6 +113,11 @@ class MercadoIQ:
             raise MercadoIndisponivel(f"Sem dados para {ativo} tf={tf}")
         return result[0]
 
+    def buscar_h4(self, ativo: str, n: int | None = None) -> pd.DataFrame:
+        """Busca N candles H4 sem stream (leitura pontual para tendência macro)."""
+        n = n if n is not None else self.config.h4_num_candles
+        return self._candles_para_df(self._buscar_com_timeout(ativo, 14400, n))
+
     def buscar_h1(self, ativo: str, n: int | None = None) -> pd.DataFrame:
         """Busca N candles H1 sem stream (leitura pontual para contexto H1)."""
         n = n if n is not None else self.config.h1_num_candles
