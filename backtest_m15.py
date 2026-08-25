@@ -17,8 +17,14 @@ M15, entao dao pra derivar dos proprios candles sem download extra — e o
 contexto e atualizado a cada passo, como o app faz. A expiracao respeita
 expiracao_por_setup.
 
-Anti-lookahead: no indice i so ha visibilidade ate i. Entrada na abertura de
-i+1 (igual ao bot); resolucao no fechamento do candle de expiracao.
+Indexacao: a janela termina em `i` e avaliar_todas confirma em len-2, ou seja
+no candle i-1. Logo entrada na abertura de i e expiracao em (i-1)+n_exp. Entrar
+em i+1 seria um candle tarde — foi exatamente esse deslocamento que produziu o
+bug de apuracao no executor (ver commit e1f5b8b).
+
+LIMITE CONHECIDO: setups de REVERSAO nao sao validaveis aqui. Ver SETUPS_REVERSAO.
+Como sr_rejeicao responde por ~71% dos sinais do M15 ao vivo, o backtest cobre
+apenas a minoria do que o bot realmente opera.
 
 Uso:
     python backtest_m15.py                  # baixa e roda
@@ -43,6 +49,13 @@ from iqoption_m5.estrategia import EstrategiaReversaoM5
 from iqoption_m5.mercado_iq import MercadoIQ
 
 AGG = {"Open": "first", "High": "max", "Low": "min", "Close": "last"}
+
+# Setups de REVERSAO sao avaliados por avaliar_reversoes() no indice len-1 — o
+# candle EM FORMACAO. Ao vivo a estrategia enxerga so o candle parcial; com dados
+# OHLC o backtest recebe o candle ja completo, Close incluso, e depois resolve
+# usando esse mesmo Close. E circular, e infla o WR (medido: 80% em sr_rejeicao).
+# Reproduzir o estado parcial exigiria dados de TICK. Ficam fora do agregado.
+SETUPS_REVERSAO = {"sr_rejeicao", "pin_bar_sr", "engulfing_sr", "fibo_sr_retracao"}
 
 
 def _resample(df: pd.DataFrame, regra: str) -> pd.DataFrame:
@@ -70,6 +83,7 @@ def rodar_ativo(args):
 
     for i in range(max(inicio, janela), len(candles) - 1):
         agora = candles.index[i]
+        conf_hora = candles.index[i - 1]
         win = candles.iloc[i - janela + 1: i + 1]
 
         # --- contexto multi-timeframe, como o app atualiza ao vivo ---
@@ -100,11 +114,17 @@ def rodar_ativo(args):
         d = decisoes[0]
         setup = str(d.detalhes.get("setup", d.motivo))
 
+        # A janela termina em `i`, e avaliar_todas confirma em len-2 -> candle i-1.
+        # Logo: confirmacao = i-1, entrada = candle i, expiracao = (i-1) + n_exp.
+        # Entrar em i+1 seria um candle tarde — o mesmo deslocamento que causou
+        # o bug de apuracao no executor.
         n_exp = _expiracao_candles(config, setup)
-        if i + n_exp >= len(candles):
+        i_conf = i - 1
+        i_saida = i_conf + n_exp
+        if i_saida >= len(candles) or i >= len(candles):
             continue
-        abertura = float(candles.iloc[i + 1]["Open"])       # entra na abertura do proximo
-        fechamento = float(candles.iloc[i + n_exp]["Close"])  # expira no fim do candle n
+        abertura = float(candles.iloc[i]["Open"])          # entra na abertura de i
+        fechamento = float(candles.iloc[i_saida]["Close"])  # expira no fim de (i-1)+n
         if fechamento == abertura:
             res = "empate"
         elif d.direcao == "call":
@@ -113,7 +133,7 @@ def rodar_ativo(args):
             res = "ganho" if fechamento < abertura else "perda"
 
         ops.append({
-            "ativo": ativo, "quando": agora, "direcao": d.direcao, "setup": setup,
+            "ativo": ativo, "quando": conf_hora, "entrada_em": agora, "direcao": d.direcao, "setup": setup,
             "exp_candles": n_exp, "entrada": abertura, "saida": fechamento, "res": res,
             "h4": est._tendencia_h4.get(ativo, "lateral"),
             "h1": est._tendencia_h1.get(ativo, "lateral"),
@@ -142,12 +162,17 @@ def linha(lbl: str, df: pd.DataFrame, payout: float) -> str:
             f"IC=[{lo:.0%},{hi:.0%}]")
 
 
-def relatorio(df: pd.DataFrame, payout: float, titulo: str):
+def relatorio(df_todos: pd.DataFrame, payout: float, titulo: str):
+    """O agregado considera SO os setups de continuacao — ver SETUPS_REVERSAO."""
     print("\n" + "=" * 74)
     print(titulo)
     print("=" * 74)
-    if df.empty:
+    if df_todos.empty:
         print("  sem sinais")
+        return
+    df = df_todos[~df_todos.setup.isin(SETUPS_REVERSAO)]
+    if df.empty:
+        print("  so setups de reversao — nao validaveis com OHLC (ver cabecalho)")
         return
     s = stats(df, payout)
     if s is None:
@@ -171,10 +196,25 @@ def relatorio(df: pd.DataFrame, payout: float, titulo: str):
     print(linha("1a metade", df[df.quando <= meio], payout))
     print(linha("2a metade", df[df.quando > meio], payout))
 
-    for col, nome in [("setup", "SETUP"), ("ativo", "PAR")]:
-        print(f"\n  --- por {nome} ---")
-        for k, g in sorted(df.groupby(col), key=lambda x: -(stats(x[1], payout) or [0, 0, -9e9])[2]):
-            print(linha(str(k), g, payout))
+    ordena = lambda x: -(stats(x[1], payout) or [0, 0, -9e9])[2]
+
+    print("\n  --- CONTINUACAO (confirmam no candle FECHADO: validaveis) ---")
+    for k, g in sorted(df.groupby("setup"), key=ordena):
+        print(linha(str(k), g, payout))
+
+    print("\n  --- por PAR (so continuacao) ---")
+    for k, g in sorted(df.groupby("ativo"), key=ordena):
+        print(linha(str(k), g, payout))
+
+    rev = df_todos[df_todos.setup.isin(SETUPS_REVERSAO)]
+    if not rev.empty:
+        print("\n  --- REVERSAO: NAO VALIDAVEL COM OHLC ---")
+        print("  *** Estes setups decidem sobre o candle EM FORMACAO. Com OHLC o")
+        print("  *** backtest ve o candle ja completo e usa o mesmo Close para")
+        print("  *** decidir e para resolver — circular. Exige dados de TICK.")
+        print("  *** Os numeros abaixo estao inflados. NAO use para decidir.")
+        for k, g in sorted(rev.groupby("setup"), key=ordena):
+            print(linha(str(k) + " [invalido]", g, payout))
 
 
 def main():
