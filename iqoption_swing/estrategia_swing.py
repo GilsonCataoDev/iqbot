@@ -149,10 +149,10 @@ class EstrategiaSwing:
         preco_atual = float(df.iloc[-1]["Close"])
         if tendencia == "alta":
             tocou = bool((recentes["Low"] <= zona_max + tol).any() and (recentes["High"] >= zona_min - tol).any())
-            ainda_proximo = preco_atual <= zona_max + atr * 1.5
+            ainda_proximo = preco_atual <= zona_max + atr * 0.5  # 0.5×ATR (era 1.5)
         else:
             tocou = bool((recentes["High"] >= zona_min - tol).any() and (recentes["Low"] <= zona_max + tol).any())
-            ainda_proximo = preco_atual >= zona_min - atr * 1.5
+            ainda_proximo = preco_atual >= zona_min - atr * 0.5  # 0.5×ATR (era 1.5)
         return tocou and ainda_proximo
 
     # -------------------------------------------------------------------------
@@ -357,14 +357,28 @@ class EstrategiaSwing:
         detalhes["rsi_h4"] = round(rsi_h4, 1)
 
         h1_ok = self._confirmacao_h1(df_h1, tendencia)
+        detalhes["h1_ok"] = h1_ok
 
         df_h4_ind = self._adicionar_indicadores(df_h4)
         preco_atual = float(df_h4_ind.iloc[-1]["Close"])
+        ema20_h4    = float(df_h4_ind["EMA20"].dropna().iloc[-1])
+        detalhes["ema20_h4"] = round(ema20_h4, 5)
+
+        # Filtro de preço vs EMA20 H4: para PUT o preço deve estar abaixo da EMA20;
+        # para CALL acima. Preço do lado errado = H4 contradiz D1 → bloqueia todos os setups.
+        preco_acima_ema20 = preco_atual > ema20_h4
+        if tendencia == "baixa" and preco_acima_ema20:
+            print(f"  [{ativo}] PUT bloqueado: preco={preco_atual:.5f} acima EMA20_H4={ema20_h4:.5f}")
+            return None
+        if tendencia == "alta" and not preco_acima_ema20:
+            print(f"  [{ativo}] CALL bloqueado: preco={preco_atual:.5f} abaixo EMA20_H4={ema20_h4:.5f}")
+            return None
 
         # --- Setup 1: Pullback em Tendência (Fibonacci) ---
+        # Exige estrutura H4 alinhada — sem ela o H4 está indo contra o D1.
         zona = self._zona_fibonacci_h4(df_h4, tendencia)
-        if zona is not None and self._toque_zona_h4(df_h4, zona, tendencia):
-            score = pontuacao_base + 4  # +2 zona fib + +2 toque
+        if zona is not None and estrutura_ok and self._toque_zona_h4(df_h4, zona, tendencia):
+            score = pontuacao_base + 4  # +2 zona fib + +2 toque (estrutura já soma nos pontos base)
             if h1_ok:
                 score += 1
             if rsi_ok:
@@ -376,14 +390,14 @@ class EstrategiaSwing:
                     direcao="call" if tendencia == "alta" else "put",
                     setup="pullback_tendencia",
                     pontuacao=score,
-                    detalhes={**detalhes, "zona_fib": zona, "tp_sr": tp_sr},
+                    detalhes={**detalhes, "zona_fib": list(zona), "tp_sr": tp_sr},
                 )
 
         # --- Setup 2: Divergência RSI H4 ---
-        if self._divergencia_rsi_h4(df_h4, tendencia):
-            score = pontuacao_base + 3  # divergência = sinal moderado
-            if h1_ok:
-                score += 1
+        # Exige H1 confirmação — divergência sem momentum H1 é sinal fraco.
+        if h1_ok and self._divergencia_rsi_h4(df_h4, tendencia):
+            score = pontuacao_base + 3
+            score += 1  # h1_ok já confirmado
             if rsi_ok:
                 score += 1
             tp_sr = self._tp_sr_alvo(df_h4, tendencia, preco_atual)
@@ -398,10 +412,8 @@ class EstrategiaSwing:
 
         # --- Setup 3: SR Rejeição ---
         nivel_sr = self._sr_proximo(df_h4, tendencia)
-        if nivel_sr is not None and rsi_ok:
-            score = pontuacao_base + 3
-            if h1_ok:
-                score += 1
+        if nivel_sr is not None and rsi_ok and h1_ok:
+            score = pontuacao_base + 3 + 1  # +1 h1_ok obrigatório
             tp_sr = self._tp_sr_alvo(df_h4, tendencia, preco_atual)
             if score >= self.config.pontuacao_minima:
                 return SinalSwing(
@@ -414,10 +426,8 @@ class EstrategiaSwing:
 
         # --- Setup 4: Breakout + Reteste ---
         nivel_br, retestou = self._breakout_reteste_h4(df_h4, tendencia)
-        if nivel_br is not None and retestou:
-            score = pontuacao_base + 3
-            if h1_ok:
-                score += 1
+        if nivel_br is not None and retestou and h1_ok:
+            score = pontuacao_base + 3 + 1  # +1 h1_ok obrigatório
             if rsi_ok:
                 score += 1
             tp_sr = self._tp_sr_alvo(df_h4, tendencia, preco_atual)
