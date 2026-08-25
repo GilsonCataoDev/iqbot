@@ -15,9 +15,11 @@ Uso:
 from __future__ import annotations
 
 import argparse
+import concurrent.futures as cf
 import contextlib
 import io as _io
 import math
+import os
 import pickle
 import sys
 from pathlib import Path
@@ -66,6 +68,40 @@ def baixar_h1(ativos, n_total=5000, chunk=1000):
     return out
 
 
+class EstrategiaSwingCache(EstrategiaSwing):
+    """Igual a EstrategiaSwing, mas memoiza _adicionar_indicadores.
+
+    No backtest o mesmo DataFrame e passado a ~2.4 metodos por avaliar(), e a
+    janela D1 fica identica por 6 candles H4 seguidos. Recalcular EMA/ATR/RSI/ADX
+    a cada chamada consome 94% do tempo. O cache devolve exatamente os mesmos
+    valores — nao altera nenhum resultado, so evita trabalho repetido.
+    """
+
+    _cache: dict = {}
+    _MAX = 64
+
+    @staticmethod
+    def _chave(df):
+        # index inicial/final + tamanho + 2 valores identificam a janela sem colisao
+        return (df.index[0], df.index[-1], len(df),
+                float(df["Close"].iloc[-1]), float(df["High"].iloc[0]))
+
+    @classmethod
+    def _adicionar_indicadores(cls, df):
+        try:
+            k = cls._chave(df)
+        except Exception:
+            return EstrategiaSwing._adicionar_indicadores(df)
+        hit = cls._cache.get(k)
+        if hit is not None:
+            return hit
+        out = EstrategiaSwing._adicionar_indicadores(df)
+        if len(cls._cache) >= cls._MAX:
+            cls._cache.clear()
+        cls._cache[k] = out
+        return out
+
+
 def resolver(df_h4_fut, direcao, sl, tp, max_cand=MAX_CANDLES_TRADE):
     """Percorre candles futuros ate bater SL ou TP. Retorna (resultado, n_candles).
 
@@ -87,57 +123,74 @@ def resolver(df_h4_fut, direcao, sl, tp, max_cand=MAX_CANDLES_TRADE):
     return "timeout", max_cand
 
 
-def rodar(h1_por_ativo, cfg, passo_h4=1):
-    est = EstrategiaSwing(cfg)
+def _rodar_ativo(args):
+    """Processa um par. Top-level para ser picklavel pelo ProcessPoolExecutor."""
+    ativo, h1, cfg, passo_h4 = args
+    est = EstrategiaSwingCache(cfg)
     trades = []
-    for ativo, h1 in h1_por_ativo.items():
-        h4 = h1.resample("4h").agg(AGG).dropna()
-        d1 = h1.resample("1D").agg(AGG).dropna()
-        if len(h4) < 80 or len(d1) < 60:
-            print(f"  {ativo}: historico curto (h4={len(h4)} d1={len(d1)}), pulando")
+    h4 = h1.resample("4h").agg(AGG).dropna()
+    d1 = h1.resample("1D").agg(AGG).dropna()
+    if len(h4) < 80 or len(d1) < 60:
+        print(f"  {ativo}: historico curto (h4={len(h4)} d1={len(d1)}), pulando")
+        return trades
+    inicio = max(60, cfg.h4_num_candles // 2)  # warmup dos indicadores
+    for i in range(inicio, len(h4) - 1, passo_h4):
+        agora = h4.index[i]
+        jan_h4 = h4.iloc[max(0, i - cfg.h4_num_candles + 1): i + 1]
+        jan_d1 = d1[d1.index <= agora].iloc[-cfg.d1_num_candles:]
+        jan_h1 = h1[h1.index <= agora].iloc[-cfg.h1_num_candles:]
+        if len(jan_d1) < 55 or len(jan_h1) < 20:
             continue
-        inicio = max(60, cfg.h4_num_candles // 2)  # warmup dos indicadores
-        for i in range(inicio, len(h4) - 1, passo_h4):
-            agora = h4.index[i]
-            jan_h4 = h4.iloc[max(0, i - cfg.h4_num_candles + 1): i + 1]
-            jan_d1 = d1[d1.index <= agora].iloc[-cfg.d1_num_candles:]
-            jan_h1 = h1[h1.index <= agora].iloc[-cfg.h1_num_candles:]
-            if len(jan_d1) < 55 or len(jan_h1) < 20:
-                continue
-            try:
-                # a estrategia loga cada bloqueio; no backtest isso inunda a saida
-                with contextlib.redirect_stdout(_io.StringIO()):
-                    sinal = est.avaliar(ativo, jan_d1, jan_h4, jan_h1)
-            except Exception:
-                continue
-            if sinal is None:
-                continue
-            ind = est._adicionar_indicadores(jan_h4)
-            serie_atr = ind["ATR"].dropna()
-            if serie_atr.empty:
-                continue
-            atr = float(serie_atr.iloc[-1])
-            entrada = float(jan_h4.iloc[-1]["Close"])
-            # mesma logica de executor_swing._calcular_sl_tp
-            zona = sinal.detalhes.get("zona_fib")
-            if zona and len(zona) == 2 and atr > 0:
-                buf = atr * 0.3
-                sl = float(zona[0]) - buf if sinal.direcao == "call" else float(zona[1]) + buf
-                sl_d = abs(entrada - sl)
-            else:
-                sl_d = atr * cfg.sl_atr_multiplo
-                sl = entrada - sl_d if sinal.direcao == "call" else entrada + sl_d
-            if sl_d <= 0:
-                continue
-            tp_d = sl_d * cfg.rr_ratio
-            tp = entrada + tp_d if sinal.direcao == "call" else entrada - tp_d
-            res, ncand = resolver(h4.iloc[i + 1:], sinal.direcao, sl, tp)
-            trades.append({
-                "ativo": ativo, "quando": agora, "direcao": sinal.direcao,
-                "setup": sinal.setup, "score": sinal.pontuacao,
-                "resultado": res, "candles": ncand,
-                "R": cfg.rr_ratio if res == "win" else (-1.0 if res == "loss" else 0.0),
-            })
+        try:
+            # a estrategia loga cada bloqueio; no backtest isso inunda a saida
+            with contextlib.redirect_stdout(_io.StringIO()):
+                sinal = est.avaliar(ativo, jan_d1, jan_h4, jan_h1)
+        except Exception:
+            continue
+        if sinal is None:
+            continue
+        ind = est._adicionar_indicadores(jan_h4)
+        serie_atr = ind["ATR"].dropna()
+        if serie_atr.empty:
+            continue
+        atr = float(serie_atr.iloc[-1])
+        entrada = float(jan_h4.iloc[-1]["Close"])
+        # mesma logica de executor_swing._calcular_sl_tp
+        zona = sinal.detalhes.get("zona_fib")
+        if zona and len(zona) == 2 and atr > 0:
+            buf = atr * 0.3
+            sl = float(zona[0]) - buf if sinal.direcao == "call" else float(zona[1]) + buf
+            sl_d = abs(entrada - sl)
+        else:
+            sl_d = atr * cfg.sl_atr_multiplo
+            sl = entrada - sl_d if sinal.direcao == "call" else entrada + sl_d
+        if sl_d <= 0:
+            continue
+        tp_d = sl_d * cfg.rr_ratio
+        tp = entrada + tp_d if sinal.direcao == "call" else entrada - tp_d
+        res, ncand = resolver(h4.iloc[i + 1:], sinal.direcao, sl, tp)
+        trades.append({
+            "ativo": ativo, "quando": agora, "direcao": sinal.direcao,
+            "setup": sinal.setup, "score": sinal.pontuacao,
+            "resultado": res, "candles": ncand,
+            "R": cfg.rr_ratio if res == "win" else (-1.0 if res == "loss" else 0.0),
+        })
+    return trades
+
+
+def rodar(h1_por_ativo, cfg, passo_h4=1, workers=None):
+    """Walk-forward sobre todos os pares. Pares sao independentes -> paraleliza."""
+    tarefas = [(a, h1, cfg, passo_h4) for a, h1 in h1_por_ativo.items()]
+    if workers is None:
+        workers = min(len(tarefas), (os.cpu_count() or 2))
+    trades = []
+    if workers <= 1 or len(tarefas) == 1:
+        for t in tarefas:
+            trades.extend(_rodar_ativo(t))
+    else:
+        with cf.ProcessPoolExecutor(max_workers=workers) as ex:
+            for parcial in ex.map(_rodar_ativo, tarefas):
+                trades.extend(parcial)
     return pd.DataFrame(trades)
 
 
@@ -177,6 +230,8 @@ def main():
     ap.add_argument("--candles", type=int, default=5000)
     ap.add_argument("--score-min", type=int, default=None)
     ap.add_argument("--rr", type=float, default=None)
+    ap.add_argument("--workers", type=int, default=None,
+                    help="processos paralelos (padrao: n de CPUs)")
     a = ap.parse_args()
 
     cache = Path(a.cache)
@@ -200,7 +255,7 @@ def main():
         kw["rr_ratio"] = a.rr
     cfg = SwingConfig(conta="PRACTICE", executar_ordens=False, ativos=PARES, **kw)
     print(f"[bt] rodando  score_min={cfg.pontuacao_minima}  R:R={cfg.rr_ratio}")
-    relatorio(rodar(h1, cfg), cfg)
+    relatorio(rodar(h1, cfg, workers=a.workers), cfg)
 
 
 if __name__ == "__main__":
