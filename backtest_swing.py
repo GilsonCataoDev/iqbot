@@ -211,7 +211,12 @@ def relatorio(df, cfg):
     if n:
         se = math.sqrt(wr * (1 - wr) / n)
         lo, hi = wr - 1.96 * se, wr + 1.96 * se
-        marca = "  <- contem breakeven: edge NAO provado" if lo <= be else "  <- edge PROVADO"
+        if hi < be:
+            marca = "  <- todo o IC abaixo do breakeven: edge NEGATIVO provado"
+        elif lo > be:
+            marca = "  <- todo o IC acima do breakeven: edge POSITIVO provado"
+        else:
+            marca = "  <- IC cruza o breakeven: inconclusivo, falta amostra"
         print(f"  IC95% do WR: [{lo:.1%}, {hi:.1%}]{marca}")
 
     for col, titulo in [("setup", "SETUP"), ("ativo", "PAR"), ("score", "SCORE")]:
