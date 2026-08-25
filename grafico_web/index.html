@@ -2,7 +2,7 @@
 <html lang="pt-BR">
 <head>
 <meta charset="UTF-8">
-<title>IQ Option M5 — sinais ao vivo</title>
+<title>IQ Option — sinais ao vivo</title>
 <script src="https://unpkg.com/lightweight-charts@4.1.3/dist/lightweight-charts.standalone.production.js"></script>
 <style>
   :root {
@@ -12,279 +12,473 @@
     --radius: 8px;
   }
   *, *::before, *::after { box-sizing: border-box; }
-  html, body { margin: 0; background: var(--bg); font-family: -apple-system, 'Segoe UI', Arial, sans-serif; color: var(--text); font-size: 13px; }
+  html, body { margin: 0; background: var(--bg); font-family: -apple-system, 'Segoe UI', Arial, sans-serif; color: var(--text); font-size: 13px; height: 100vh; overflow: hidden; }
 
   /* ── Top bar ── */
   #barra {
-    display: flex; flex-wrap: wrap; align-items: center; gap: 10px;
-    padding: 8px 16px; background: var(--surface); border-bottom: 1px solid var(--border);
-    position: sticky; top: 0; z-index: 10;
+    display: flex; flex-wrap: nowrap; align-items: center; gap: 8px;
+    padding: 6px 12px; background: var(--surface); border-bottom: 1px solid var(--border);
+    flex-shrink: 0; overflow: hidden;
   }
-  #barra-logo { font-weight: 700; font-size: 14px; color: var(--accent); letter-spacing: .02em; white-space: nowrap; }
+  #barra-logo { font-weight: 700; font-size: 14px; color: var(--accent); white-space: nowrap; flex-shrink: 0; }
   #ativo {
     background: var(--surface2); color: var(--text); border: 1px solid var(--border);
-    border-radius: 6px; padding: 5px 10px; font-size: 13px; cursor: pointer; outline: none;
-    transition: border-color .15s;
+    border-radius: 6px; padding: 4px 8px; font-size: 12px; cursor: pointer; outline: none; flex-shrink: 0;
   }
   #ativo:focus { border-color: var(--accent); }
-  #status { flex: 1; min-width: 180px; color: var(--muted); }
-  #camadas { display: flex; gap: 14px; color: var(--muted); }
-  #camadas label { display: flex; align-items: center; gap: 5px; cursor: pointer; white-space: nowrap; user-select: none; }
-  #camadas input[type=checkbox] { accent-color: var(--accent); cursor: pointer; }
+
+  /* sinal badge na top bar */
+  #sinal-badge {
+    display: none; align-items: center; gap: 5px; padding: 4px 10px;
+    border-radius: 6px; font-size: 12px; font-weight: 700; white-space: nowrap;
+    border: 1px solid; flex-shrink: 0;
+  }
+  #sinal-badge.call { background: rgba(63,185,80,.18); border-color: var(--green); color: var(--green); }
+  #sinal-badge.put  { background: rgba(248,81,73,.18);  border-color: var(--red);   color: var(--red);   }
+  #sinal-badge.aviso { background: rgba(227,179,65,.15); border-color: var(--yellow); color: var(--yellow); }
+  @keyframes pulse-badge { 0%,100% { opacity:1; } 50% { opacity:.65; } }
+  #sinal-badge.pulsando { animation: pulse-badge 1.2s ease-in-out infinite; }
+
+  /* countdown */
+  #countdown {
+    font-size: 12px; color: var(--muted); white-space: nowrap;
+    font-variant-numeric: tabular-nums; flex-shrink: 0;
+  }
+  #countdown.urgente { color: var(--red); font-weight: 700; }
+  #countdown.proximo { color: var(--yellow); font-weight: 600; }
+
+  #status { flex: 1; color: var(--muted); font-size: 11px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
+
+  /* controles */
+  #controles { display: flex; gap: 8px; align-items: center; flex-shrink: 0; }
+  #controles label { display: flex; align-items: center; gap: 4px; cursor: pointer; font-size: 11px; color: var(--muted); white-space: nowrap; user-select: none; }
+  #controles input[type=checkbox] { accent-color: var(--accent); cursor: pointer; }
+  .btn-icon {
+    background: var(--surface2); border: 1px solid var(--border); color: var(--muted);
+    border-radius: 5px; padding: 3px 7px; cursor: pointer; font-size: 13px;
+    transition: border-color .15s, color .15s;
+  }
+  .btn-icon:hover { border-color: var(--accent); color: var(--text); }
+  .btn-icon.ativo { border-color: var(--yellow); color: var(--yellow); }
 
   /* ── Asset strip ── */
   #resumo {
-    display: flex; flex-wrap: wrap; gap: 6px; padding: 6px 16px;
-    background: var(--bg); border-bottom: 1px solid var(--border);
+    display: flex; flex-wrap: wrap; gap: 5px; padding: 5px 12px;
+    background: var(--bg); border-bottom: 1px solid var(--border); flex-shrink: 0;
   }
   .resumo-item {
-    font-size: 11px; padding: 3px 10px; border-radius: 20px;
+    font-size: 11px; padding: 2px 8px; border-radius: 20px;
     background: var(--surface2); cursor: pointer; border: 1px solid transparent;
-    white-space: nowrap; transition: border-color .15s, background .15s;
+    white-space: nowrap; transition: border-color .15s;
   }
   .resumo-item:hover { background: #243047; }
   .resumo-item.ativo-selecionado { border-color: var(--yellow); color: var(--yellow); }
   .resumo-item.ativo-desligado { opacity: 0.3; }
-  .toggle-ativo { margin-right: 4px; cursor: pointer; accent-color: var(--green); }
+  .toggle-ativo { margin-right: 3px; cursor: pointer; accent-color: var(--green); }
   .resumo-label { pointer-events: none; }
 
-  /* ── Charts ── */
-  #chart-preco  { width: 100%; height: 50vh; }
-  #chart-volume { width: 100%; height: 10vh; }
-  #chart-rsi    { width: 100%; height: 20vh; }
-
-  /* ── Legend ── */
-  #legenda {
-    display: flex; flex-wrap: wrap; gap: 12px; padding: 6px 16px;
-    font-size: 11px; color: var(--muted); border-top: 1px solid var(--border);
-    background: var(--bg);
+  /* ── Layout principal: sidebar + charts ── */
+  #main {
+    display: flex; flex: 1; overflow: hidden;
+    min-height: 0;
   }
-  #legenda span { display: flex; align-items: center; gap: 5px; white-space: nowrap; }
-  .marca { display: inline-block; width: 10px; height: 10px; border-radius: 2px; }
 
-  /* ── Info panel ── */
-  #painel {
-    display: grid;
-    grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
-    gap: 10px; padding: 12px 16px;
-    background: var(--bg); border-bottom: 1px solid var(--border);
+  /* ── Sidebar ── */
+  #sidebar {
+    width: 240px; flex-shrink: 0; display: flex; flex-direction: column;
+    border-right: 1px solid var(--border); overflow-y: auto; background: var(--bg);
   }
   .cartao {
-    background: var(--surface); border: 1px solid var(--border);
-    border-radius: var(--radius); padding: 10px 12px;
-    transition: border-color .2s;
+    background: var(--surface); border-bottom: 1px solid var(--border);
+    padding: 10px 12px;
   }
-  .cartao:hover { border-color: #2d3b55; }
   .cartao h3 {
-    margin: 0 0 8px; font-size: 10px; letter-spacing: .06em;
+    margin: 0 0 6px; font-size: 10px; letter-spacing: .06em;
     text-transform: uppercase; color: var(--muted); font-weight: 700;
   }
-  .cartao ul { margin: 0; padding-left: 16px; font-size: 12px; line-height: 1.6; }
   .cartao p { margin: 0; font-size: 12px; color: var(--muted); }
+  .cartao ul { margin: 0; padding-left: 14px; font-size: 11px; line-height: 1.6; }
 
-  /* Alert card */
-  .cabecalho-alerta { font-size: 14px; font-weight: 700; margin-bottom: 6px; }
-  .selo-informativo {
-    display: inline-block; margin-left: 8px; padding: 2px 6px; border-radius: 4px;
-    background: rgba(110,121,137,0.18); color: var(--muted); font-size: 9px;
-    letter-spacing: 0; text-transform: none; font-weight: 700; vertical-align: middle;
+  /* cartão de sinal em destaque */
+  #cartao-sinal {
+    border-left: 3px solid transparent;
+    transition: border-color .3s, box-shadow .3s;
   }
-  .alerta-entrada { border-color: var(--yellow) !important; box-shadow: 0 0 0 1px rgba(227,179,65,.15); }
-  .alerta-aproximando { border-color: #c9973a !important; }
-  .rodape-alerta { margin-top: 6px; font-size: 11px; color: var(--muted); }
-  .nivel-entrada { margin-top: 8px; padding: 6px 8px; border-radius: 6px; background: var(--surface2); font-size: 13px; }
-  .nivel-entrada .rodape-alerta { margin: 0; display: inline; }
-  .aviso-noticia { margin-top: 6px; padding: 5px 7px; border-radius: 5px; background: rgba(58,42,18,.8); color: #ffcc80; font-size: 11px; }
-  .instrucao-timing { margin: 8px 0; padding: 10px 12px; border-radius: 6px; font-size: 14px; line-height: 1.5; }
-  .tempo-restante { font-size: 11px; opacity: 0.75; }
+  #cartao-sinal.call {
+    border-left-color: var(--green);
+    box-shadow: inset 0 0 0 1px rgba(63,185,80,.2);
+  }
+  #cartao-sinal.put {
+    border-left-color: var(--red);
+    box-shadow: inset 0 0 0 1px rgba(248,81,73,.2);
+  }
+  #cartao-sinal.aviso {
+    border-left-color: var(--yellow);
+    box-shadow: inset 0 0 0 1px rgba(227,179,65,.15);
+  }
+  @keyframes pulse-sinal { 0%,100% { opacity:1; } 50% { opacity:.7; } }
+  #cartao-sinal.pulsando { animation: pulse-sinal 1.3s ease-in-out infinite; }
 
-  /* News */
-  .noticia-linha { font-size: 12px; padding: 5px 0; border-bottom: 1px solid var(--border); }
-  .impacto-High { color: var(--red); font-weight: 600; }
-  .impacto-Medium { color: var(--yellow); }
-  .noticia-iminente { background: rgba(248,81,73,.1); padding: 4px 7px; border-radius: 5px; margin: 2px 0; animation: piscar 1.5s ease-in-out infinite; }
-  @keyframes piscar { 0%,100% { opacity: 1; } 50% { opacity: 0.55; } }
-  .noticia-recente { background: rgba(227,179,65,.08); padding: 4px 7px; border-radius: 5px; margin: 2px 0; }
-  .noticia-tag { display: block; font-size: 10px; font-weight: 700; color: var(--yellow); margin-top: 2px; }
-  .noticia-discurso { border-left: 3px solid var(--red); padding-left: 6px; }
-  .noticia-tag-discurso { color: var(--red); }
-  .noticia-tempo { white-space: nowrap; font-weight: 600; }
-  .noticia-cabecalho { display: flex; justify-content: space-between; gap: 10px; }
-  .noticia-detalhe { font-size: 11px; color: var(--muted); margin-top: 2px; }
-  .noticia-sugestao { font-size: 11px; margin-top: 2px; padding: 3px 7px; background: var(--surface2); border-radius: 4px; }
+  .sinal-direcao {
+    font-size: 22px; font-weight: 800; letter-spacing: .02em;
+    margin: 4px 0;
+  }
+  .sinal-direcao.call { color: var(--green); }
+  .sinal-direcao.put  { color: var(--red); }
+  .sinal-direcao.aviso { color: var(--yellow); }
+  .sinal-setup { font-size: 11px; color: var(--muted); margin-bottom: 4px; }
+  .sinal-preco { font-size: 14px; font-family: monospace; }
+  .sinal-fatores { font-size: 10px; color: var(--muted); margin-top: 4px; }
 
-  /* AI */
-  .ia-resultado { margin-top: 6px; padding: 6px 8px; background: var(--surface2); border-radius: 6px; font-size: 13px; }
-  #cartao-ia { border-left: 3px solid var(--purple); }
-
-  /* Setup performance */
-  .setup-linha { padding: 4px 0; border-bottom: 1px solid #1a2035; font-size: 11px; }
-  .setup-linha:last-child { border-bottom: none; }
-  .setup-validada { border-left: 3px solid var(--yellow); padding-left: 6px; }
-  .setup-simulada { opacity: 0.75; }
-  .setup-detalhe { font-size: 10px; color: var(--muted); margin-top: 1px; }
-  #cartao-estrategias { max-height: 240px; overflow-y: auto; }
-
-  /* Entradas detalhadas */
-  #cartao-entradas { max-height: 320px; overflow-y: auto; }
-  .entrada-item { padding: 6px 0; border-bottom: 1px solid #1a2035; font-size: 11px; }
-  .entrada-item:last-child { border-bottom: none; }
-  .entrada-cabecalho { display: flex; align-items: center; gap: 6px; margin-bottom: 3px; }
-  .entrada-hora { color: var(--muted); font-variant-numeric: tabular-nums; min-width: 38px; }
-  .entrada-ativo { font-weight: 600; }
-  .entrada-dir-call { color: var(--green); font-weight: 700; }
-  .entrada-dir-put  { color: var(--red);   font-weight: 700; }
-  .entrada-setup { background: #1c2233; border-radius: 3px; padding: 1px 5px; color: var(--muted); font-size: 10px; }
-  .entrada-status-aberta   { color: #42a5f5; font-size: 10px; }
-  .entrada-status-ganho    { color: var(--green); font-size: 10px; }
-  .entrada-status-perda    { color: var(--red);   font-size: 10px; }
-  .entrada-status-outro    { color: var(--muted); font-size: 10px; }
-  .entrada-motivos { padding-left: 44px; color: var(--muted); font-size: 10px; line-height: 1.5; }
-
-  /* Stats card */
-  #cartao-stats { border-left: 3px solid var(--green); }
+  /* stats compacto */
   .stats-row {
-    display: flex; align-items: center; gap: 8px;
-    padding: 5px 0; border-bottom: 1px solid #1a2035; font-size: 12px;
+    display: flex; align-items: center; gap: 6px;
+    padding: 4px 0; border-bottom: 1px solid #1a2035; font-size: 11px;
   }
   .stats-row:last-child { border-bottom: none; }
-  .stats-label { color: var(--muted); font-size: 11px; font-weight: 600; letter-spacing: .03em; min-width: 48px; }
-  .stats-bar-wrap { flex: 1; height: 4px; background: #1c2233; border-radius: 2px; overflow: hidden; }
-  .stats-bar { height: 100%; border-radius: 2px; transition: width .4s ease; }
-  .stats-nums { font-size: 11px; white-space: nowrap; }
+  .stats-label { color: var(--muted); font-size: 10px; font-weight: 600; min-width: 44px; }
+  .stats-bar-wrap { flex: 1; height: 3px; background: #1c2233; border-radius: 2px; overflow: hidden; }
+  .stats-bar { height: 100%; border-radius: 2px; transition: width .4s; }
+  .stats-nums { font-size: 10px; white-space: nowrap; }
   .win-color { color: var(--green); }
   .loss-color { color: var(--red); }
+
+  /* entradas compactas */
+  #cartao-entradas { max-height: 200px; overflow-y: auto; }
+  .entrada-item { padding: 4px 0; border-bottom: 1px solid #1a2035; font-size: 11px; }
+  .entrada-item:last-child { border-bottom: none; }
+  .entrada-cabecalho { display: flex; align-items: center; gap: 5px; }
+  .entrada-hora { color: var(--muted); font-variant-numeric: tabular-nums; min-width: 34px; font-size: 10px; }
+  .entrada-ativo { font-weight: 600; font-size: 11px; }
+  .entrada-dir-call { color: var(--green); font-weight: 700; font-size: 10px; }
+  .entrada-dir-put  { color: var(--red);   font-weight: 700; font-size: 10px; }
+  .entrada-setup { background: #1c2233; border-radius: 3px; padding: 1px 4px; color: var(--muted); font-size: 9px; }
+  .entrada-status-aberta   { color: #42a5f5; font-size: 10px; margin-left: auto; }
+  .entrada-status-ganho    { color: var(--green); font-size: 10px; margin-left: auto; }
+  .entrada-status-perda    { color: var(--red);   font-size: 10px; margin-left: auto; }
+  .entrada-status-outro    { color: var(--muted); font-size: 10px; margin-left: auto; }
+
+  /* cartão extra expansível */
+  #cartao-extra { cursor: pointer; user-select: none; }
+  #extra-corpo { display: none; }
+  #cartao-extra.aberto #extra-corpo { display: block; }
+  #extra-toggle { float: right; color: var(--accent); font-size: 11px; }
+
+  /* notícias */
+  .noticia-linha { font-size: 11px; padding: 4px 0; border-bottom: 1px solid var(--border); }
+  .impacto-High { color: var(--red); font-weight: 600; }
+  .impacto-Medium { color: var(--yellow); }
+  @keyframes piscar { 0%,100% { opacity: 1; } 50% { opacity: 0.55; } }
+  .noticia-iminente { background: rgba(248,81,73,.1); padding: 3px 6px; border-radius: 4px; margin: 2px 0; animation: piscar 1.5s ease-in-out infinite; }
+  .noticia-recente  { background: rgba(227,179,65,.08); padding: 3px 6px; border-radius: 4px; margin: 2px 0; }
+  .noticia-tag { display: block; font-size: 9px; font-weight: 700; color: var(--yellow); margin-top: 1px; }
+  .noticia-cabecalho { display: flex; justify-content: space-between; gap: 6px; }
+  .noticia-tempo { white-space: nowrap; font-weight: 600; font-size: 10px; }
+
+  /* setup performance */
+  .setup-linha { padding: 3px 0; border-bottom: 1px solid #1a2035; font-size: 11px; }
+  .setup-linha:last-child { border-bottom: none; }
+  .setup-detalhe { font-size: 9px; color: var(--muted); margin-top: 1px; }
+  .setup-validada { border-left: 2px solid var(--yellow); padding-left: 5px; }
+
+  /* ── Charts area ── */
+  #charts-area {
+    flex: 1; display: flex; flex-direction: column; overflow: hidden; min-width: 0;
+  }
+  #chart-preco  { flex: 6; min-height: 0; }
+  #chart-volume { flex: 1; min-height: 0; }
+  #chart-rsi    { flex: 2; min-height: 0; }
+
+  /* ── Legenda ── */
+  #legenda {
+    display: flex; flex-wrap: wrap; gap: 8px; padding: 4px 12px;
+    font-size: 10px; color: var(--muted); border-top: 1px solid var(--border);
+    background: var(--bg); flex-shrink: 0;
+  }
+  #legenda span { display: flex; align-items: center; gap: 4px; white-space: nowrap; }
+  .marca { display: inline-block; width: 8px; height: 8px; border-radius: 2px; }
+
+  /* ── Toast de novo sinal ── */
+  #toast {
+    position: fixed; top: 14px; left: 50%; transform: translateX(-50%);
+    z-index: 9999; display: none;
+    padding: 12px 20px; border-radius: 10px;
+    font-size: 16px; font-weight: 700;
+    box-shadow: 0 4px 24px rgba(0,0,0,.5);
+    border: 1px solid; text-align: center;
+    min-width: 220px;
+  }
+  #toast.call { background: rgba(13,20,13,.95); border-color: var(--green); color: var(--green); }
+  #toast.put  { background: rgba(20,13,13,.95); border-color: var(--red);   color: var(--red); }
+  @keyframes slideDown { from { opacity:0; transform: translateX(-50%) translateY(-16px); } to { opacity:1; transform: translateX(-50%) translateY(0); } }
+  @keyframes fadeOut  { from { opacity:1; } to { opacity:0; } }
+
+  /* ── Zona pre-sinal (overlay futuro) ── */
+  .selo-informativo {
+    display: inline-block; margin-left: 6px; padding: 1px 5px; border-radius: 3px;
+    background: rgba(110,121,137,.18); color: var(--muted); font-size: 9px;
+    text-transform: none; font-weight: 700;
+  }
+
+  /* ── Responsive ── */
+  @media (max-width: 700px) {
+    html, body { overflow: auto; height: auto; }
+    #main { flex-direction: column; overflow: visible; }
+    #sidebar { width: 100%; border-right: none; border-bottom: 1px solid var(--border); max-height: none; overflow: visible; }
+    #charts-area { height: 80vh; }
+    #barra { flex-wrap: wrap; }
+  }
 </style>
 </head>
 <body>
-  <div id="barra">
-    <span id="barra-logo">IQ M5</span>
-    <select id="ativo"><option>carregando...</option></select>
-    <div id="status">Conectando...</div>
-    <div id="camadas">
-      <label><input type="checkbox" id="camada-bandas" checked> Bandas</label>
-      <label><input type="checkbox" id="camada-ema"> EMAs</label>
-      <label><input type="checkbox" id="camada-niveis" checked> Suporte/Resist.</label>
-      <label><input type="checkbox" id="camada-fib"> Fibonacci</label>
+
+<!-- ── Floating toast ── -->
+<div id="toast"></div>
+
+<!-- ── Top bar ── -->
+<div id="barra">
+  <span id="barra-logo">IQ M5</span>
+  <select id="ativo"><option>carregando...</option></select>
+  <div id="sinal-badge"></div>
+  <div id="countdown">⏱ --:--</div>
+  <div id="status">Conectando...</div>
+  <div id="controles">
+    <label><input type="checkbox" id="camada-bandas" checked> Bandas</label>
+    <label><input type="checkbox" id="camada-ema"> EMAs</label>
+    <label><input type="checkbox" id="camada-niveis" checked> S/R</label>
+    <label><input type="checkbox" id="camada-fib"> Fib</label>
+    <button class="btn-icon" id="btn-som" title="Ativar/desativar som nos sinais">🔕</button>
+  </div>
+</div>
+
+<!-- ── Asset strip ── -->
+<div id="resumo"></div>
+
+<!-- ── Layout principal ── -->
+<div id="main">
+
+  <!-- ── Sidebar ── -->
+  <div id="sidebar">
+
+    <!-- Sinal em destaque -->
+    <div class="cartao" id="cartao-sinal">
+      <h3>Próximo sinal <span class="selo-informativo" id="sinal-nota">aguardando</span></h3>
+      <p id="sinal-vazio" style="color:var(--muted)">Sem sinal no momento.</p>
+      <div id="sinal-corpo" style="display:none">
+        <div class="sinal-direcao" id="sinal-dir"></div>
+        <div class="sinal-setup" id="sinal-setup"></div>
+        <div class="sinal-preco" id="sinal-preco"></div>
+        <div class="sinal-fatores" id="sinal-fat"></div>
+      </div>
     </div>
-  </div>
-  <div id="resumo"></div>
-  <div id="painel">
-    <div class="cartao" id="cartao-alerta"><h3>Alerta <span class="selo-informativo">SÓ AVISO — NÃO EXECUTA ORDEM</span></h3><p>Aguardando dados...</p></div>
-    <div class="cartao" id="cartao-motivo"><h3>Por que o robô sinalizou</h3><p>Sem sinal no último candle.</p></div>
-    <div class="cartao" id="cartao-noticias"><h3>Notícias do dia</h3><p>Carregando...</p></div>
-    <div class="cartao" id="cartao-ia"><h3>Opiniao da IA</h3><p>Aguardando sinal para analisar...</p></div>
-    <div class="cartao" id="cartao-estrategias"><h3>Reversão (validada) vs Pullback/Bollinger (não validadas)</h3><p>Sem operações suficientes ainda.</p></div>
-    <div class="cartao" id="cartao-funil"><h3>Funil de sinais hoje (reversão de vela)</h3><p>Sem dados ainda hoje.</p></div>
-    <div class="cartao" id="cartao-stats"><h3>Entradas hoje</h3><p>Sem dados ainda.</p></div>
-    <div class="cartao" id="cartao-entradas"><h3>Detalhes das entradas</h3><p>Sem entradas hoje ainda.</p></div>
-  </div>
-  <div id="chart-preco"></div>
-  <div id="chart-volume"></div>
-  <div id="chart-rsi"></div>
-  <div id="legenda">
-    <span><span class="marca" style="background:#26a69a"></span>▲ sinal de compra</span>
-    <span><span class="marca" style="background:#ef5350"></span>▼ sinal de venda</span>
-    <span><span class="marca" style="background:#80cbc4;border-radius:50%"></span>● pullback (a favor da tendência)</span>
-    <span><span class="marca" style="background:#ffd700"></span>▲▼ confluência (pullback + fibo/suporte)</span>
-    <span><span class="marca" style="background:#ffd54f"></span>■ entrada próxima (aviso antecipado)</span>
-    <span><span class="marca" style="background:#42a5f5;border-radius:50%"></span>operação IQ PRACTICE (verde=ganhou, vermelho=perdeu)</span>
+
+    <!-- Stats hoje -->
+    <div class="cartao" id="cartao-stats">
+      <h3>Entradas hoje</h3>
+      <p>Sem entradas registradas ainda.</p>
+    </div>
+
+    <!-- Entradas detalhadas -->
+    <div class="cartao" id="cartao-entradas">
+      <h3>Detalhes</h3>
+      <p>Sem entradas hoje ainda.</p>
+    </div>
+
+    <!-- Expansível: noticias, IA, estratégias, funil -->
+    <div class="cartao" id="cartao-extra" onclick="toggleExtra()">
+      <h3>Mais info <span id="extra-toggle">▼ expandir</span></h3>
+      <div id="extra-corpo">
+        <div style="padding:6px 0 4px;border-bottom:1px solid var(--border);margin-bottom:6px">
+          <div style="font-size:10px;font-weight:700;letter-spacing:.06em;text-transform:uppercase;color:var(--muted);margin-bottom:4px">Notícias</div>
+          <div id="noticias-corpo"><p>Carregando...</p></div>
+        </div>
+        <div style="padding:6px 0 4px;border-bottom:1px solid var(--border);margin-bottom:6px">
+          <div style="font-size:10px;font-weight:700;letter-spacing:.06em;text-transform:uppercase;color:var(--muted);margin-bottom:4px">IA</div>
+          <div id="ia-corpo"><p>Aguardando sinal...</p></div>
+        </div>
+        <div style="padding:6px 0 4px;border-bottom:1px solid var(--border);margin-bottom:6px">
+          <div style="font-size:10px;font-weight:700;letter-spacing:.06em;text-transform:uppercase;color:var(--muted);margin-bottom:4px">Por setup</div>
+          <div id="estrategias-corpo"><p>Sem dados.</p></div>
+        </div>
+        <div style="padding:6px 0 4px">
+          <div style="font-size:10px;font-weight:700;letter-spacing:.06em;text-transform:uppercase;color:var(--muted);margin-bottom:4px">Funil de sinais</div>
+          <div id="funil-corpo"><p>Sem dados.</p></div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Por que sinalizou -->
+    <div class="cartao" id="cartao-motivo">
+      <h3>Último sinal — motivo</h3>
+      <p>Sem sinal no último candle.</p>
+    </div>
+
+  </div><!-- /sidebar -->
+
+  <!-- ── Charts ── -->
+  <div id="charts-area">
+    <div id="chart-preco"></div>
+    <div id="chart-volume"></div>
+    <div id="chart-rsi"></div>
   </div>
 
+</div><!-- /main -->
+
+<!-- ── Legenda ── -->
+<div id="legenda">
+  <span><span class="marca" style="background:#26a69a"></span>▲ CALL (sinal)</span>
+  <span><span class="marca" style="background:#ef5350"></span>▼ PUT (sinal)</span>
+  <span><span class="marca" style="background:#80cbc4;border-radius:50%"></span>● pullback</span>
+  <span><span class="marca" style="background:#ffd700"></span>▲▼ confluência</span>
+  <span><span class="marca" style="background:#ffd54f"></span>■ sinal próximo</span>
+  <span><span class="marca" style="background:#42a5f5;border-radius:50%"></span>● ordem real</span>
+</div>
+
 <script>
+// ── Estado global ──
 const params = new URLSearchParams(window.location.search);
-const fonte = params.get('fonte') || 'binance';   // qual monitor está servindo essa página: binance | iqoption
-const CHAVE_LOCALSTORAGE = `monitor_ativo_selecionado_${fonte}`;
+const fonte = params.get('fonte') || 'binance';
+const CHAVE_LS = `monitor_ativo_selecionado_${fonte}`;
 let ativoAtual = null;
 let listaAtivos = [];
 let atualizando = false;
 let resumoAtualizando = false;
 let ultimoStatusValido = '';
+let somAtivo = false;
+let ultimoSinalId = null;      // para detectar novo sinal
+let tfSegundos = 900;          // atualizado pela api
+let ultimoAtualizadoEm = null; // timestamp servidor do ultimo update
 
-async function buscarJson(url, timeoutMs = 2500) {
-  const controlador = new AbortController();
-  const timer = setTimeout(() => controlador.abort(), timeoutMs);
+// ── Web Audio ──
+let audioCtx = null;
+function _audioCtx() {
+  if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+  return audioCtx;
+}
+function beep(freq = 880, dur = 0.18, gain = 0.3) {
   try {
-    const resp = await fetch(url, { signal: controlador.signal });
-    if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
-    return await resp.json();
-  } finally {
-    clearTimeout(timer);
-  }
+    const ctx = _audioCtx();
+    const osc = ctx.createOscillator();
+    const g   = ctx.createGain();
+    osc.connect(g); g.connect(ctx.destination);
+    osc.type = 'sine'; osc.frequency.value = freq;
+    g.gain.setValueAtTime(gain, ctx.currentTime);
+    g.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + dur);
+    osc.start(); osc.stop(ctx.currentTime + dur);
+  } catch(e) {}
+}
+function alertaSom(direcao) {
+  if (!somAtivo) return;
+  if (direcao === 'call') { beep(880, 0.15); setTimeout(() => beep(1100, 0.15), 180); }
+  else                    { beep(660, 0.15); setTimeout(() => beep(550, 0.15), 180); }
 }
 
+document.getElementById('btn-som').addEventListener('click', () => {
+  somAtivo = !somAtivo;
+  const btn = document.getElementById('btn-som');
+  btn.textContent = somAtivo ? '🔔' : '🔕';
+  btn.classList.toggle('ativo', somAtivo);
+  if (somAtivo) beep(880, 0.1, 0.2); // feedback
+});
+
+// ── Toggle extra ──
+function toggleExtra() {
+  const el = document.getElementById('cartao-extra');
+  const tog = document.getElementById('extra-toggle');
+  el.classList.toggle('aberto');
+  tog.textContent = el.classList.contains('aberto') ? '▲ fechar' : '▼ expandir';
+}
+
+// ── Toast ──
+let toastTimer = null;
+function mostrarToast(texto, cls) {
+  const t = document.getElementById('toast');
+  t.className = cls; t.textContent = texto; t.style.display = 'block';
+  t.style.animation = 'slideDown .25s ease forwards';
+  if (toastTimer) clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => {
+    t.style.animation = 'fadeOut .4s ease forwards';
+    setTimeout(() => { t.style.display = 'none'; t.style.animation = ''; }, 400);
+  }, 5000);
+}
+
+// ── Countdown ──
+function atualizarCountdown() {
+  if (!ultimoAtualizadoEm || !tfSegundos) return;
+  const agora = Date.now() / 1000;
+  const elapsed = agora - ultimoAtualizadoEm;
+  const restante = Math.max(0, tfSegundos - (elapsed % tfSegundos));
+  const min = Math.floor(restante / 60);
+  const seg = Math.floor(restante % 60);
+  const texto = `⏱ ${min}:${seg.toString().padStart(2,'0')}`;
+  const el = document.getElementById('countdown');
+  el.textContent = texto;
+  el.className = restante < 15 ? 'urgente' : (restante < 45 ? 'proximo' : '');
+}
+setInterval(atualizarCountdown, 500);
+
+// ── Fetch ──
+async function buscarJson(url, ms = 2500) {
+  const ctl = new AbortController();
+  const t = setTimeout(() => ctl.abort(), ms);
+  try {
+    const r = await fetch(url, { signal: ctl.signal });
+    if (!r.ok) throw new Error(`HTTP ${r.status}`);
+    return await r.json();
+  } finally { clearTimeout(t); }
+}
+
+// ── Charts setup ──
 const opcoesComuns = {
   layout: { background: { color: '#131722' }, textColor: '#d1d4dc' },
-  grid: { vertLines: { color: '#222633' }, horzLines: { color: '#222633' } },
+  grid: { vertLines: { color: '#1e2438' }, horzLines: { color: '#1e2438' } },
   timeScale: { timeVisible: true, secondsVisible: false },
   crosshair: { mode: LightweightCharts.CrosshairMode.Normal },
+  handleScroll: true, handleScale: true,
 };
 
-const chartPreco = LightweightCharts.createChart(document.getElementById('chart-preco'), {
-  ...opcoesComuns,
-  width: document.getElementById('chart-preco').clientWidth,
-  height: document.getElementById('chart-preco').clientHeight,
-});
-const chartVolume = LightweightCharts.createChart(document.getElementById('chart-volume'), {
-  ...opcoesComuns,
-  width: document.getElementById('chart-volume').clientWidth,
-  height: document.getElementById('chart-volume').clientHeight,
-  timeScale: { visible: false },
-});
-const chartRsi = LightweightCharts.createChart(document.getElementById('chart-rsi'), {
-  ...opcoesComuns,
-  width: document.getElementById('chart-rsi').clientWidth,
-  height: document.getElementById('chart-rsi').clientHeight,
-});
+const chartPreco  = LightweightCharts.createChart(document.getElementById('chart-preco'),  { ...opcoesComuns });
+const chartVolume = LightweightCharts.createChart(document.getElementById('chart-volume'), { ...opcoesComuns, timeScale: { visible: false } });
+const chartRsi    = LightweightCharts.createChart(document.getElementById('chart-rsi'),    { ...opcoesComuns });
 
-const serieCandle = chartPreco.addCandlestickSeries({
-  upColor: '#26a69a', downColor: '#ef5350',
-  borderVisible: false, wickUpColor: '#26a69a', wickDownColor: '#ef5350',
-});
-let _linhaEntradaAtiva = null; // referência à linha de entrada em aberto
-const serieBandaSup = chartPreco.addLineSeries({ color: '#787b86', lineWidth: 1, lineStyle: LightweightCharts.LineStyle.Dashed });
-const serieBandaInf = chartPreco.addLineSeries({ color: '#787b86', lineWidth: 1, lineStyle: LightweightCharts.LineStyle.Dashed });
-const serieBandaMedia = chartPreco.addLineSeries({ color: '#787b86', lineWidth: 1, lineStyle: LightweightCharts.LineStyle.Dotted });
-const serieEmaMicro = chartPreco.addLineSeries({ color: '#ffb74d', lineWidth: 1, title: 'EMA micro', visible: false });
-const serieEmaMacro = chartPreco.addLineSeries({ color: '#42a5f5', lineWidth: 2, title: 'EMA macro', visible: false });
+const serieCandle  = chartPreco.addCandlestickSeries({ upColor: '#26a69a', downColor: '#ef5350', borderVisible: false, wickUpColor: '#26a69a', wickDownColor: '#ef5350' });
+let _linhaEntradaAtiva = null;
+const serieBandaSup  = chartPreco.addLineSeries({ color: '#4a5568', lineWidth: 1, lineStyle: LightweightCharts.LineStyle.Dashed });
+const serieBandaInf  = chartPreco.addLineSeries({ color: '#4a5568', lineWidth: 1, lineStyle: LightweightCharts.LineStyle.Dashed });
+const serieBandaMedia= chartPreco.addLineSeries({ color: '#4a5568', lineWidth: 1, lineStyle: LightweightCharts.LineStyle.Dotted });
+const serieEmaMicro  = chartPreco.addLineSeries({ color: '#ffb74d', lineWidth: 1, title: 'EMA micro', visible: false });
+const serieEmaMacro  = chartPreco.addLineSeries({ color: '#42a5f5', lineWidth: 2, title: 'EMA macro', visible: false });
+const serieVolume    = chartVolume.addHistogramSeries({ priceFormat: { type: 'volume' } });
+const serieRsi       = chartRsi.addLineSeries({ color: '#b388ff', lineWidth: 1 });
+const serieRsi70     = chartRsi.addLineSeries({ color: '#ef5350', lineWidth: 1, lineStyle: LightweightCharts.LineStyle.Dashed });
+const serieRsi30     = chartRsi.addLineSeries({ color: '#26a69a', lineWidth: 1, lineStyle: LightweightCharts.LineStyle.Dashed });
 
-const serieVolume = chartVolume.addHistogramSeries({ priceFormat: { type: 'volume' } });
-
-const serieRsi = chartRsi.addLineSeries({ color: '#b388ff', lineWidth: 1 });
-const serieRsi70 = chartRsi.addLineSeries({ color: '#ef5350', lineWidth: 1, lineStyle: LightweightCharts.LineStyle.Dashed });
-const serieRsi30 = chartRsi.addLineSeries({ color: '#26a69a', lineWidth: 1, lineStyle: LightweightCharts.LineStyle.Dashed });
-
-// sincroniza pan/zoom entre os três gráficos
 function sincronizarRange(origem, destinos) {
   origem.timeScale().subscribeVisibleLogicalRangeChange(range => {
     if (range) destinos.forEach(d => d.timeScale().setVisibleLogicalRange(range));
   });
 }
-sincronizarRange(chartPreco, [chartVolume, chartRsi]);
-sincronizarRange(chartVolume, [chartPreco, chartRsi]);
-sincronizarRange(chartRsi, [chartPreco, chartVolume]);
+sincronizarRange(chartPreco,  [chartVolume, chartRsi]);
+sincronizarRange(chartVolume, [chartPreco,  chartRsi]);
+sincronizarRange(chartRsi,    [chartPreco,  chartVolume]);
 
-window.addEventListener('resize', () => {
-  chartPreco.resize(document.getElementById('chart-preco').clientWidth, document.getElementById('chart-preco').clientHeight);
-  chartVolume.resize(document.getElementById('chart-volume').clientWidth, document.getElementById('chart-volume').clientHeight);
-  chartRsi.resize(document.getElementById('chart-rsi').clientWidth, document.getElementById('chart-rsi').clientHeight);
+const ro = new ResizeObserver(() => {
+  [['chart-preco', chartPreco], ['chart-volume', chartVolume], ['chart-rsi', chartRsi]].forEach(([id, c]) => {
+    const el = document.getElementById(id);
+    if (el) c.resize(el.clientWidth, el.clientHeight);
+  });
 });
+ro.observe(document.getElementById('charts-area'));
 
 let primeiraCarga = true;
-let linhasNiveis = [];
-let linhasFib = [];
-let linhaEntrada = null;
-let linhasGatilho = [];
+let linhasNiveis = [], linhasFib = [], linhaEntrada = null, linhasGatilho = [];
 
-const CORES_FIB = {
-  0: '#787b86', 0.236: '#e0b040', 0.382: '#e08040', 0.5: '#d1d4dc',
-  0.618: '#40b0e0', 0.786: '#a040e0', 1: '#787b86',
-};
+const CORES_FIB = { 0:'#787b86', 0.236:'#e0b040', 0.382:'#e08040', 0.5:'#d1d4dc', 0.618:'#40b0e0', 0.786:'#a040e0', 1:'#787b86' };
 
 const chkBandas = document.getElementById('camada-bandas');
-const chkEma = document.getElementById('camada-ema');
+const chkEma    = document.getElementById('camada-ema');
 const chkNiveis = document.getElementById('camada-niveis');
-const chkFib = document.getElementById('camada-fib');
+const chkFib    = document.getElementById('camada-fib');
 [chkBandas, chkEma, chkNiveis, chkFib].forEach(chk => chk.addEventListener('change', () => {
   serieBandaSup.applyOptions({ visible: chkBandas.checked });
   serieBandaInf.applyOptions({ visible: chkBandas.checked });
@@ -295,89 +489,57 @@ const chkFib = document.getElementById('camada-fib');
 }));
 
 function selecionarAtivo(id) {
-  ativoAtual = id;
+  ativoAtual = id; primeiraCarga = true;
   document.getElementById('ativo').value = id;
-  localStorage.setItem(CHAVE_LOCALSTORAGE, id);
-  primeiraCarga = true;
-  atualizar();
-  atualizarResumo();
+  localStorage.setItem(CHAVE_LS, id);
+  atualizar(); atualizarResumo();
 }
 
 async function carregarManifesto() {
   const select = document.getElementById('ativo');
   try {
-    const resp = await fetch(`${fonte}/manifest.json?_=` + Date.now());
-    const manifesto = await resp.json();
+    const manifesto = await buscarJson(`${fonte}/manifest.json?_=` + Date.now());
     listaAtivos = manifesto.ativos;
     select.innerHTML = '';
     for (const item of listaAtivos) {
       const opt = document.createElement('option');
-      opt.value = item.id;
-      opt.textContent = item.label;
-      select.appendChild(opt);
+      opt.value = item.id; opt.textContent = item.label; select.appendChild(opt);
     }
-
-    const salvo = localStorage.getItem(CHAVE_LOCALSTORAGE);
-    const existeSalvo = salvo && listaAtivos.some(a => a.id === salvo);
-    ativoAtual = existeSalvo ? salvo : listaAtivos[0]?.id;
+    const salvo = localStorage.getItem(CHAVE_LS);
+    ativoAtual = (salvo && listaAtivos.some(a => a.id === salvo)) ? salvo : listaAtivos[0]?.id;
     select.value = ativoAtual;
-
     select.addEventListener('change', () => selecionarAtivo(select.value));
 
-    // carrega toggles do localStorage
     const CHAVE_TOGGLE = `monitor_toggle_${fonte}`;
     let togglesSalvos = {};
     try { togglesSalvos = JSON.parse(localStorage.getItem(CHAVE_TOGGLE) || '{}'); } catch(e) {}
-
-    // monta a linha de resumo (um item clicável por ativo com toggle)
     const resumo = document.getElementById('resumo');
     resumo.innerHTML = '';
     for (const item of listaAtivos) {
       const el = document.createElement('div');
-      el.className = 'resumo-item';
-      el.dataset.id = item.id;
-
+      el.className = 'resumo-item'; el.dataset.id = item.id;
       const chk = document.createElement('input');
-      chk.type = 'checkbox';
-      chk.className = 'toggle-ativo';
-      chk.checked = togglesSalvos[item.id] !== false;
-      chk.title = 'Ligar/desligar monitoramento';
-      chk.addEventListener('click', (ev) => ev.stopPropagation());
-      chk.addEventListener('change', () => {
-        salvarToggles();
-        el.classList.toggle('ativo-desligado', !chk.checked);
-      });
-
-      const span = document.createElement('span');
-      span.className = 'resumo-label';
-      span.textContent = item.label;
-
-      el.appendChild(chk);
-      el.appendChild(span);
+      chk.type = 'checkbox'; chk.className = 'toggle-ativo';
+      chk.checked = togglesSalvos[item.id] !== false; chk.title = 'Ligar/desligar monitoramento';
+      chk.addEventListener('click', ev => ev.stopPropagation());
+      chk.addEventListener('change', () => { salvarToggles(); el.classList.toggle('ativo-desligado', !chk.checked); });
+      const span = document.createElement('span'); span.className = 'resumo-label'; span.textContent = item.label;
+      el.appendChild(chk); el.appendChild(span);
       if (!chk.checked) el.classList.add('ativo-desligado');
       el.addEventListener('click', () => selecionarAtivo(item.id));
       resumo.appendChild(el);
     }
-
     function salvarToggles() {
       const estado = {};
       for (const item of listaAtivos) {
-        const chk = document.querySelector(`.resumo-item[data-id="${item.id}"] .toggle-ativo`);
-        estado[item.id] = chk ? chk.checked : true;
+        const c = document.querySelector(`.resumo-item[data-id="${item.id}"] .toggle-ativo`);
+        estado[item.id] = c ? c.checked : true;
       }
       localStorage.setItem(CHAVE_TOGGLE, JSON.stringify(estado));
-      fetch('toggle', {
-        method: 'POST',
-        headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify(estado),
-      }).catch(() => {});
+      fetch('toggle', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify(estado) }).catch(() => {});
     }
-
-    // salva estado inicial se nunca salvou
     if (!Object.keys(togglesSalvos).length) salvarToggles();
-  } catch (e) {
-    select.innerHTML = '<option>sem ativos</option>';
-  }
+  } catch (e) { select.innerHTML = '<option>sem ativos</option>'; }
 }
 
 async function atualizarResumo() {
@@ -389,45 +551,36 @@ async function atualizarResumo() {
       const el = document.querySelector(`.resumo-item[data-id="${item.id}"]`);
       if (!el) continue;
       el.classList.toggle('ativo-selecionado', item.id === ativoAtual);
-      const chk = el.querySelector('.toggle-ativo');
       const label = el.querySelector('.resumo-label');
       if (!label) continue;
       try {
-        const dados = await buscarJson(`${fonte}/${item.id}.json?_=` + Date.now());
-        const rsi = dados.rsi.length ? dados.rsi[dados.rsi.length - 1].value.toFixed(0) : '?';
-        label.textContent = `${item.label} RSI ${rsi} ${seta(dados.tendenciaMacro)}`;
+        const d = await buscarJson(`${fonte}/${item.id}.json?_=` + Date.now());
+        const rsi = d.rsi.length ? d.rsi[d.rsi.length-1].value.toFixed(0) : '?';
+        label.textContent = `${item.label} ${rsi} ${seta(d.tendenciaMacro)}`;
         el.dataset.temDados = '1';
-      } catch (e) {
-        if (!el.dataset.temDados) label.textContent = `${item.label} (aguardando)`;
-      }
+      } catch(e) { if (!el.dataset.temDados) label.textContent = `${item.label} (aguard.)`; }
     }
-  } finally {
-    resumoAtualizando = false;
-  }
+  } finally { resumoAtualizando = false; }
 }
 
 async function atualizar() {
-  if (!ativoAtual) return;
-  if (atualizando) return;
+  if (!ativoAtual || atualizando) return;
   atualizando = true;
-  const ativoSolicitado = ativoAtual;
+  const ativoSol = ativoAtual;
   try {
-    const dados = await buscarJson(`${fonte}/${ativoSolicitado}.json?_=` + Date.now());
-    if (ativoSolicitado !== ativoAtual) return;
+    const dados = await buscarJson(`${fonte}/${ativoSol}.json?_=` + Date.now());
+    if (ativoSol !== ativoAtual) return;
 
-    // preços tipo forex (ex: EURUSD ~1.15) precisam de mais casas decimais
-    // que cripto (ex: BTC/USDT ~65000) — ajusta a precisão dinamicamente
+    tfSegundos = dados.timeframeSeg || 900;
+    ultimoAtualizadoEm = dados.atualizado_em;
+
     if (dados.candles.length) {
-      const precoRef = dados.candles[dados.candles.length - 1].close;
+      const precoRef = dados.candles[dados.candles.length-1].close;
       const precisao = precoRef < 50 ? 5 : (precoRef < 1000 ? 3 : 2);
       const minMove = 1 / Math.pow(10, precisao);
-      const priceFormat = { type: 'price', precision: precisao, minMove };
-      serieCandle.applyOptions({ priceFormat });
-      serieBandaSup.applyOptions({ priceFormat });
-      serieBandaInf.applyOptions({ priceFormat });
-      serieBandaMedia.applyOptions({ priceFormat });
-      serieEmaMicro.applyOptions({ priceFormat });
-      serieEmaMacro.applyOptions({ priceFormat });
+      const pf = { type:'price', precision:precisao, minMove };
+      [serieCandle, serieBandaSup, serieBandaInf, serieBandaMedia, serieEmaMicro, serieEmaMacro]
+        .forEach(s => s.applyOptions({ priceFormat: pf }));
     }
 
     serieCandle.setData(dados.candles);
@@ -439,546 +592,313 @@ async function atualizar() {
     serieEmaMacro.setData(dados.emaMacro || []);
     serieRsi.setData(dados.rsi);
 
+    // S/R lines
     linhasNiveis.forEach(l => serieCandle.removePriceLine(l));
-    linhasNiveis = chkNiveis.checked ? (dados.niveis || []).map(n => serieCandle.createPriceLine({
+    linhasNiveis = chkNiveis.checked ? (dados.niveis||[]).map(n => serieCandle.createPriceLine({
       price: n.preco,
-      color: n.tipo === 'resistencia' ? '#ef535099' : '#26a69a99',
-      lineWidth: 1,
-      lineStyle: LightweightCharts.LineStyle.Dashed,
-      axisLabelVisible: true,
+      color: n.tipo === 'resistencia' ? '#ef535088' : '#26a69a88',
+      lineWidth: 1, lineStyle: LightweightCharts.LineStyle.Dashed, axisLabelVisible: true,
       title: n.tipo === 'resistencia' ? 'R' : 'S',
     })) : [];
 
+    // Fib lines
     linhasFib.forEach(l => serieCandle.removePriceLine(l));
-    linhasFib = chkFib.checked ? (dados.fib || []).map(f => serieCandle.createPriceLine({
-      price: f.preco,
-      color: CORES_FIB[f.nivel] || '#9598a1',
-      lineWidth: 1,
-      lineStyle: LightweightCharts.LineStyle.Dotted,
-      axisLabelVisible: true,
-      title: `Fib ${(f.nivel * 100).toFixed(1)}%`,
+    linhasFib = chkFib.checked ? (dados.fib||[]).map(f => serieCandle.createPriceLine({
+      price: f.preco, color: CORES_FIB[f.nivel] || '#9598a1',
+      lineWidth: 1, lineStyle: LightweightCharts.LineStyle.Dotted, axisLabelVisible: true,
+      title: `Fib ${(f.nivel*100).toFixed(1)}%`,
     })) : [];
 
-    // Onde a entrada aconteceria: linha grossa no nível, para bater o olho
-    // e comparar com o preço atual sem precisar ler o cartão.
+    // Linha de entrada ativa
     if (linhaEntrada) { serieCandle.removePriceLine(linhaEntrada); linhaEntrada = null; }
     if (dados.alerta && dados.alerta.precoEntrada != null) {
-      const confirmada = dados.alerta.entradaConfirmada;
       linhaEntrada = serieCandle.createPriceLine({
         price: dados.alerta.precoEntrada,
         color: dados.alerta.direcao === 'call' ? '#26a69a' : '#ef5350',
         lineWidth: 2,
-        lineStyle: confirmada ? LightweightCharts.LineStyle.Solid : LightweightCharts.LineStyle.Dashed,
-        axisLabelVisible: true,
-        title: `ENTRADA ${dados.alerta.direcao.toUpperCase()}${confirmada ? '' : ' (estimada)'}`,
+        lineStyle: dados.alerta.entradaConfirmada ? LightweightCharts.LineStyle.Solid : LightweightCharts.LineStyle.Dashed,
+        axisLabelVisible: true, title: `ENTRADA ${(dados.alerta.direcao||'').toUpperCase()}`,
       });
     }
 
-    // Nivel que a vela ATUAL precisa tocar pra virar alerta quando fechar —
-    // avisa antes do fato, nao so depois que a vela ja mexeu.
+    // Linhas de gatilho (pre-sinal)
     linhasGatilho.forEach(l => serieCandle.removePriceLine(l));
     linhasGatilho = [];
     if (dados.gatilhos) {
       const g = dados.gatilhos;
-      linhasGatilho.push(serieCandle.createPriceLine({
-        price: g.callEntrada, color: '#26a69a', lineWidth: 1,
-        lineStyle: LightweightCharts.LineStyle.Dashed, axisLabelVisible: true,
-        title: 'gatilho CALL',
-      }));
-      linhasGatilho.push(serieCandle.createPriceLine({
-        price: g.callAproximando, color: '#26a69a', lineWidth: 1,
-        lineStyle: LightweightCharts.LineStyle.Dotted, axisLabelVisible: false,
-        title: '',
-      }));
-      linhasGatilho.push(serieCandle.createPriceLine({
-        price: g.putEntrada, color: '#ef5350', lineWidth: 1,
-        lineStyle: LightweightCharts.LineStyle.Dashed, axisLabelVisible: true,
-        title: 'gatilho PUT',
-      }));
-      linhasGatilho.push(serieCandle.createPriceLine({
-        price: g.putAproximando, color: '#ef5350', lineWidth: 1,
-        lineStyle: LightweightCharts.LineStyle.Dotted, axisLabelVisible: false,
-        title: '',
-      }));
+      linhasGatilho.push(serieCandle.createPriceLine({ price: g.callEntrada,     color:'#26a69a88', lineWidth:1, lineStyle:LightweightCharts.LineStyle.Dashed,  axisLabelVisible:true, title:'gatilho CALL' }));
+      linhasGatilho.push(serieCandle.createPriceLine({ price: g.callAproximando, color:'#26a69a55', lineWidth:1, lineStyle:LightweightCharts.LineStyle.Dotted,  axisLabelVisible:false }));
+      linhasGatilho.push(serieCandle.createPriceLine({ price: g.putEntrada,      color:'#ef535088', lineWidth:1, lineStyle:LightweightCharts.LineStyle.Dashed,  axisLabelVisible:true, title:'gatilho PUT' }));
+      linhasGatilho.push(serieCandle.createPriceLine({ price: g.putAproximando,  color:'#ef535055', lineWidth:1, lineStyle:LightweightCharts.LineStyle.Dotted,  axisLabelVisible:false }));
     }
 
     if (primeiraCarga) {
-      chartPreco.priceScale('right').applyOptions({ autoScale: true });
-      chartVolume.priceScale('right').applyOptions({ autoScale: true });
-      chartRsi.priceScale('right').applyOptions({ autoScale: true });
-      chartPreco.timeScale().fitContent();
-      chartVolume.timeScale().fitContent();
-      chartRsi.timeScale().fitContent();
+      [chartPreco, chartVolume, chartRsi].forEach(c => {
+        c.priceScale('right').applyOptions({ autoScale: true });
+        c.timeScale().fitContent();
+      });
       primeiraCarga = false;
     }
 
     if (dados.rsi.length) {
-      const t0 = dados.rsi[0].time, t1 = dados.rsi[dados.rsi.length - 1].time;
-      serieRsi70.setData([{ time: t0, value: 70 }, { time: t1, value: 70 }]);
-      serieRsi30.setData([{ time: t0, value: 30 }, { time: t1, value: 30 }]);
+      const t0 = dados.rsi[0].time, t1 = dados.rsi[dados.rsi.length-1].time;
+      serieRsi70.setData([{time:t0,value:70},{time:t1,value:70}]);
+      serieRsi30.setData([{time:t0,value:30},{time:t1,value:30}]);
     }
 
+    // Marcadores no chart
     const marcadoresSinal = dados.sinais.map(s => ({
       time: s.time,
       position: s.direcao === 'compra' ? 'belowBar' : 'aboveBar',
       color: s.status === 'bloqueado' ? '#9598a1' : (s.direcao === 'compra' ? '#26a69a' : '#ef5350'),
       shape: s.direcao === 'compra' ? 'arrowUp' : 'arrowDown',
-      text: `${s.setup ? '[' + s.setup + '] ' : ''}${s.direcao === 'compra' ? 'CALL' : 'PUT'}${s.status === 'bloqueado' ? ' BLOQUEADO' : ''}`,
+      text: `${s.setup ? '['+s.setup+'] ' : ''}${s.direcao === 'compra' ? '▲' : '▼'}${s.status === 'bloqueado' ? ' BLQ' : ''}`,
+      size: 2,
     }));
-    const temposConfluencia = new Set((dados.confluencias || []).map(c => c.time));
-    const marcadoresPullback = (dados.pullbacks || [])
-      .filter(p => !temposConfluencia.has(p.time))
-      .map(p => ({
-        time: p.time,
-        position: p.direcao === 'compra' ? 'belowBar' : 'aboveBar',
-        color: p.status === 'bloqueado' ? '#9598a1' : (p.direcao === 'compra' ? '#80cbc4' : '#ef9a9a'),
-        shape: 'circle',
-        text: `PULLBACK ${(p.fatores || []).join('+').toUpperCase()}${p.status === 'bloqueado' ? ' BLOQUEADO' : ''}`,
-      }));
-    const marcadoresConfluencia = (dados.confluencias || []).map(c => ({
+    const temposConfl = new Set((dados.confluencias||[]).map(c => c.time));
+    const marcadoresPullback = (dados.pullbacks||[]).filter(p => !temposConfl.has(p.time)).map(p => ({
+      time: p.time,
+      position: p.direcao === 'compra' ? 'belowBar' : 'aboveBar',
+      color: p.status === 'bloqueado' ? '#9598a1' : (p.direcao === 'compra' ? '#80cbc4' : '#ef9a9a'),
+      shape: 'circle', text: `PB ${(p.fatores||[]).join('+')}${p.status==='bloqueado'?' BLQ':''}`,
+    }));
+    const marcadoresConfl = (dados.confluencias||[]).map(c => ({
       time: c.time,
       position: c.direcao === 'compra' ? 'belowBar' : 'aboveBar',
       color: c.status === 'bloqueado' ? '#9598a1' : '#ffd700',
       shape: c.direcao === 'compra' ? 'arrowUp' : 'arrowDown',
-      text: `PULLBACK ${c.fatores.join('+').toUpperCase()}${c.status === 'bloqueado' ? ' BLOQUEADO' : ''}`,
+      text: `CONF ${c.fatores.join('+')}${c.status==='bloqueado'?' BLQ':''}`,
+      size: 2,
     }));
     const marcadoresAlerta = dados.alertaProximo ? [{
       time: dados.alertaProximo.time,
       position: dados.alertaProximo.direcao === 'compra_proxima' ? 'belowBar' : 'aboveBar',
-      color: '#ffd54f',
-      shape: 'square',
-      text: dados.alertaProximo.setup === 'pullback'
-        ? `PULLBACK PRÓXIMO ${(dados.alertaProximo.fatores || []).join('+').toUpperCase()}`
-        : 'ENTRADA PRÓXIMA BOLLINGER+RSI',
+      color: '#ffd54f', shape: 'square', size: 2,
+      text: `PRÓXIMO ${dados.alertaProximo.setup||''} RSI:${dados.alertaProximo.rsi||'?'}`,
     }] : [];
-    const marcadoresReversao = (dados.alerta && dados.alerta.precoEntrada != null) ? [{
-      time: dados.alerta.time,
-      position: dados.alerta.direcao === 'call' ? 'belowBar' : 'aboveBar',
-      color: dados.alerta.direcao === 'call' ? '#26a69a' : '#ef5350',
-      shape: dados.alerta.entradaConfirmada
-        ? (dados.alerta.direcao === 'call' ? 'arrowUp' : 'arrowDown')
-        : 'circle',
-      text: dados.alerta.entradaConfirmada
-        ? `ENTRAR AGORA ${dados.alerta.direcao.toUpperCase()}`
-        : `AGUARDAR ${dados.alerta.direcao.toUpperCase()}`,
-    }] : [];
-    const marcadoresReais = (dados.operacoesReais || []).map(o => {
-      const setupLabel = o.setup ? `[${o.setup}] ` : '';
-      const precoLabel = o.preco != null ? ` @ ${o.preco.toFixed(5)}` : '';
-      const dirLabel = o.direcao === 'call' ? 'CALL' : 'PUT';
-      const desconhecido = o.status === 'resultado_desconhecido';
-      let texto;
-      if (o.aberta) texto = `${setupLabel}${dirLabel}${precoLabel} — ABERTA`;
-      else if (desconhecido) texto = `${setupLabel}${dirLabel}${precoLabel} — RESULTADO DESCONHECIDO`;
-      else texto = `${setupLabel}${dirLabel}${precoLabel} — ${o.vitoria ? 'GANHOU' : 'PERDEU'}`;
-      return {
-        time: o.time,
-        position: o.direcao === 'call' ? 'belowBar' : 'aboveBar',
-        color: o.aberta ? '#42a5f5' : (desconhecido ? '#9e9e9e' : (o.vitoria ? '#00e676' : '#ff1744')),
-        shape: (o.aberta || desconhecido) ? 'square' : (o.vitoria ? 'arrowUp' : 'arrowDown'),
-        text: texto,
-      };
-    });
+    const marcadoresReaisOp = (dados.operacoesReais||[]).map(o => ({
+      time: o.time,
+      position: o.direcao === 'call' ? 'belowBar' : 'aboveBar',
+      color: o.aberta ? '#42a5f5' : (o.vitoria ? '#00e676' : '#ff1744'),
+      shape: o.aberta ? 'square' : (o.vitoria ? 'arrowUp' : 'arrowDown'),
+      text: `[${o.setup||'?'}] ${o.direcao==='call'?'▲':'▼'} ${o.aberta ? '…' : (o.vitoria ? '✓' : '✗')}`,
+      size: 2,
+    }));
 
-    // Linha de preço de entrada — remove a anterior antes de criar uma nova
-    if (_linhaEntradaAtiva) {
-      serieCandle.removePriceLine(_linhaEntradaAtiva);
-      _linhaEntradaAtiva = null;
-    }
-    const opAberta = (dados.operacoesReais || []).find(o => o.aberta && o.preco != null);
+    // linha de entrada em aberto
+    if (_linhaEntradaAtiva) { serieCandle.removePriceLine(_linhaEntradaAtiva); _linhaEntradaAtiva = null; }
+    const opAberta = (dados.operacoesReais||[]).find(o => o.aberta && o.preco != null);
     if (opAberta) {
       _linhaEntradaAtiva = serieCandle.createPriceLine({
-        price: opAberta.preco,
-        color: '#42a5f5',
-        lineWidth: 1,
-        lineStyle: 2,
-        axisLabelVisible: true,
-        title: `entrada ${opAberta.direcao === 'call' ? 'CALL' : 'PUT'} [${opAberta.setup || ''}]`,
+        price: opAberta.preco, color: '#42a5f5', lineWidth: 1,
+        lineStyle: 2, axisLabelVisible: true,
+        title: `entrada ${opAberta.direcao==='call'?'CALL':'PUT'} [${opAberta.setup||''}]`,
       });
     }
 
-    const marcadores = [...marcadoresSinal, ...marcadoresPullback, ...marcadoresConfluencia,
-      ...marcadoresAlerta, ...marcadoresReversao, ...marcadoresReais].sort((a, b) => a.time - b.time);
+    const marcadores = [...marcadoresSinal, ...marcadoresPullback, ...marcadoresConfl,
+      ...marcadoresAlerta, ...marcadoresReaisOp].sort((a,b) => a.time - b.time);
     serieCandle.setMarkers(marcadores);
 
-    const emojiTendencia = t => t === 'alta' ? '↑' : (t === 'baixa' ? '↓' : '→');
+    // status bar compacta
     const desemp = dados.desempenho;
-    const winrateTexto = desemp && desemp.winrate != null
-      ? ` — winrate ${desemp.winrate}% (${desemp.vitorias}/${desemp.total})`
-      : '';
-    ultimoStatusValido =
-      `${dados.par} ${dados.timeframe} — ${dados.mercadoAberto ? 'MERCADO ABERTO' : 'MERCADO FECHADO'} — ` +
-      `payout ${dados.payout == null ? 'indisponível' : (dados.payout * 100).toFixed(0) + '%'} — atualizado ${new Date(dados.atualizado_em * 1000).toLocaleTimeString('pt-BR')} — ` +
-      `macro ${emojiTendencia(dados.tendenciaMacro)} ${dados.tendenciaMacro || '?'} | micro ${emojiTendencia(dados.tendenciaMicro)} ${dados.tendenciaMicro || '?'} — ` +
-      `${(dados.confluencias || []).length} confluência(s) — ` +
-      `${dados.sinais.length} sinal(is), ${(dados.pullbacks || []).length} pullback(s) no histórico${winrateTexto}`;
+    const wrTexto = desemp && desemp.winrate != null ? ` | ${desemp.winrate}% (${desemp.vitorias}/${desemp.total})` : '';
+    const emojiT = t => t==='alta'?'↑':(t==='baixa'?'↓':'→');
+    ultimoStatusValido = `${dados.par} ${dados.timeframe} | ${dados.mercadoAberto?'ABERTO':'FECHADO'} | payout ${dados.payout==null?'—':(dados.payout*100).toFixed(0)+'%'} | ${emojiT(dados.tendenciaMacro)}${dados.tendenciaMacro||'?'}${wrTexto} | ${new Date(dados.atualizado_em*1000).toLocaleTimeString('pt-BR')}`;
     document.getElementById('status').textContent = ultimoStatusValido;
     document.getElementById('status').style.color = '';
     if (dados.timeframe) {
       document.getElementById('barra-logo').textContent = `IQ ${dados.timeframe}`;
-      document.title = `IQ Option ${dados.timeframe} — sinais ao vivo`;
+      document.title = `IQ Option ${dados.timeframe} — ${dados.par}`;
     }
+
+    renderizarSinalBadge(dados);
     renderizarPainel(dados);
-  } catch (e) {
-    if (ativoSolicitado !== ativoAtual) return;
+  } catch(e) {
+    if (ativoSol !== ativoAtual) return;
     document.getElementById('status').style.color = '#e0b040';
-    document.getElementById('status').textContent =
-      `${ultimoStatusValido || ativoSolicitado} — atualização atrasada. Mantendo o último gráfico.`;
-  } finally {
-    atualizando = false;
+    document.getElementById('status').textContent = `${ultimoStatusValido||ativoSol} — atualização atrasada`;
+  } finally { atualizando = false; }
+}
+
+// ── Sinal badge no top bar + card sidebar ──
+function renderizarSinalBadge(dados) {
+  const badge = document.getElementById('sinal-badge');
+  const card  = document.getElementById('cartao-sinal');
+  const vazio = document.getElementById('sinal-vazio');
+  const corpo = document.getElementById('sinal-corpo');
+  const nota  = document.getElementById('sinal-nota');
+
+  const ap = dados.alertaProximo;
+  const al = dados.alerta;
+
+  // detecta novo sinal para tocar som e mostrar toast
+  const sinalIdAtual = ap ? `${ap.time}-${ap.direcao}` : (al ? `${al.time}-${al.direcao}` : null);
+  const novaSinal = sinalIdAtual && sinalIdAtual !== ultimoSinalId;
+  if (novaSinal) {
+    ultimoSinalId = sinalIdAtual;
+    const dir = ap ? ap.direcao : (al ? al.direcao : null);
+    if (dir) alertaSom(dir.replace('_proxima', ''));
+  }
+
+  if (!ap && !al) {
+    badge.style.display = 'none';
+    card.className = 'cartao'; card.classList.remove('pulsando');
+    vazio.style.display = ''; corpo.style.display = 'none';
+    nota.textContent = 'aguardando';
+    return;
+  }
+
+  const src = ap || al;
+  const direcaoRaw = (src.direcao || '').replace('_proxima', '');
+  const cls = direcaoRaw === 'call' ? 'call' : (direcaoRaw === 'put' ? 'put' : 'aviso');
+  const ehProximo = !!ap && !al;
+  const label = direcaoRaw === 'call' ? '▲ CALL' : (direcaoRaw === 'put' ? '▼ PUT' : '? AVISO');
+  const setup = src.setup || '';
+  const preco = src.preco != null ? src.preco.toFixed(5) : '?';
+  const fat   = (src.fatores || []).join(' + ') || '';
+  const rsi   = src.rsi != null ? ` | RSI ${src.rsi}` : '';
+
+  // badge
+  badge.style.display = 'flex';
+  badge.className = cls + (ehProximo ? '' : ' pulsando');
+  badge.textContent = ehProximo ? `${label} próximo` : `${label} agora`;
+
+  // card
+  card.className = `cartao ${cls}${ehProximo ? '' : ' pulsando'}`;
+  nota.textContent = ehProximo ? 'próximo' : 'CONFIRMAR';
+  vazio.style.display = 'none'; corpo.style.display = '';
+  document.getElementById('sinal-dir').className = `sinal-direcao ${cls}`;
+  document.getElementById('sinal-dir').textContent = label;
+  document.getElementById('sinal-setup').textContent = setup;
+  document.getElementById('sinal-preco').textContent = `@ ${preco}${rsi}`;
+  document.getElementById('sinal-fat').textContent = fat;
+
+  // toast para sinal novo
+  if (novaSinal) {
+    const toastTxt = `${label}${ehProximo ? ' — aguardar confirmação' : ' — CONFIRMAR AGORA'}\n${setup} @ ${preco}`;
+    mostrarToast(toastTxt, cls);
   }
 }
 
-function escapar(texto) {
-  const div = document.createElement('div');
-  div.textContent = String(texto == null ? '' : texto);
-  return div.innerHTML;
+function escapar(v) {
+  const d = document.createElement('div'); d.textContent = String(v == null ? '' : v); return d.innerHTML;
 }
 
 function renderizarPainel(dados) {
-  const alerta = dados.alerta;
-  const cartaoAlerta = document.getElementById('cartao-alerta');
-  cartaoAlerta.className = 'cartao' + (alerta ? ` alerta-${alerta.tipo}` : '');
-  if (!alerta) {
-    cartaoAlerta.innerHTML = '<h3>Alerta <span class="selo-informativo">SÓ AVISO — NÃO EXECUTA ORDEM</span></h3><p>Nenhuma vela fora do padrão agora.</p>';
-  } else {
-    const eEntrada = alerta.tipo === 'entrada';
-    const cor = alerta.direcao === 'call' ? '#26a69a' : '#ef5350';
-    const corFundo = alerta.direcao === 'call' ? 'rgba(38,166,154,0.15)' : 'rgba(239,83,80,0.15)';
-
-    let tempoTexto = '';
-    if (alerta.segundosRestantes != null && alerta.segundosRestantes > 0) {
-      const min = Math.floor(alerta.segundosRestantes / 60);
-      const seg = alerta.segundosRestantes % 60;
-      tempoTexto = min > 0 ? `${min}:${seg.toString().padStart(2,'0')}` : `${seg}s`;
-    }
-
-    const tfSeg = dados.timeframeSeg || 300;
-    const segNaVela = tfSeg - (alerta.segundosRestantes || 0);
-    // Tem que bater com entrada_max_segundos_no_candle do config, senao o
-    // aviso fica dizendo "pode entrar" num momento em que o bot ja
-    // recusaria a ordem de verdade por "entrada_atrasada".
-    const JANELA_ENTRADA = dados.janelaEntradaSeg || 15;
-
-    let instrucao;
-    if (eEntrada && segNaVela <= JANELA_ENTRADA) {
-      const restJanela = JANELA_ENTRADA - segNaVela;
-      instrucao = `<div class="instrucao-timing" style="background:${corFundo};border-left:4px solid ${cor}">` +
-        `<strong>PADRÃO ATIVO</strong> ${alerta.direcao.toUpperCase()} (aviso, não é ordem) ` +
-        `@ <strong>${alerta.precoEntrada != null ? alerta.precoEntrada.toFixed(5) : '?'}</strong>` +
-        ` <span class="tempo-restante">(janela: ${restJanela}s)</span>` +
-        '</div>';
-    } else if (eEntrada) {
-      instrucao = `<div class="instrucao-timing" style="background:rgba(120,123,134,0.15);border-left:4px solid #787b86">` +
-        `<strong>JANELA PASSOU</strong> — sinal era ${alerta.direcao.toUpperCase()} ` +
-        `@ ${alerta.precoEntrada != null ? alerta.precoEntrada.toFixed(5) : '?'} ` +
-        `mas ja se passaram ${segNaVela}s. Aguardar proximo sinal` +
-        (tempoTexto ? ` <span class="tempo-restante">(vela fecha em ${tempoTexto})</span>` : '') +
-        '</div>';
-    } else {
-      instrucao = `<div class="instrucao-timing instrucao-aguardar" style="background:rgba(224,176,64,0.15);border-left:4px solid #e0b040">` +
-        `<strong>AGUARDAR</strong> — vela se aproximando do limiar` +
-        (tempoTexto ? ` <span class="tempo-restante">(fecha em ${tempoTexto})</span>` : '') +
-        `<br>Se fechar forte, entrar <strong>${alerta.direcao.toUpperCase()}</strong> na abertura da proxima vela` +
-        (alerta.precoEntrada != null ? ` (estimado ~${alerta.precoEntrada.toFixed(5)})` : '') +
-        '</div>';
-    }
-
-    const expiracao = alerta.expiracaoSugeridaMin
-      ? `<div class="rodape-alerta">Expiracao sugerida: <strong>${alerta.expiracaoSugeridaMin} min</strong></div>`
-      : '';
-    const noticia = alerta.noticia
-      ? `<div class="aviso-noticia">⚠ ${escapar(alerta.noticia)}</div>`
-      : '';
-    cartaoAlerta.innerHTML =
-      '<h3>Alerta</h3>' +
-      instrucao +
-      '<ul>' + alerta.motivos.map(m => `<li>${escapar(m)}</li>`).join('') + '</ul>' +
-      expiracao + noticia;
-  }
-
-  const motivos = dados.explicacao || [];
-  document.getElementById('cartao-motivo').innerHTML =
-    '<h3>Por que o robô sinalizou</h3>' +
-    (motivos.length
-      ? '<ul>' + motivos.map(m => `<li>${escapar(m)}</li>`).join('') + '</ul>'
-      : '<p>Sem sinal no último candle fechado.</p>');
-
-  const noticias = dados.noticias || [];
-  const sintetico = /-OTC$/i.test(dados.par || '');
-  let corpoNoticias;
-  if (sintetico) {
-    corpoNoticias = '<p>Ativo sintético: o preço é gerado pela corretora, então notícia econômica real não o move.</p>';
-  } else if (!noticias.length) {
-    corpoNoticias = '<p>Nada relevante nas próximas 8 horas para esse par.</p>';
-  } else {
-    corpoNoticias = noticias.map(n => {
-      const iminente = n.minutos >= -5 && n.minutos <= 20;
-      const saiuRecente = n.minutos < -5 && n.minutos >= -30;
-      const passado = n.minutos < 0;
-      let tempo;
-      if (passado) tempo = `há ${Math.abs(n.minutos)} min`;
-      else if (n.minutos === 0) tempo = 'AGORA';
-      else if (n.minutos <= 60) tempo = `em ${n.minutos} min`;
-      else tempo = `em ${Math.floor(n.minutos/60)}h${(n.minutos%60).toString().padStart(2,'0')}`;
-      const cls = (n.discurso ? ' noticia-discurso' : '') +
-        (iminente ? ' noticia-iminente' : (saiuRecente ? ' noticia-recente' : ''));
-      let rotulo = saiuRecente ? ' <span class="noticia-tag">SAIU HA POUCO — pode ter movido o grafico</span>' : '';
-      if (n.discurso) {
-        rotulo += ' <span class="noticia-tag noticia-tag-discurso">⚠ DISCURSO — direção imprevisível, evite entrar</span>';
-      }
-
-      let detalhes = '';
-      if (n.forecast || n.previous) {
-        detalhes += `<div class="noticia-detalhe">`;
-        if (n.previous) detalhes += `anterior: ${escapar(n.previous)}`;
-        if (n.previous && n.forecast) detalhes += ' | ';
-        if (n.forecast) detalhes += `previsao: ${escapar(n.forecast)}`;
-        detalhes += '</div>';
-      }
-
-      let sugestao = '';
-      if (n.acima && n.abaixo) {
-        const corAcima = n.acima === 'CALL' ? '#26a69a' : '#ef5350';
-        const corAbaixo = n.abaixo === 'CALL' ? '#26a69a' : '#ef5350';
-        sugestao = `<div class="noticia-sugestao">` +
-          `resultado > previsao → <strong style="color:${corAcima}">${n.acima}</strong> · ` +
-          `resultado < previsao → <strong style="color:${corAbaixo}">${n.abaixo}</strong>` +
-          `</div>`;
-      }
-
-      return '<div class="noticia-linha' + cls + '">' +
-        '<div class="noticia-cabecalho">' +
-          `<span class="impacto-${escapar(n.impacto)}">${escapar(n.impacto) === 'High' ? '!!!' : '!!'} ${escapar(n.moeda)} · ${escapar(n.titulo)}</span>` +
-          `<span class="noticia-tempo">${tempo}</span>` +
-        '</div>' +
-        rotulo +
-        detalhes + sugestao +
-      '</div>';
-    }).join('');
-  }
-  document.getElementById('cartao-noticias').innerHTML = '<h3>Notícias do dia</h3>' + corpoNoticias;
-
-  const ia = dados.parecerIA;
-  const cartaoIA = document.getElementById('cartao-ia');
-  if (!ia) {
-    cartaoIA.innerHTML = '<h3>Opiniao da IA</h3><p>Aguardando sinal para analisar...</p>';
-  } else {
-    const corConf = {alta: '#26a69a', media: '#e0b040', baixa: '#9598a1'};
-    const corDir = ia.direcao === 'CALL' ? '#26a69a' : (ia.direcao === 'PUT' ? '#ef5350' : '#9598a1');
-    const seg = ia.segundosAtras || 0;
-    const idadeTexto = seg < 60 ? `ha ${seg}s` : `ha ${Math.floor(seg / 60)} min`;
-    const desatualizada = seg > 180;
-    cartaoIA.innerHTML =
-      '<h3>Opiniao da IA</h3>' +
-      `<p>${escapar(ia.texto)}</p>` +
-      `<div class="ia-resultado">` +
-        `<span>Direcao: <strong style="color:${corDir}">${escapar(ia.direcao || 'NEUTRO')}</strong></span>` +
-        ` · <span>Confianca: <strong style="color:${corConf[ia.confianca] || '#9598a1'}">${escapar(ia.confianca || '?')}</strong></span>` +
-        ` · <span style="color:${desatualizada ? '#e0b040' : '#787b86'}">${idadeTexto}${desatualizada ? ' (desatualizada)' : ''}</span>` +
-      `</div>`;
-  }
-
-  const porSetup = dados.desempenhoPorSetup || {};
-  const porSetupSimulado = dados.desempenhoSimuladoPorSetup || {};
-  const cartaoEstrategias = document.getElementById('cartao-estrategias');
-  const NOMES_SETUP = {
-    reversao_candle: 'Reversão de vela (validada na triagem)',
-    reversao_confluencia: 'Reversão de vela + Bollinger+RSI (não validada)',
-    pullback: 'Pullback (não validada)',
-    pullback_confluencia: 'Pullback + Fibo/S-R juntos (não validada)',
-    reversao_bollinger_rsi: 'Bollinger+RSI (não validada)',
-    pin_bar_sr: 'Pin Bar em S/R (não validada)',
-    sr_rejeicao: 'S/R + Rejeição de vela (não validada)',
-    reversao_candle_nao_validado: 'Reversão de vela em par não validado',
-    reversao_confluencia: 'Reversão de vela + RSI/Bollinger (não validada)',
-  };
-  const linhasReais = Object.keys(porSetup).map(setup => {
-    const s = porSetup[setup];
-    const nome = NOMES_SETUP[setup] || setup;
-    const validada = setup === 'reversao_candle';
-    const corLucro = s.lucro >= 0 ? '#26a69a' : '#ef5350';
-    return `<div class="setup-linha${validada ? ' setup-validada' : ''}">` +
-      `<strong>${escapar(nome)}</strong>` +
-      `<div class="setup-detalhe">` +
-        `${s.total} operação(ões) real(is) · winrate ${s.winrate != null ? s.winrate + '%' : '?'} ` +
-        `(${s.vitorias}/${s.total}) · <span style="color:${corLucro}">R$${s.lucro.toFixed(2)}</span>` +
-      `</div>` +
-    `</div>`;
-  });
-  const linhasSimuladas = Object.keys(porSetupSimulado).map(setup => {
-    const s = porSetupSimulado[setup];
-    const nome = NOMES_SETUP[setup] || setup;
-    const corLucro = s.lucro >= 0 ? '#26a69a' : '#ef5350';
-    return `<div class="setup-linha setup-simulada">` +
-      `<strong>${escapar(nome)}</strong> <span class="selo-informativo">SIMULADO — SEM DINHEIRO REAL</span>` +
-      `<div class="setup-detalhe">` +
-        `${s.total} sinal(is) · winrate ${s.winrate != null ? s.winrate + '%' : '?'} ` +
-        `(${s.vitorias}/${s.total}) · <span style="color:${corLucro}">${s.lucro.toFixed(2)} unid.</span>` +
-      `</div>` +
-    `</div>`;
-  });
-  const linhas = [...linhasReais, ...linhasSimuladas].join('');
-  if (!linhas) {
-    cartaoEstrategias.innerHTML =
-      '<h3>Reversão (validada) vs Pullback/Bollinger (não validadas)</h3>' +
-      '<p>Sem operações suficientes ainda.</p>';
-  } else {
-    cartaoEstrategias.innerHTML =
-      '<h3>Reversão (validada) vs Pullback/Bollinger (não validadas)</h3>' + linhas;
-  }
-
-  const NOMES_BLOQUEIO = {
-    ordem_ja_aberta: 'já tinha ordem aberta',
-    entrada_atrasada: 'chegou atrasado na janela',
-    stop_diario: 'stop diário já batido',
-    meta_diaria_atingida: 'meta diária já batida',
-    payout_indisponivel: 'payout indisponível',
-    payout_abaixo_minimo: 'payout abaixo do mínimo',
-    mercado_fechado: 'mercado fechado',
-    otc_bloqueado_preco_sintetico: 'OTC bloqueado',
-    piso_banca_atingido: 'piso de banca atingido',
-  };
-  const funil = dados.funil;
-  const cartaoFunil = document.getElementById('cartao-funil');
-  if (!funil) {
-    cartaoFunil.innerHTML = '<h3>Funil de sinais hoje (reversão de vela)</h3><p>Sem dados ainda hoje.</p>';
-  } else {
-    const bloqueiosTexto = Object.keys(funil.bloqueios || {}).length
-      ? Object.entries(funil.bloqueios).map(([motivo, n]) =>
-          `${n}x ${escapar(NOMES_BLOQUEIO[motivo] || motivo)}`
-        ).join(', ')
-      : 'nenhum';
-    cartaoFunil.innerHTML =
-      '<h3>Funil de sinais hoje (reversão de vela)</h3>' +
-      `<div class="setup-linha">Aproximando (aviso, sem confirmar): <strong>${funil.aproximando}</strong></div>` +
-      `<div class="setup-linha">Confirmados (viraram tentativa de ordem): <strong>${funil.confirmados}</strong></div>` +
-      `<div class="setup-linha setup-validada">Executados (ordem real enviada): <strong>${funil.executados}</strong></div>` +
-      `<div class="setup-detalhe">Bloqueados: ${bloqueiosTexto}</div>`;
-  }
-
+  // Stats hoje
   const stats = dados.statsGlobais;
   const cartaoStats = document.getElementById('cartao-stats');
   if (!stats || (stats.otc.entradas === 0 && stats.normal.entradas === 0)) {
     cartaoStats.innerHTML = '<h3>Entradas hoje</h3><p>Sem entradas registradas ainda.</p>';
   } else {
     const fmtRow = (label, s) => {
-      if (s.entradas === 0) {
-        return `<div class="stats-row"><span class="stats-label">${label}</span><span style="color:var(--muted);font-size:11px">nenhuma</span></div>`;
-      }
-      const semResultado = s.winrate === null || s.winrate === undefined;
-      const wr = semResultado ? 0 : s.winrate;
-      const barColor = semResultado ? 'var(--muted)' : wr >= 60 ? 'var(--green)' : wr >= 45 ? 'var(--yellow)' : 'var(--red)';
-      const wrStr = semResultado ? '--' : `${wr}%`;
-      const lucroStr = s.lucro >= 0 ? `+${s.lucro.toFixed(2)}` : s.lucro.toFixed(2);
-      const lucroClass = s.lucro >= 0 ? 'win-color' : 'loss-color';
-      const abertas = s.entradas - (s.finalizadas ?? s.entradas);
-      const abertasStr = abertas > 0 ? ` <span style="color:var(--muted);font-size:10px">(${abertas} ag.)</span>` : '';
-      return `<div class="stats-row">` +
-        `<span class="stats-label">${label}</span>` +
-        `<div class="stats-bar-wrap"><div class="stats-bar" style="width:${wr}%;background:${barColor}"></div></div>` +
-        `<span class="stats-nums">${s.wins}/${s.entradas}${abertasStr} &nbsp;<strong style="color:${barColor}">${wrStr}</strong> &nbsp;<span class="${lucroClass}">${lucroStr}</span></span>` +
-        `</div>`;
+      if (s.entradas === 0) return `<div class="stats-row"><span class="stats-label">${label}</span><span style="color:var(--muted);font-size:10px">—</span></div>`;
+      const wr = s.winrate ?? 0; const semR = s.winrate == null;
+      const cor = semR ? 'var(--muted)' : (wr>=60?'var(--green)':(wr>=45?'var(--yellow)':'var(--red)'));
+      const ab = s.entradas - (s.finalizadas ?? s.entradas);
+      return `<div class="stats-row"><span class="stats-label">${label}</span>` +
+        `<div class="stats-bar-wrap"><div class="stats-bar" style="width:${wr}%;background:${cor}"></div></div>` +
+        `<span class="stats-nums">${s.wins}/${s.entradas}${ab>0?` <span style="color:var(--muted)">(${ab}ag.)</span>`:''} <strong style="color:${cor}">${semR?'--':wr+'%'}</strong> ` +
+        `<span class="${s.lucro>=0?'win-color':'loss-color'}">${s.lucro>=0?'+':''}${s.lucro.toFixed(2)}</span></span></div>`;
     };
-    cartaoStats.innerHTML =
-      '<h3>Entradas hoje</h3>' +
-      fmtRow('OTC', stats.otc) +
-      fmtRow('Normal', stats.normal);
+    cartaoStats.innerHTML = '<h3>Entradas hoje</h3>' + fmtRow('OTC', stats.otc) + fmtRow('Normal', stats.normal);
   }
 
-  // --- Entradas detalhadas ---
+  // Entradas detalhadas
   const entradas = dados.entradasDetalhadas;
   const cartaoEntradas = document.getElementById('cartao-entradas');
-  if (!entradas || entradas.length === 0) {
-    cartaoEntradas.innerHTML = '<h3>Detalhes das entradas</h3><p>Sem entradas hoje ainda.</p>';
+  if (!entradas || !entradas.length) {
+    cartaoEntradas.innerHTML = '<h3>Detalhes</h3><p>Sem entradas hoje ainda.</p>';
   } else {
-    const fmtEntrada = e => {
-      const dirCls = e.direcao === 'call' ? 'entrada-dir-call' : 'entrada-dir-put';
-      const dirLabel = e.direcao === 'call' ? '▲ CALL' : '▼ PUT';
-      let statusStr, statusCls;
-      if (e.status === 'aberta') {
-        statusStr = '⏳ aguardando'; statusCls = 'entrada-status-aberta';
-      } else if (e.lucro !== null && e.lucro > 0) {
-        statusStr = `✓ +${e.lucro.toFixed(2)}`; statusCls = 'entrada-status-ganho';
-      } else if (e.lucro !== null && e.lucro < 0) {
-        statusStr = `✗ ${e.lucro.toFixed(2)}`; statusCls = 'entrada-status-perda';
-      } else if (e.lucro === 0) {
-        statusStr = '= empate'; statusCls = 'entrada-status-outro';
-      } else {
-        statusStr = escapar(e.status); statusCls = 'entrada-status-outro';
-      }
-      const motivosHtml = (e.motivos || []).length
-        ? `<div class="entrada-motivos">${e.motivos.map(m => `• ${escapar(m)}`).join('<br>')}</div>`
-        : '';
-      return `<div class="entrada-item">` +
-        `<div class="entrada-cabecalho">` +
+    const fmtE = e => {
+      const dCls = e.direcao==='call'?'entrada-dir-call':'entrada-dir-put';
+      const dLbl = e.direcao==='call'?'▲':'▼';
+      let sCls, sStr;
+      if (e.status==='aberta')                    { sCls='entrada-status-aberta';  sStr='⏳'; }
+      else if (e.lucro!=null && e.lucro>0)         { sCls='entrada-status-ganho';   sStr=`✓+${e.lucro.toFixed(2)}`; }
+      else if (e.lucro!=null && e.lucro<0)         { sCls='entrada-status-perda';   sStr=`✗${e.lucro.toFixed(2)}`; }
+      else if (e.lucro===0)                        { sCls='entrada-status-outro';   sStr='='; }
+      else                                         { sCls='entrada-status-outro';   sStr=escapar(e.status); }
+      return `<div class="entrada-item"><div class="entrada-cabecalho">` +
         `<span class="entrada-hora">${escapar(e.hora)}</span>` +
         `<span class="entrada-ativo">${escapar(e.ativo)}</span>` +
-        `<span class="${dirCls}">${dirLabel}</span>` +
+        `<span class="${dCls}">${dLbl}</span>` +
         `<span class="entrada-setup">${escapar(e.setup)}</span>` +
-        `<span class="${statusCls}" style="margin-left:auto">${statusStr}</span>` +
-        `</div>` +
-        motivosHtml +
-        `</div>`;
+        `<span class="${sCls}">${sStr}</span></div></div>`;
     };
-    cartaoEntradas.innerHTML =
-      '<h3>Detalhes das entradas</h3>' +
-      [...entradas].reverse().map(fmtEntrada).join('');
+    cartaoEntradas.innerHTML = '<h3>Detalhes</h3>' + [...entradas].reverse().map(fmtE).join('');
   }
+
+  // Notícias
+  const noticias = dados.noticias || [];
+  const sintetico = /-OTC$/i.test(dados.par||'');
+  let htmlNot;
+  if (sintetico) htmlNot = '<p>OTC: preço sintético, notícias não afetam.</p>';
+  else if (!noticias.length) htmlNot = '<p>Sem notícias relevantes nas próx. 8h.</p>';
+  else htmlNot = noticias.slice(0, 5).map(n => {
+    const im = n.minutos>=-5&&n.minutos<=20, sr = n.minutos<-5&&n.minutos>=-30;
+    const p = n.minutos<0;
+    const t = p?`há ${Math.abs(n.minutos)}min`:(n.minutos===0?'AGORA':(n.minutos<=60?`em ${n.minutos}min`:`em ${Math.floor(n.minutos/60)}h`));
+    return `<div class="noticia-linha${im?' noticia-iminente':(sr?' noticia-recente':'')}">` +
+      `<div class="noticia-cabecalho"><span class="impacto-${escapar(n.impacto)}">${escapar(n.moeda)} ${escapar(n.titulo)}</span>` +
+      `<span class="noticia-tempo">${t}</span></div></div>`;
+  }).join('');
+  document.getElementById('noticias-corpo').innerHTML = htmlNot;
+
+  // IA
+  const ia = dados.parecerIA;
+  if (!ia) {
+    document.getElementById('ia-corpo').innerHTML = '<p>Aguardando sinal...</p>';
+  } else {
+    const corDir = ia.direcao==='CALL'?'var(--green)':(ia.direcao==='PUT'?'var(--red)':'var(--muted)');
+    document.getElementById('ia-corpo').innerHTML =
+      `<p style="font-size:11px">${escapar(ia.texto)}</p>` +
+      `<div style="margin-top:4px;font-size:11px">` +
+        `<strong style="color:${corDir}">${escapar(ia.direcao||'NEUTRO')}</strong>` +
+        ` · conf. <strong>${escapar(ia.confianca||'?')}</strong>` +
+      `</div>`;
+  }
+
+  // Por setup
+  const porSetup = dados.desempenhoPorSetup || {};
+  const NOMES = { pullback:'Pullback', pullback_confluencia:'Pullback+Fib/SR', sr_rejeicao:'SR Rejeição', pin_bar_sr:'Pin Bar SR', engulfing_sr:'Engulfing SR' };
+  const linhasSetup = Object.keys(porSetup).map(k => {
+    const s = porSetup[k]; const corL = s.lucro>=0?'var(--green)':'var(--red)';
+    return `<div class="setup-linha"><strong>${escapar(NOMES[k]||k)}</strong>` +
+      `<div class="setup-detalhe">${s.total}op · ${s.winrate!=null?s.winrate+'%':'?'} · <span style="color:${corL}">${s.lucro.toFixed(2)}</span></div></div>`;
+  }).join('');
+  document.getElementById('estrategias-corpo').innerHTML = linhasSetup || '<p>Sem dados.</p>';
+
+  // Funil
+  const funil = dados.funil;
+  if (!funil) { document.getElementById('funil-corpo').innerHTML = '<p>Sem dados hoje.</p>'; }
+  else {
+    const bl = Object.entries(funil.bloqueios||{}).map(([m,n]) => `${n}×${m}`).join(', ') || 'nenhum';
+    document.getElementById('funil-corpo').innerHTML =
+      `<div class="setup-linha">Avisos: <strong>${funil.aproximando}</strong></div>` +
+      `<div class="setup-linha">Confirmados: <strong>${funil.confirmados}</strong></div>` +
+      `<div class="setup-linha setup-validada">Executados: <strong>${funil.executados}</strong></div>` +
+      `<div class="setup-detalhe">Bloq: ${escapar(bl)}</div>`;
+  }
+
+  // Motivo
+  const motivos = dados.explicacao || [];
+  document.getElementById('cartao-motivo').innerHTML =
+    '<h3>Último sinal — motivo</h3>' +
+    (motivos.length ? '<ul>'+motivos.map(m=>`<li>${escapar(m)}</li>`).join('')+'</ul>' : '<p>Sem sinal no último candle fechado.</p>');
 }
 
 async function carregarHistoricoHoje() {
   try {
     const hist = await buscarJson(`${fonte}/historico_hoje.json?_=` + Date.now());
-    const stats = hist.statsGlobais;
-    const entradas = hist.entradasDetalhadas;
-
-    const cartaoStats = document.getElementById('cartao-stats');
-    if (stats && (stats.otc.entradas > 0 || stats.normal.entradas > 0)) {
-      const fmtRow = (label, s) => {
-        if (s.entradas === 0) return `<div class="stats-row"><span class="stats-label">${label}</span><span style="color:var(--muted);font-size:11px">nenhuma</span></div>`;
-        const semResultado = s.winrate === null || s.winrate === undefined;
-        const wr = semResultado ? 0 : s.winrate;
-        const barColor = semResultado ? 'var(--muted)' : wr >= 60 ? 'var(--green)' : wr >= 45 ? 'var(--yellow)' : 'var(--red)';
-        const wrStr = semResultado ? '--' : `${wr}%`;
-        const lucroStr = s.lucro >= 0 ? `+${s.lucro.toFixed(2)}` : s.lucro.toFixed(2);
-        const lucroClass = s.lucro >= 0 ? 'win-color' : 'loss-color';
-        const abertas = s.entradas - (s.finalizadas ?? s.entradas);
-        const abertasStr = abertas > 0 ? ` <span style="color:var(--muted);font-size:10px">(${abertas} ag.)</span>` : '';
-        return `<div class="stats-row">` +
-          `<span class="stats-label">${label}</span>` +
-          `<div class="stats-bar-wrap"><div class="stats-bar" style="width:${wr}%;background:${barColor}"></div></div>` +
-          `<span class="stats-nums">${s.wins}/${s.entradas}${abertasStr} &nbsp;<strong style="color:${barColor}">${wrStr}</strong> &nbsp;<span class="${lucroClass}">${lucroStr}</span></span>` +
-          `</div>`;
-      };
-      cartaoStats.innerHTML = '<h3>Entradas hoje</h3>' + fmtRow('OTC', stats.otc) + fmtRow('Normal', stats.normal);
+    if (hist.statsGlobais) {
+      const s = hist.statsGlobais;
+      if (s.otc.entradas>0 || s.normal.entradas>0) {
+        // renderizarPainel já cuida disso no próximo ciclo; aqui só garantimos que não fica vazio
+      }
     }
-
-    const cartaoEntradas = document.getElementById('cartao-entradas');
-    if (entradas && entradas.length > 0) {
-      const fmtEntrada = e => {
-        const dirCls = e.direcao === 'call' ? 'entrada-dir-call' : 'entrada-dir-put';
-        const dirLabel = e.direcao === 'call' ? '▲ CALL' : '▼ PUT';
-        let statusStr, statusCls;
-        if (e.status === 'aberta') { statusStr = '⏳ aguardando'; statusCls = 'entrada-status-aberta'; }
-        else if (e.lucro !== null && e.lucro > 0) { statusStr = `✓ +${e.lucro.toFixed(2)}`; statusCls = 'entrada-status-ganho'; }
-        else if (e.lucro !== null && e.lucro < 0) { statusStr = `✗ ${e.lucro.toFixed(2)}`; statusCls = 'entrada-status-perda'; }
-        else if (e.lucro === 0) { statusStr = '= empate'; statusCls = 'entrada-status-outro'; }
-        else { statusStr = escapar(e.status); statusCls = 'entrada-status-outro'; }
-        const motivosHtml = (e.motivos || []).length
-          ? `<div class="entrada-motivos">${e.motivos.map(m => `• ${escapar(m)}`).join('<br>')}</div>` : '';
-        return `<div class="entrada-item">` +
-          `<div class="entrada-cabecalho">` +
-          `<span class="entrada-hora">${escapar(e.hora)}</span>` +
-          `<span class="entrada-ativo">${escapar(e.ativo)}</span>` +
-          `<span class="${dirCls}">${dirLabel}</span>` +
-          `<span class="entrada-setup">${escapar(e.setup)}</span>` +
-          `<span class="${statusCls}" style="margin-left:auto">${statusStr}</span>` +
-          `</div>${motivosHtml}</div>`;
-      };
-      cartaoEntradas.innerHTML = '<h3>Detalhes das entradas</h3>' + [...entradas].reverse().map(fmtEntrada).join('');
-    }
-  } catch (_) { /* historico_hoje.json ainda não existe — silencioso */ }
+  } catch(_) {}
 }
 
 (async () => {
@@ -988,7 +908,6 @@ async function carregarHistoricoHoje() {
   atualizarResumo();
   setInterval(atualizar, 1000);
   setInterval(atualizarResumo, 3000);
-  // Atualiza o histórico a cada 30s enquanto o bot estiver rodando
   setInterval(carregarHistoricoHoje, 30000);
 })();
 </script>
