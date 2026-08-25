@@ -26,3 +26,4 @@ env/
 # Outros
 graphify-out/
 *.log
+dados/bt_h1.pkl
