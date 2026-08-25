@@ -32,6 +32,7 @@ from .timing import (
 from .estrategia import EstrategiaReversaoM5
 from .executor import ExecutorSeguro
 from .grafico import GraficoM5
+from .agente_regime import RegimeMercado, classificar as regime_classificar
 from .ia import analisar as ia_analisar, montar_contexto as ia_contexto
 from .mercado_iq import MercadoIQ, MercadoIndisponivel
 from .modelos import Decisao
@@ -181,6 +182,7 @@ def main(config: Configuracao | None = None) -> None:
     _candle_guard = CandleGuard()  # deduplicação e validação de ordem/fechamento
     _cooldown_ativo: dict[str, float] = {}
     _ultima_h4_por_ativo: dict[str, float] = {}
+    _regime_por_ativo: dict[str, RegimeMercado | None] = {a: None for a in config.ativos}
     _ultima_h1_por_ativo: dict[str, float] = {}
     _ultima_m5_por_ativo: dict[str, float] = {}
     _ultima_m15_por_ativo: dict[str, float] = {}
@@ -359,6 +361,18 @@ def main(config: Configuracao | None = None) -> None:
                     estrategia.atualizar_contexto_h4(ativo, _tendencia_h4)
                     _ultima_h4_por_ativo[ativo] = _agora_h4
                     print(f"    [H4] {ativo}: TendenciaH4={_tendencia_h4}")
+                    # Agente de regime: classificação LLM complementar ao EMA H4
+                    try:
+                        _candles_h1_regime = mercado.buscar_h1(ativo, config.h1_num_candles)
+                        _regime = regime_classificar(ativo, _candles_h4, _candles_h1_regime)
+                        if _regime:
+                            _regime_por_ativo[ativo] = _regime
+                            print(
+                                f"    [REGIME] {ativo}: {_regime.regime.upper()} "
+                                f"conf={_regime.confianca}/10 | {_regime.resumo}"
+                            )
+                    except Exception as _e_reg:
+                        print(f"    [REGIME] {ativo}: erro — {_e_reg}")
                 except Exception as _e_h4:
                     print(f"    [H4] falha ao buscar H4 para {ativo}: {_e_h4}")
         # Contexto M5: atualiza estrutura direcional do M5 quando configurado.
@@ -872,8 +886,23 @@ def main(config: Configuracao | None = None) -> None:
                 and ia_atual.direcao_sugerida is not None
                 and ia_atual.direcao_sugerida.lower() != decisao.direcao
             )
+            # Agente de regime: veto quando confiança >= 6 e direção é bloqueada
+            _regime_ativo = _regime_por_ativo.get(ativo)
+            _regime_veta = (
+                _regime_ativo is not None
+                and (
+                    (decisao.direcao == "call" and _regime_ativo.bloquear_call)
+                    or (decisao.direcao == "put" and _regime_ativo.bloquear_put)
+                )
+            )
             if not par_validado:
                 print(f"    [{setup_nome}] par nao validado, ignorado (use backtest offline)")
+                algum_bloqueio_definitivo = True
+            elif _regime_veta and not favorece_noticia:
+                print(
+                    f"    [REGIME] BLOQUEOU [{setup_nome}]: regime={_regime_ativo.regime.upper()} "
+                    f"conf={_regime_ativo.confianca}/10 veta {decisao.direcao.upper()} | {_regime_ativo.resumo}"
+                )
                 algum_bloqueio_definitivo = True
             elif ia_discorda and not favorece_noticia:
                 _ia_bloqueia = config.ia_como_filtro and setup_nome not in config.ia_filtro_exceto_setups
