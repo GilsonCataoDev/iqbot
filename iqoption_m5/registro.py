@@ -177,6 +177,14 @@ class RegistroSQLite:
                 db.execute("ALTER TABLE operacoes ADD COLUMN hora_sinal TEXT")
             if "atraso_envio_ms" not in colunas_operacoes:
                 db.execute("ALTER TABLE operacoes ADD COLUMN atraso_envio_ms INTEGER")
+            colunas_simulacoes = {
+                linha[1] for linha in db.execute("PRAGMA table_info(simulacoes)").fetchall()
+            }
+            if "motivo" not in colunas_simulacoes:
+                # Shadow logging: por que o sinal NAO virou ordem real.
+                db.execute(
+                    "ALTER TABLE simulacoes ADD COLUMN motivo TEXT NOT NULL DEFAULT 'nao_bloqueado'"
+                )
             db.execute(f"PRAGMA user_version={VERSAO_SCHEMA}")
 
     def registrar_latencia(self, lat, id_ordem: str | None = None) -> None:
@@ -575,6 +583,77 @@ class RegistroSQLite:
                 (ativo, direcao, setup, str(candle_hora), preco_entrada, payout, resultado,
                  datetime.now().isoformat()),
             )
+
+    def registrar_simulacao_bloqueada(
+        self, ativo: str, direcao: str, setup: str, candle_hora,
+        preco_entrada: float, payout: float, motivo: str,
+    ) -> None:
+        """Shadow logging: registra um sinal que foi BLOQUEADO por algum filtro.
+
+        Fica com resultado=NULL ate `resolver_simulacoes_pendentes` apurar o
+        desfecho pelo candle. Permite medir se o filtro que bloqueou estava
+        certo ou errado, sem arriscar dinheiro e sem perder amostra.
+        """
+        with self._lock, self._sessao() as db:
+            db.execute(
+                """
+                INSERT OR IGNORE INTO simulacoes
+                (ativo, direcao, setup, candle_hora, preco_entrada, payout,
+                 resultado, criado_em, motivo)
+                VALUES (?, ?, ?, ?, ?, ?, NULL, ?, ?)
+                """,
+                (ativo, direcao, setup, str(candle_hora), preco_entrada,
+                 payout, datetime.now().isoformat(), motivo),
+            )
+
+    def simulacoes_pendentes(self, ativo: str | None = None) -> list[dict]:
+        """Sinais em shadow ainda sem desfecho apurado."""
+        sql = ("SELECT id, ativo, direcao, setup, candle_hora, preco_entrada, motivo "
+               "FROM simulacoes WHERE resultado IS NULL")
+        args: tuple = ()
+        if ativo:
+            sql += " AND ativo=?"
+            args = (ativo,)
+        sql += " ORDER BY candle_hora"
+        with self._lock, self._sessao() as db:
+            linhas = db.execute(sql, args).fetchall()
+        campos = ["id", "ativo", "direcao", "setup", "candle_hora", "preco_entrada", "motivo"]
+        return [dict(zip(campos, l)) for l in linhas]
+
+    def resolver_simulacao(self, id_sim: int, resultado: str) -> None:
+        with self._lock, self._sessao() as db:
+            db.execute("UPDATE simulacoes SET resultado=? WHERE id=?", (resultado, id_sim))
+
+    def desempenho_simulado_por_motivo(self, limite: int = 1000) -> dict[str, dict]:
+        """WR dos sinais bloqueados, agrupado pelo filtro que bloqueou.
+
+        Leitura: WR ALTO num motivo = o filtro esta barrando sinais bons
+        (custa dinheiro). WR BAIXO = o filtro esta funcionando.
+        Compare sempre com o breakeven = 1/(1+payout).
+        """
+        with self._lock, self._sessao() as db:
+            linhas = db.execute(
+                """
+                SELECT motivo, resultado, payout FROM simulacoes
+                WHERE resultado IS NOT NULL AND motivo != 'nao_bloqueado'
+                ORDER BY criado_em DESC LIMIT ?
+                """,
+                (limite,),
+            ).fetchall()
+        agg: dict[str, dict] = {}
+        for motivo, resultado, payout in linhas:
+            it = agg.setdefault(motivo, {"total": 0, "vitorias": 0, "lucro_evitado": 0.0})
+            it["total"] += 1
+            if resultado == "win":
+                it["vitorias"] += 1
+                it["lucro_evitado"] += float(payout)
+            elif resultado == "loss":
+                it["lucro_evitado"] -= 1.0
+        for it in agg.values():
+            it["winrate"] = round(100 * it["vitorias"] / it["total"], 1) if it["total"] else None
+            # lucro_evitado > 0 -> o filtro barrou lucro (esta atrapalhando)
+            it["lucro_evitado"] = round(it["lucro_evitado"], 2)
+        return agg
 
     def desempenho_simulado_por_setup(self, limite: int = 500) -> dict[str, dict]:
         """Winrate por setup dos sinais SIMULADOS (sem dinheiro real) —

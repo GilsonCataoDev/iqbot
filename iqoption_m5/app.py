@@ -805,6 +805,53 @@ def main(config: Configuracao | None = None) -> None:
                 return
 
         proxima_vela = pd.Timestamp(indicadores.index[-1])
+
+        # --- Shadow logging -------------------------------------------------
+        # Registra sinais BLOQUEADOS com resultado pendente, pra medir depois se
+        # o filtro acertou. Nao envia ordem, nao mexe em banca: so coleta amostra.
+        _payout_shadow = float(snapshot.payout) if snapshot.payout is not None else 0.85
+
+        def _shadow(_dec, _motivo: str) -> None:
+            try:
+                registro.registrar_simulacao_bloqueada(
+                    ativo=ativo,
+                    direcao=_dec.direcao,
+                    setup=_dec.detalhes.get("setup", _dec.motivo),
+                    candle_hora=_dec.candle_hora,
+                    preco_entrada=float(indicadores.iloc[-1]["Close"]),
+                    payout=_payout_shadow,
+                    motivo=_motivo,
+                )
+            except Exception as _e_sh:
+                print(f"    [shadow] falha ao registrar: {_e_sh}")
+
+        # Resolve shadows antigos deste ativo usando o buffer de candles.
+        # Mesma regra do resultado real (mercado_iq.resultado_por_candle):
+        # o candle so conta como fechado quando existe um candle posterior.
+        try:
+            _buf = snapshot.candles
+            for _sim in registro.simulacoes_pendentes(ativo):
+                _alvo = pd.Timestamp(_sim["candle_hora"])
+                if _alvo not in _buf.index:
+                    continue
+                _pos = _buf.index.get_loc(_alvo)
+                if not isinstance(_pos, int) or _pos >= len(_buf.index) - 1:
+                    continue  # ainda em formacao
+                _fech = float(_buf.iloc[_pos]["Close"])
+                _ent = float(_sim["preco_entrada"])
+                if abs(_fech - _ent) < 1e-8:
+                    _res = "equal"
+                else:
+                    _venceu = (_fech > _ent) if _sim["direcao"] == "call" else (_fech < _ent)
+                    _res = "win" if _venceu else "loss"
+                registro.resolver_simulacao(_sim["id"], _res)
+                print(
+                    f"    [shadow] {ativo} {_sim['direcao'].upper()} "
+                    f"[{_sim['setup']}] bloqueado por '{_sim['motivo']}' -> {_res.upper()}"
+                )
+        except Exception as _e_res:
+            print(f"    [shadow] falha ao resolver: {_e_res}")
+
         todos_motivos: list[str] = []
         houve_execucao = False
         algum_bloqueio_definitivo = False  # qualquer coisa que não seja bloqueio temporário
@@ -825,6 +872,7 @@ def main(config: Configuracao | None = None) -> None:
                         f"    [{setup_nome}] fora da janela horária "
                         f"({_h_ini:02d}h-{_h_fim:02d}h UTC, agora={_hora_utc:02d}h) — cancelado"
                     )
+                    _shadow(decisao, "horario_setup")
                     algum_bloqueio_definitivo = True
                     continue
             # Filtro de regime de mercado
@@ -903,6 +951,7 @@ def main(config: Configuracao | None = None) -> None:
                     f"    [REGIME] BLOQUEOU [{setup_nome}]: regime={_regime_ativo.regime.upper()} "
                     f"conf={_regime_ativo.confianca}/10 veta {decisao.direcao.upper()} | {_regime_ativo.resumo}"
                 )
+                _shadow(decisao, "regime_llm")
                 algum_bloqueio_definitivo = True
             elif ia_discorda and not favorece_noticia:
                 _ia_bloqueia = config.ia_como_filtro and setup_nome not in config.ia_filtro_exceto_setups
@@ -911,6 +960,7 @@ def main(config: Configuracao | None = None) -> None:
                         f"    [IA] BLOQUEOU [{setup_nome}]: IA sugere {ia_atual.direcao_sugerida} "
                         f"({ia_atual.confianca}) contra o sinal {decisao.direcao.upper()}"
                     )
+                    _shadow(decisao, "ia_filtro")
                     algum_bloqueio_definitivo = True
                 else:
                     print(
@@ -935,6 +985,7 @@ def main(config: Configuracao | None = None) -> None:
                         f"nível={_nivel_ref:.5f} dist={_distancia:.5f} "
                         f"máx={_limite_marcacao:.5f} ({config.marcacao_tolerancia_atr}×ATR) — cancelado"
                     )
+                    _shadow(decisao, "marcacao")
                     algum_bloqueio_definitivo = True
                     continue
                 # Filtro de candle de entrada: cancela se N+1 abriu contra a direção do sinal.
@@ -952,6 +1003,7 @@ def main(config: Configuracao | None = None) -> None:
                             f"    [{setup_nome}] filtro de abertura: candle abriu contra "
                             f"a direção (delta={_delta:.5f}, lim={_limite_filtro:.5f}) — cancelado"
                         )
+                        _shadow(decisao, "candle_abertura")
                         algum_bloqueio_definitivo = True
                         continue
                 # Bloqueio por notícia de alto impacto (apenas ativos reais; OTC ignora).
@@ -965,6 +1017,7 @@ def main(config: Configuracao | None = None) -> None:
                             f"    [{setup_nome}] notícia HIGH impacto: "
                             f"{_noticias_high[0].titulo} — cancelado"
                         )
+                        _shadow(decisao, "noticia_high")
                         algum_bloqueio_definitivo = True
                         continue
                 if ia_discorda and favorece_noticia:
