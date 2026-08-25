@@ -560,11 +560,19 @@ def configuracao_scalping_m1(base: Configuracao | None = None) -> Configuracao:
     - Banco isolado: iqoption_m5_practice_scalping_m1.sqlite3
     - Porta gráfico: 8772
 
-    Money management: R$15→R$20 (igual M5/M15, sem 3º nível).
+    Money management: STAKE FIXO R$5 (anti-martingale desativado).
+    Medido em 61 ops: P(win|win apos vitoria)=47.2% < breakeven 54.05%, enquanto
+    P(win|apos derrota)=75.0% (runs test z=+2.00 -> reversao a media, nao streaks).
+    O anti-martingale subia a aposta justamente onde o WR cai abaixo do breakeven:
+    stake medio em loss ficou 1.221x o stake medio em win, drenando 8.78pp dos
+    9.18pp de edge (+R$2.17 realizado vs +R$47.69 com stake fixo, mesma sequencia).
     """
     return replace(
         configuracao_scalping_60(base),
         valor_por_ordem=5.0,
+        # Anti-martingale DESATIVADO: premissa invertida no M1 (ver docstring).
+        anti_martingale_ativo=False,
+        anti_martingale_niveis=(1.0,),
         timeframe_segundos=60,
         expiracao_minutos=2,  # 2 min — nova estratégia de rejeição M1 exige vela pra confirmar
         ativos=("EURUSD", "USDJPY"),
