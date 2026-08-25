@@ -120,15 +120,52 @@
   #cartao-sinal.pulsando { animation: pulse-sinal 1.3s ease-in-out infinite; }
 
   .sinal-direcao {
-    font-size: 22px; font-weight: 800; letter-spacing: .02em;
-    margin: 4px 0;
+    font-size: 32px; font-weight: 800; letter-spacing: .02em;
+    margin: 4px 0 2px;
   }
   .sinal-direcao.call { color: var(--green); }
   .sinal-direcao.put  { color: var(--red); }
   .sinal-direcao.aviso { color: var(--yellow); }
+  .sinal-h4 {
+    display: inline-flex; align-items: center; gap: 3px;
+    font-size: 10px; font-weight: 700; padding: 2px 7px; border-radius: 10px;
+    background: var(--surface2); color: var(--muted); margin-bottom: 4px;
+  }
+  .sinal-h4.alta  { color: var(--green); }
+  .sinal-h4.baixa { color: var(--red); }
+  .sinal-h4.lateral { color: var(--muted); }
   .sinal-setup { font-size: 11px; color: var(--muted); margin-bottom: 4px; }
   .sinal-preco { font-size: 14px; font-family: monospace; }
   .sinal-fatores { font-size: 10px; color: var(--muted); margin-top: 4px; }
+
+  /* ── P&L hero card ── */
+  #pl-total-hero {
+    font-size: 26px; font-weight: 800; font-variant-numeric: tabular-nums;
+    line-height: 1.1; margin: 4px 0 2px;
+  }
+  #pl-detalhe-hero { font-size: 11px; color: var(--muted); margin-bottom: 2px; }
+  .pl-positivo { color: var(--green); }
+  .pl-negativo { color: var(--red); }
+  .pl-neutro   { color: var(--muted); }
+  .pl-chips { display: flex; gap: 6px; margin-top: 4px; flex-wrap: wrap; }
+  .pl-chip {
+    font-size: 10px; font-weight: 700; padding: 2px 7px; border-radius: 10px;
+    background: var(--surface2);
+  }
+  .pl-chip.win { color: var(--green); }
+  .pl-chip.loss { color: var(--red); }
+
+  /* ── Setup compacto (sempre visível) ── */
+  .setup-row {
+    display: flex; align-items: center; gap: 5px;
+    padding: 3px 0; border-bottom: 1px solid #1a2035; font-size: 11px;
+  }
+  .setup-row:last-child { border-bottom: none; }
+  .setup-row-label { flex: 1; font-size: 10px; color: var(--text); }
+  .setup-row-bar-wrap { width: 42px; height: 3px; background: #1c2233; border-radius: 2px; overflow: hidden; }
+  .setup-row-bar { height: 100%; border-radius: 2px; }
+  .setup-row-wr { font-size: 10px; font-weight: 700; min-width: 30px; text-align: right; }
+  .setup-row-pl { font-size: 10px; min-width: 36px; text-align: right; }
 
   /* stats compacto */
   .stats-row {
@@ -185,7 +222,7 @@
   #charts-area {
     flex: 1; display: flex; flex-direction: column; overflow: hidden; min-width: 0;
   }
-  #chart-preco  { flex: 6; min-height: 0; }
+  #chart-preco  { flex: 8; min-height: 0; }
   #chart-volume { flex: 1; min-height: 0; }
   #chart-rsi    { flex: 2; min-height: 0; }
 
@@ -260,31 +297,40 @@
   <!-- ── Sidebar ── -->
   <div id="sidebar">
 
+    <!-- P&L hoje -->
+    <div class="cartao" id="cartao-pl">
+      <h3>P&L hoje</h3>
+      <div id="pl-total-hero" class="pl-neutro">—</div>
+      <div id="pl-detalhe-hero">sem entradas</div>
+      <div class="pl-chips" id="pl-chips"></div>
+    </div>
+
     <!-- Sinal em destaque -->
     <div class="cartao" id="cartao-sinal">
       <h3>Próximo sinal <span class="selo-informativo" id="sinal-nota">aguardando</span></h3>
       <p id="sinal-vazio" style="color:var(--muted)">Sem sinal no momento.</p>
       <div id="sinal-corpo" style="display:none">
         <div class="sinal-direcao" id="sinal-dir"></div>
+        <div class="sinal-h4 lateral" id="sinal-h4" style="display:none"></div>
         <div class="sinal-setup" id="sinal-setup"></div>
         <div class="sinal-preco" id="sinal-preco"></div>
         <div class="sinal-fatores" id="sinal-fat"></div>
       </div>
     </div>
 
-    <!-- Stats hoje -->
-    <div class="cartao" id="cartao-stats">
-      <h3>Entradas hoje</h3>
-      <p>Sem entradas registradas ainda.</p>
+    <!-- Por setup (sempre visível) -->
+    <div class="cartao" id="cartao-setup">
+      <h3>Por setup</h3>
+      <div id="setup-corpo"><p style="color:var(--muted)">Sem dados.</p></div>
     </div>
 
     <!-- Entradas detalhadas -->
     <div class="cartao" id="cartao-entradas">
-      <h3>Detalhes</h3>
+      <h3>Detalhes <span id="entradas-resumo" style="font-weight:400;color:var(--muted);font-size:10px;text-transform:none;letter-spacing:0"></span></h3>
       <p>Sem entradas hoje ainda.</p>
     </div>
 
-    <!-- Expansível: noticias, IA, estratégias, funil -->
+    <!-- Expansível: noticias, IA, funil, motivo -->
     <div class="cartao" id="cartao-extra" onclick="toggleExtra()">
       <h3>Mais info <span id="extra-toggle">▼ expandir</span></h3>
       <div id="extra-corpo">
@@ -297,20 +343,14 @@
           <div id="ia-corpo"><p>Aguardando sinal...</p></div>
         </div>
         <div style="padding:6px 0 4px;border-bottom:1px solid var(--border);margin-bottom:6px">
-          <div style="font-size:10px;font-weight:700;letter-spacing:.06em;text-transform:uppercase;color:var(--muted);margin-bottom:4px">Por setup</div>
-          <div id="estrategias-corpo"><p>Sem dados.</p></div>
-        </div>
-        <div style="padding:6px 0 4px">
           <div style="font-size:10px;font-weight:700;letter-spacing:.06em;text-transform:uppercase;color:var(--muted);margin-bottom:4px">Funil de sinais</div>
           <div id="funil-corpo"><p>Sem dados.</p></div>
         </div>
+        <div style="padding:6px 0 4px">
+          <div style="font-size:10px;font-weight:700;letter-spacing:.06em;text-transform:uppercase;color:var(--muted);margin-bottom:4px">Último sinal — motivo</div>
+          <div id="motivo-corpo"><p>Sem sinal no último candle.</p></div>
+        </div>
       </div>
-    </div>
-
-    <!-- Por que sinalizou -->
-    <div class="cartao" id="cartao-motivo">
-      <h3>Último sinal — motivo</h3>
-      <p>Sem sinal no último candle.</p>
     </div>
 
   </div><!-- /sidebar -->
@@ -584,7 +624,12 @@ async function atualizar() {
     }
 
     serieCandle.setData(dados.candles);
-    serieVolume.setData(dados.volume || []);
+    // volume colorido por direção da vela
+    const volData = (dados.volume || []).map((v, i) => {
+      const c = dados.candles[i];
+      return { ...v, color: c && c.close >= c.open ? '#26a69a55' : '#ef535055' };
+    });
+    serieVolume.setData(volData);
     serieBandaSup.setData(dados.bandaSup);
     serieBandaInf.setData(dados.bandaInf);
     serieBandaMedia.setData(dados.bandaMedia);
@@ -592,13 +637,13 @@ async function atualizar() {
     serieEmaMacro.setData(dados.emaMacro || []);
     serieRsi.setData(dados.rsi);
 
-    // S/R lines
+    // S/R lines (com preço no label)
     linhasNiveis.forEach(l => serieCandle.removePriceLine(l));
     linhasNiveis = chkNiveis.checked ? (dados.niveis||[]).map(n => serieCandle.createPriceLine({
       price: n.preco,
-      color: n.tipo === 'resistencia' ? '#ef535088' : '#26a69a88',
+      color: n.tipo === 'resistencia' ? '#ef535099' : '#26a69a99',
       lineWidth: 1, lineStyle: LightweightCharts.LineStyle.Dashed, axisLabelVisible: true,
-      title: n.tipo === 'resistencia' ? 'R' : 'S',
+      title: `${n.tipo === 'resistencia' ? 'R' : 'S'} ${n.preco.toFixed(precisao)}`,
     })) : [];
 
     // Fib lines
@@ -723,8 +768,9 @@ async function atualizar() {
 
 // ── Sinal badge no top bar + card sidebar ──
 function renderizarSinalBadge(dados) {
-  const badge = document.getElementById('sinal-badge');
-  const card  = document.getElementById('cartao-sinal');
+  const badge  = document.getElementById('sinal-badge');
+  const card   = document.getElementById('cartao-sinal');
+  const h4Tend = dados.tendenciaMacro || null;
   const vazio = document.getElementById('sinal-vazio');
   const corpo = document.getElementById('sinal-corpo');
   const nota  = document.getElementById('sinal-nota');
@@ -770,6 +816,14 @@ function renderizarSinalBadge(dados) {
   vazio.style.display = 'none'; corpo.style.display = '';
   document.getElementById('sinal-dir').className = `sinal-direcao ${cls}`;
   document.getElementById('sinal-dir').textContent = label;
+  // H4 trend badge
+  const h4El = document.getElementById('sinal-h4');
+  if (h4Tend) {
+    const seta = h4Tend==='alta'?'↑':(h4Tend==='baixa'?'↓':'→');
+    h4El.className = `sinal-h4 ${h4Tend}`;
+    h4El.textContent = `H4 ${seta} ${h4Tend}`;
+    h4El.style.display = 'inline-flex';
+  } else { h4El.style.display = 'none'; }
   document.getElementById('sinal-setup').textContent = setup;
   document.getElementById('sinal-preco').textContent = `@ ${preco}${rsi}`;
   document.getElementById('sinal-fat').textContent = fat;
@@ -786,28 +840,41 @@ function escapar(v) {
 }
 
 function renderizarPainel(dados) {
-  // Stats hoje
+  // P&L hero card
   const stats = dados.statsGlobais;
-  const cartaoStats = document.getElementById('cartao-stats');
+  const plTotal = document.getElementById('pl-total-hero');
+  const plDetalhe = document.getElementById('pl-detalhe-hero');
+  const plChips = document.getElementById('pl-chips');
   if (!stats || (stats.otc.entradas === 0 && stats.normal.entradas === 0)) {
-    cartaoStats.innerHTML = '<h3>Entradas hoje</h3><p>Sem entradas registradas ainda.</p>';
+    plTotal.className = 'pl-neutro'; plTotal.textContent = '—';
+    plDetalhe.textContent = 'sem entradas'; plChips.innerHTML = '';
   } else {
-    const fmtRow = (label, s) => {
-      if (s.entradas === 0) return `<div class="stats-row"><span class="stats-label">${label}</span><span style="color:var(--muted);font-size:10px">—</span></div>`;
-      const wr = s.winrate ?? 0; const semR = s.winrate == null;
-      const cor = semR ? 'var(--muted)' : (wr>=60?'var(--green)':(wr>=45?'var(--yellow)':'var(--red)'));
-      const ab = s.entradas - (s.finalizadas ?? s.entradas);
-      return `<div class="stats-row"><span class="stats-label">${label}</span>` +
-        `<div class="stats-bar-wrap"><div class="stats-bar" style="width:${wr}%;background:${cor}"></div></div>` +
-        `<span class="stats-nums">${s.wins}/${s.entradas}${ab>0?` <span style="color:var(--muted)">(${ab}ag.)</span>`:''} <strong style="color:${cor}">${semR?'--':wr+'%'}</strong> ` +
-        `<span class="${s.lucro>=0?'win-color':'loss-color'}">${s.lucro>=0?'+':''}${s.lucro.toFixed(2)}</span></span></div>`;
-    };
-    cartaoStats.innerHTML = '<h3>Entradas hoje</h3>' + fmtRow('OTC', stats.otc) + fmtRow('Normal', stats.normal);
+    const sN = stats.normal, sO = stats.otc;
+    const lucroTotal = (sN.lucro || 0) + (sO.lucro || 0);
+    const winsTotal  = (sN.wins || 0) + (sO.wins || 0);
+    const entTotal   = (sN.entradas || 0) + (sO.entradas || 0);
+    const perdTotal  = entTotal - winsTotal - ((sN.entradas-(sN.finalizadas??sN.entradas)) + (sO.entradas-(sO.finalizadas??sO.entradas)));
+    const wrTotal    = entTotal > 0 ? Math.round(winsTotal / entTotal * 100) : null;
+    const cls = lucroTotal > 0 ? 'pl-positivo' : (lucroTotal < 0 ? 'pl-negativo' : 'pl-neutro');
+    plTotal.className = cls;
+    plTotal.textContent = (lucroTotal >= 0 ? '+' : '') + lucroTotal.toFixed(2) + 'u';
+    plDetalhe.textContent = `${winsTotal}G / ${perdTotal >= 0 ? perdTotal : '?'}P${wrTotal != null ? ' · ' + wrTotal + '%' : ''}`;
+    const chips = [];
+    if (sN.entradas > 0) chips.push(`<span class="pl-chip ${sN.lucro>=0?'win':'loss'}">Normal ${sN.wins}/${sN.entradas} ${sN.lucro>=0?'+':''}${sN.lucro.toFixed(1)}u</span>`);
+    if (sO.entradas > 0) chips.push(`<span class="pl-chip ${sO.lucro>=0?'win':'loss'}">OTC ${sO.wins}/${sO.entradas} ${sO.lucro>=0?'+':''}${sO.lucro.toFixed(1)}u</span>`);
+    plChips.innerHTML = chips.join('');
   }
 
   // Entradas detalhadas
   const entradas = dados.entradasDetalhadas;
   const cartaoEntradas = document.getElementById('cartao-entradas');
+  // resumo inline no header
+  if (stats && (stats.normal.entradas > 0 || stats.otc.entradas > 0)) {
+    const t = (stats.normal.entradas||0) + (stats.otc.entradas||0);
+    const w = (stats.normal.wins||0) + (stats.otc.wins||0);
+    const el = document.getElementById('entradas-resumo');
+    if (el) el.textContent = `${w}/${t}`;
+  }
   if (!entradas || !entradas.length) {
     cartaoEntradas.innerHTML = '<h3>Detalhes</h3><p>Sem entradas hoje ainda.</p>';
   } else {
@@ -860,15 +927,22 @@ function renderizarPainel(dados) {
       `</div>`;
   }
 
-  // Por setup
+  // Por setup (card sempre visível)
   const porSetup = dados.desempenhoPorSetup || {};
-  const NOMES = { pullback:'Pullback', pullback_confluencia:'Pullback+Fib/SR', sr_rejeicao:'SR Rejeição', pin_bar_sr:'Pin Bar SR', engulfing_sr:'Engulfing SR' };
+  const NOMES = { pullback:'Pullback', pullback_confluencia:'Pullback+Fib', sr_rejeicao:'SR Rejeição', pin_bar_sr:'Pin Bar SR', engulfing_sr:'Engulfing SR' };
   const linhasSetup = Object.keys(porSetup).map(k => {
-    const s = porSetup[k]; const corL = s.lucro>=0?'var(--green)':'var(--red)';
-    return `<div class="setup-linha"><strong>${escapar(NOMES[k]||k)}</strong>` +
-      `<div class="setup-detalhe">${s.total}op · ${s.winrate!=null?s.winrate+'%':'?'} · <span style="color:${corL}">${s.lucro.toFixed(2)}</span></div></div>`;
+    const s = porSetup[k];
+    const wr = s.winrate ?? 0;
+    const cor = s.winrate == null ? 'var(--muted)' : (wr>=60?'var(--green)':(wr>=45?'var(--yellow)':'var(--red)'));
+    const corPl = s.lucro >= 0 ? 'var(--green)' : 'var(--red)';
+    return `<div class="setup-row">` +
+      `<span class="setup-row-label">${escapar(NOMES[k]||k)}<br><span style="color:var(--muted);font-size:9px">${s.total}op</span></span>` +
+      `<div class="setup-row-bar-wrap"><div class="setup-row-bar" style="width:${wr}%;background:${cor}"></div></div>` +
+      `<span class="setup-row-wr" style="color:${cor}">${s.winrate!=null?wr+'%':'?'}</span>` +
+      `<span class="setup-row-pl" style="color:${corPl}">${s.lucro>=0?'+':''}${s.lucro.toFixed(1)}</span>` +
+      `</div>`;
   }).join('');
-  document.getElementById('estrategias-corpo').innerHTML = linhasSetup || '<p>Sem dados.</p>';
+  document.getElementById('setup-corpo').innerHTML = linhasSetup || '<p style="color:var(--muted)">Sem dados.</p>';
 
   // Funil
   const funil = dados.funil;
@@ -882,11 +956,12 @@ function renderizarPainel(dados) {
       `<div class="setup-detalhe">Bloq: ${escapar(bl)}</div>`;
   }
 
-  // Motivo
+  // Motivo (dentro do expandable)
   const motivos = dados.explicacao || [];
-  document.getElementById('cartao-motivo').innerHTML =
-    '<h3>Último sinal — motivo</h3>' +
-    (motivos.length ? '<ul>'+motivos.map(m=>`<li>${escapar(m)}</li>`).join('')+'</ul>' : '<p>Sem sinal no último candle fechado.</p>');
+  const motivoEl = document.getElementById('motivo-corpo');
+  if (motivoEl) motivoEl.innerHTML = motivos.length
+    ? '<ul style="margin:0;padding-left:14px;font-size:11px;line-height:1.6">' + motivos.map(m=>`<li>${escapar(m)}</li>`).join('') + '</ul>'
+    : '<p style="color:var(--muted)">Sem sinal no último candle fechado.</p>';
 }
 
 async function carregarHistoricoHoje() {
