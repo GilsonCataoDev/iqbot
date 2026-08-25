@@ -11,6 +11,7 @@ from iqoption_m5.config import (
     configuracao_practice_m5,
     configuracao_real_m5,
     configuracao_scalping_60,
+    configuracao_scalping_h1,
     configuracao_scalping_m1,
     configuracao_scalping_m15,
     configuracao_scalping_m15_r5,
@@ -82,6 +83,18 @@ def analisar_argumentos(argv=None):
         help="mesmo perfil scalping M1 mas na conta PRACTICE, sem limites de sessão. Exige --confirmo.",
     )
     parser.add_argument(
+        "--scalping-h1",
+        dest="scalping_h1",
+        action="store_true",
+        help="perfil scalping H1 REAL: candles 1h, sr_rejeicao + pin_bar, expiração 1h. Exige --confirmo.",
+    )
+    parser.add_argument(
+        "--scalping-h1-practice",
+        dest="scalping_h1_practice",
+        action="store_true",
+        help="mesmo perfil scalping H1 mas na conta PRACTICE, sem limites de sessão. Exige --confirmo.",
+    )
+    parser.add_argument(
         "--practice",
         action="store_true",
         help="envia ordens na conta PRACTICE. Exige --confirmo; sem esta opção apenas monitora.",
@@ -125,6 +138,7 @@ def selecionar_configuracao(argumentos) -> Configuracao:
         argumentos.scalping_m15, argumentos.scalping_m15_practice,
         argumentos.scalping_m15_r5, argumentos.scalping_m15_r5_practice,
         argumentos.scalping_m1, argumentos.scalping_m1_practice,
+        argumentos.scalping_h1, argumentos.scalping_h1_practice,
     ))
     if perfis_execucao > 1:
         raise SystemExit("Escolha apenas um perfil por vez.")
@@ -133,6 +147,10 @@ def selecionar_configuracao(argumentos) -> Configuracao:
             "Para enviar ordens, use o perfil desejado junto com --confirmo. "
             "Sem confirmação o programa permanece somente monitor."
         )
+    if argumentos.scalping_h1_practice:
+        return replace(configuracao_scalping_h1(), **_PRATICA_SEM_LIMITES)
+    if argumentos.scalping_h1:
+        return configuracao_scalping_h1()
     if argumentos.scalping_m1_practice:
         return replace(configuracao_scalping_m1(), **_PRATICA_SEM_LIMITES)
     if argumentos.scalping_m1:

@@ -51,7 +51,8 @@ import sys
 import pandas as pd
 
 from iqoption_m5 import backtest
-from iqoption_m5.config import (Configuracao, configuracao_scalping_m1,
+from iqoption_m5.config import (Configuracao, configuracao_scalping_h1,
+                                configuracao_scalping_m1,
                                 configuracao_scalping_m15)
 from iqoption_m5.estrategia import EstrategiaReversaoM5
 from iqoption_m5.mercado_iq import MercadoIQ
@@ -406,7 +407,7 @@ def relatorio(df_todos: pd.DataFrame, payout: float, titulo: str):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--tf", choices=["m1", "m15"], default="m15")
+    ap.add_argument("--tf", choices=["m1", "m15", "h1"], default="m15")
     ap.add_argument("--candles", type=int, default=5000)
     ap.add_argument("--payout", type=float, default=0.85)
     ap.add_argument("--offline", action="store_true")
@@ -421,7 +422,12 @@ def main():
     )
     a = ap.parse_args()
 
-    config = configuracao_scalping_m1() if a.tf == "m1" else configuracao_scalping_m15()
+    if a.tf == "m1":
+        config = configuracao_scalping_m1()
+    elif a.tf == "h1":
+        config = configuracao_scalping_h1()
+    else:
+        config = configuracao_scalping_m15()
     ativos = a.ativos or list(config.ativos)
 
     api = None
@@ -451,7 +457,9 @@ def main():
 
     # M1 para reconstrucao de candle parcial (reversoes)
     dados_m1: dict[str, pd.DataFrame | None] = {}
-    if a.m1_minutos > 0 and a.tf == "m15":
+    if a.m1_minutos > 0 and a.tf in ("m15", "h1"):
+        # razao M1/candle: M15=15, H1=60
+        m1_por_candle = config.timeframe_segundos // 60
         for ativo in dados:
             try:
                 if a.offline:
@@ -459,8 +467,7 @@ def main():
                     if m1 is None:
                         print(f"  {ativo}: sem cache M1 — rode sem --offline primeiro")
                 else:
-                    # M15 tem ~20000 candles = ~208 dias; 1 M1 = 15 M15 candles
-                    n_m1 = len(dados[ativo]) * 15
+                    n_m1 = len(dados[ativo]) * m1_por_candle
                     print(f"  {ativo}: baixando ~{n_m1} candles M1 para reversoes...")
                     m1 = baixar_m1(api, config, ativo, n_m1)
                 dados_m1[ativo] = m1 if m1 is not None and not m1.empty else None
@@ -485,7 +492,7 @@ def main():
         print(f"[bt] {len(df)} sinais salvos em {a.dump}")
 
     titulo = f"{a.tf.upper()}  (filtro H4 {'LIGADO' if usar_h4 else 'DESLIGADO'}"
-    if a.m1_minutos > 0 and a.tf == "m15":
+    if a.m1_minutos > 0 and a.tf in ("m15", "h1"):
         titulo += f", reversoes via M1 parcial {a.m1_minutos}min"
     titulo += ")"
     relatorio(df, a.payout, titulo)

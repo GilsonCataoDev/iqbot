@@ -2,7 +2,7 @@ import os
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 
-TIMEFRAMES_SUPORTADOS = {60: "M1", 300: "M5", 900: "M15"}
+TIMEFRAMES_SUPORTADOS = {60: "M1", 300: "M5", 900: "M15", 3600: "H1"}
 
 
 @dataclass(frozen=True)
@@ -614,6 +614,43 @@ def configuracao_scalping_m1(base: Configuracao | None = None) -> Configuracao:
         bloquear_noticia_alto_impacto=True,
         # Sem filtro de horário em testes
         horario_por_setup=None,
+    )
+
+
+def configuracao_scalping_h1(base: Configuracao | None = None) -> Configuracao:
+    """Scalping H1 — sr_rejeicao + pin_bar em S/R nos níveis H1.
+
+    H1 é o timeframe mais limpo para rejeição de S/R:
+    - Níveis H1 são mais respeitados (volume maior confirma a zona)
+    - Menos ruído: 1 candle = 1 hora de mercado real
+    - Pullback desativado (edge negativo provado no M15, ainda pior no H1)
+    Filtro H4 derivado por resample dos próprios candles H1 (4:1).
+    filtro_h1_ativo=False pois H1 É o timeframe de trading.
+    """
+    return replace(
+        configuracao_scalping_m15(base),
+        timeframe_segundos=3600,
+        expiracao_minutos=60,
+        ativos=("EURUSD", "GBPUSD", "USDJPY"),
+        valor_por_ordem=5.0,
+        entrada_max_segundos_no_candle=300,
+        cooldown_pos_ordem_por_ativo_candles=2,
+        limite_candles=120,
+        ema_micro_periodo=9,
+        ema_macro_periodo=21,
+        porta_grafico=8774,
+        sufixo_banco="scalping_h1",
+        sr_rejeicao_ativo=True,
+        pin_bar_sr_ativo=True,
+        engulfing_sr_ativo=True,
+        pullback_ativo=False,
+        filtro_h4_ativo=True,
+        filtro_h1_ativo=False,
+        expiracao_por_setup={
+            "sr_rejeicao": 60,
+            "pin_bar_sr": 120,
+            "engulfing_sr": 120,
+        },
     )
 
 
