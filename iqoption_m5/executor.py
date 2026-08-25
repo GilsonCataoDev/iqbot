@@ -4,6 +4,8 @@ import threading
 import time
 from datetime import datetime
 
+import pandas as pd
+
 try:
     import winsound
 except ImportError:
@@ -229,11 +231,21 @@ class ExecutorSeguro:
                     preco_ref = float(snapshot.candles.iloc[-1]["Close"])
                 except Exception:
                     preco_ref = decisao.preco
+                # decisao.candle_hora e o candle de CONFIRMACAO (indice -2), que
+                # ja fechou quando a ordem sai. Resolver contra o Close dele nao
+                # media o resultado da opcao: media a direcao do proprio candle
+                # que gerou o sinal — o bot se avaliava sobre o proprio input.
+                # A expiracao ocorre N candles depois da confirmacao, com
+                # N = expiracao_minutos / timeframe (>=1).
+                _n_exp = max(1, round(expiracao * 60 / self.config.timeframe_segundos))
+                _candle_exp = pd.Timestamp(decisao.candle_hora) + pd.Timedelta(
+                    seconds=_n_exp * self.config.timeframe_segundos
+                )
                 bruto = self.mercado.resultado_por_candle(
                     decisao.ativo,
                     decisao.direcao,
                     preco_ref,
-                    decisao.candle_hora,
+                    _candle_exp,
                     timeout_segundos=expiracao * 60 + 90,
                 )
             else:

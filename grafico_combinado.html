@@ -1,0 +1,154 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<meta charset="UTF-8">
+<title>IQ Option — M15 + M1</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { background: #0d0d0d; font-family: sans-serif; height: 100vh; display: flex; flex-direction: column; }
+
+  .barra {
+    background: #1a1a1a;
+    border-bottom: 1px solid #2a2a2a;
+    padding: 6px 16px;
+    display: flex;
+    align-items: center;
+    gap: 20px;
+    flex-shrink: 0;
+  }
+  .barra h1 { color: #e0e0e0; font-size: 13px; font-weight: 600; letter-spacing: 0.5px; }
+  .indicador {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 12px;
+    color: #888;
+  }
+  .dot {
+    width: 8px; height: 8px;
+    border-radius: 50%;
+    background: #444;
+    transition: background 0.5s;
+  }
+  .dot.online { background: #22c55e; box-shadow: 0 0 6px #22c55e88; }
+  .dot.offline { background: #ef4444; }
+
+  .painel {
+    display: flex;
+    flex: 1;
+    overflow: hidden;
+    gap: 2px;
+    background: #111;
+  }
+
+  .slot {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+  }
+
+  .slot-header {
+    background: #161616;
+    border-bottom: 1px solid #252525;
+    padding: 5px 12px;
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    flex-shrink: 0;
+  }
+  .slot-header span {
+    font-size: 11px;
+    font-weight: 700;
+    letter-spacing: 1px;
+    text-transform: uppercase;
+  }
+  .slot-header .porta { font-size: 10px; color: #555; font-weight: 400; }
+
+  .slot-m15 .slot-header span { color: #60a5fa; }
+  .slot-m1  .slot-header span { color: #f59e0b; }
+
+  iframe {
+    flex: 1;
+    border: none;
+    width: 100%;
+    background: #0d0d0d;
+  }
+
+  /* Botão recarregar */
+  .btn-reload {
+    margin-left: auto;
+    background: #252525;
+    border: 1px solid #333;
+    color: #aaa;
+    font-size: 10px;
+    padding: 3px 8px;
+    border-radius: 4px;
+    cursor: pointer;
+  }
+  .btn-reload:hover { background: #333; color: #fff; }
+</style>
+</head>
+<body>
+
+<div class="barra">
+  <h1>IQ Option Dashboard</h1>
+  <div class="indicador">
+    <div class="dot" id="dot-m15"></div>
+    <span id="label-m15">M15 :8771</span>
+  </div>
+  <div class="indicador">
+    <div class="dot" id="dot-m1"></div>
+    <span id="label-m1">M1 :8772</span>
+  </div>
+</div>
+
+<div class="painel">
+  <div class="slot slot-m15">
+    <div class="slot-header">
+      <span>M15</span>
+      <span class="porta">:8771</span>
+      <button class="btn-reload" onclick="recarregar('m15')">↺</button>
+    </div>
+    <iframe id="frame-m15" src="http://127.0.0.1:8771/index.html?fonte=iqoption_m5"></iframe>
+  </div>
+
+  <div class="slot slot-m1">
+    <div class="slot-header">
+      <span>M1</span>
+      <span class="porta">:8772</span>
+      <button class="btn-reload" onclick="recarregar('m1')">↺</button>
+    </div>
+    <iframe id="frame-m1" src="http://127.0.0.1:8772/index.html?fonte=iqoption_m5"></iframe>
+  </div>
+</div>
+
+<script>
+  const PORTAS = { m15: 8771, m1: 8772 };
+
+  function recarregar(bot) {
+    const frame = document.getElementById('frame-' + bot);
+    frame.src = frame.src;
+  }
+
+  async function checarStatus(bot) {
+    const porta = PORTAS[bot];
+    const dot = document.getElementById('dot-' + bot);
+    try {
+      const resp = await fetch(`http://127.0.0.1:${porta}/`, { mode: 'no-cors', cache: 'no-store' });
+      dot.className = 'dot online';
+    } catch {
+      dot.className = 'dot offline';
+    }
+  }
+
+  // Checa status a cada 10s
+  function loop() {
+    checarStatus('m15');
+    checarStatus('m1');
+    setTimeout(loop, 10000);
+  }
+  loop();
+</script>
+</body>
+</html>

@@ -1,0 +1,56 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head><meta charset="UTF-8"><title>Swing Monitor</title>
+<style>
+body{font-family:system-ui,sans-serif;background:#0f1117;color:#e2e8f0;margin:0;padding:20px}
+h1{color:#7dd3fc;margin-bottom:4px}
+.sub{color:#64748b;font-size:.85rem;margin-bottom:24px}
+.cards{display:flex;gap:16px;margin-bottom:28px;flex-wrap:wrap}
+.card{background:#1e293b;border-radius:10px;padding:18px 24px;min-width:130px}
+.card .val{font-size:2rem;font-weight:700;line-height:1}
+.card .lbl{font-size:.75rem;color:#94a3b8;margin-top:4px}
+.win{color:#4ade80}.loss{color:#f87171}.exp{color:#94a3b8}.pend{color:#fbbf24}
+table{width:100%;border-collapse:collapse;font-size:.82rem}
+th{background:#1e293b;padding:8px 10px;text-align:left;color:#94a3b8;position:sticky;top:0}
+td{padding:7px 10px;border-bottom:1px solid #1e293b}
+tr:hover td{background:#1e293b44}
+.badge{display:inline-block;padding:2px 8px;border-radius:4px;font-size:.75rem;font-weight:600}
+.b-win{background:#166534;color:#4ade80}.b-loss{background:#7f1d1d;color:#f87171}
+.b-exp{background:#1e293b;color:#94a3b8}.b-pend{background:#422006;color:#fbbf24}
+.call{color:#60a5fa}.put{color:#f472b6}
+</style></head>
+<body>
+<h1>Swing Monitor — Forward Test</h1>
+<div class="sub">Sinais gerados em modo monitor (sem execução real). Outcomes verificados por candle H4.</div>
+
+<div class="cards">
+  <div class="card"><div class="val win">0</div><div class="lbl">Wins</div></div>
+  <div class="card"><div class="val loss">0</div><div class="lbl">Losses</div></div>
+  <div class="card"><div class="val pend">1</div><div class="lbl">Pendentes</div></div>
+  <div class="card"><div class="val">—</div><div class="lbl">Win Rate</div></div>
+  <div class="card"><div class="val">0</div><div class="lbl">Resolvidos</div></div>
+</div>
+
+<table>
+  <thead>
+    <tr>
+      <th>Data/Hora</th><th>Ativo</th><th>Dir</th><th>Setup</th><th>Score</th>
+      <th>Entrada</th><th>SL</th><th>TP</th><th>R:R</th><th>Resultado</th><th>Resolvido em</th>
+    </tr>
+  </thead>
+  <tbody>
+        <tr>
+          <td>2026-08-21T09:18</td>
+          <td><b>USDJPY</b></td>
+          <td class="put">PUT</td>
+          <td>pullback_tendencia</td>
+          <td>8</td>
+          <td>158.74650</td>
+          <td style="color:#f87171">159.24886</td>
+          <td style="color:#4ade80">157.74178</td>
+          <td>1:2.0</td>
+          <td><span class="badge b-pend">PEND</span></td>
+          <td style="color:#64748b;font-size:.75rem"></td>
+        </tr></tbody>
+</table>
+</body></html>

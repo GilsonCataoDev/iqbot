@@ -27,3 +27,4 @@ env/
 graphify-out/
 *.log
 dados/bt_h1.pkl
+dados/_bt_m15.pkl
