@@ -54,6 +54,7 @@ class OperacaoPendente:
     enviada_em: datetime
     valor: float
     payout: float
+    setup: str = "desconhecido"
 
 
 @dataclass(frozen=True)

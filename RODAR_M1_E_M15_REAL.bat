@@ -24,8 +24,14 @@ echo.
 echo  ATENCAO: Dois processos operam simultaneamente na mesma conta.
 echo  Se ambos sinalizarem o mesmo ativo ao mesmo tempo, entram dois lotes.
 echo.
-set /p CONFIRMA="Digite SIM para confirmar operacao REAL com M1+M15: "
-if /i not "%CONFIRMA%"=="SIM" (
+echo  DINHEIRO REAL - M1 PAUSADO - EDGE NEGATIVO PROVADO (25/08/2026):
+echo  backtest offline pullback n=4323 WR=49.3%%, pullback_confluencia
+echo  n=2192 WR=49.0%% (breakeven=54.1%%, IC95%% inteiro abaixo). Ao vivo
+echo  hoje em PRACTICE: -21.67u. NAO opere M1 real sem antes desativar
+echo  pullback/pullback_confluencia em configuracao_scalping_m1.
+echo.
+set /p CONFIRMA="Digite CIENTE-DO-RISCO para confirmar operacao REAL com M1+M15: "
+if /i not "%CONFIRMA%"=="CIENTE-DO-RISCO" (
     echo Cancelado.
     pause >nul
     exit /b

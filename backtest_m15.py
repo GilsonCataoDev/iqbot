@@ -42,6 +42,7 @@ from __future__ import annotations
 
 import argparse
 import concurrent.futures as cf
+from dataclasses import replace
 import contextlib
 import io as _io
 import math
@@ -391,6 +392,21 @@ def relatorio(df_todos: pd.DataFrame, payout: float, titulo: str):
             for k, g in sorted(rev_ok.groupby("ativo"), key=ordena_rev):
                 print(linha(str(k), g, payout))
 
+            _sr = rev_ok[rev_ok.setup == "sr_rejeicao"]
+            if len(_sr) >= 30:
+                print("\n  --- sr_rejeicao por SESSAO (hora UTC do candle) ---")
+                _sessoes = {
+                    "asia (00-07h)":    (0, 6),
+                    "londres (07-12h)": (7, 11),
+                    "ny (12-16h)":      (12, 15),
+                    "ny-tarde (16-21h)": (16, 20),
+                    "pos-ny (21-24h)":  (21, 23),
+                }
+                for nome, (h0, h1) in _sessoes.items():
+                    horas = _sr.quando.dt.hour
+                    g = _sr[(horas >= h0) & (horas <= h1)]
+                    print(linha(nome, g, payout))
+
         if not rev_inv.empty:
             print("\n  --- REVERSAO: candle completo (SEM M1 disponivel) — INVALIDO ---")
             for k, g in sorted(rev_inv.groupby("setup"), key=ordena_rev):
@@ -416,6 +432,18 @@ def main():
     ap.add_argument("--ativos", nargs="*", default=None)
     ap.add_argument("--dump", default=None, help="salva os sinais num .pkl")
     ap.add_argument(
+        "--exp-sr", type=int, default=None, metavar="MIN",
+        help="substitui expiracao_por_setup['sr_rejeicao'] (minutos). Ex: --exp-sr 30",
+    )
+    ap.add_argument(
+        "--fibo", action="store_true",
+        help="liga fibo_sr_retracao_ativo so para este backtest (config ao vivo continua False)",
+    )
+    ap.add_argument(
+        "--retracao", action="store_true",
+        help="liga retracao_intracandle_ativo so para este backtest",
+    )
+    ap.add_argument(
         "--m1-minutos", type=int, default=0, metavar="N",
         help="usa primeiros N minutos de M1 para reconstruir candle parcial nos setups "
              "de reversao (remove a circularidade). Recomendado: 8. 0 = desligado.",
@@ -428,6 +456,21 @@ def main():
         config = configuracao_scalping_h1()
     else:
         config = configuracao_scalping_m15()
+
+    if a.exp_sr is not None:
+        exp_atual = (config.expiracao_por_setup or {}).copy()
+        exp_atual["sr_rejeicao"] = a.exp_sr
+        config = replace(config, expiracao_por_setup=exp_atual)
+
+    if a.fibo:
+        config = replace(config, fibo_sr_retracao_ativo=True)
+        print("[override] fibo_sr_retracao_ativo -> True (so neste backtest)")
+        print(f"[override] sr_rejeicao expiracao -> {a.exp_sr} min")
+
+    if a.retracao:
+        config = replace(config, retracao_intracandle_ativo=True)
+        print("[override] retracao_intracandle_ativo -> True (so neste backtest)")
+
     ativos = a.ativos or list(config.ativos)
 
     api = None

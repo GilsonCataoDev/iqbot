@@ -108,6 +108,20 @@ class Configuracao:
     divergencia_rsi_time_ativo: bool = False       # variante: só 11h-13h UTC
     divergencia_rsi_tendencia_ativo: bool = False  # variante: RSI extremo < 25 / > 75
     pullback_ativo: bool = False    # False = bloqueia pullback isolado (pullback_confluencia continua)
+    # pullback_confluencia (fibo + S/R simultaneos). Backtest M15 2026-08-25 (n=1731):
+    # WR=49.8%, breakeven=54.1%, IC95%=[47.4%, 52.2%] — IC inteiro ABAIXO do breakeven,
+    # edge negativo provado (-136.3u). Desligado no M15/H1; ver configuracao_scalping_m15.
+    pullback_confluencia_ativo: bool = True
+    # --- Retração intra-candle ---
+    # Detecta impulso no candle em formação, espera retração até zona Fibo 38.2-61.8%
+    # e entra quando o preço mostra rejeição (volta na direção do impulso).
+    retracao_intracandle_ativo: bool = False
+    retracao_impulso_min_atr: float = 1.0      # impulso mínimo para considerar retração (em ATR)
+    retracao_fib_min: float = 0.382             # retração mínima do impulso
+    retracao_fib_max: float = 0.618             # retração máxima do impulso
+    retracao_confirmacao_ticks: int = 3          # ticks consecutivos revertendo para confirmar
+    retracao_exigir_sr: bool = True              # True = só entra se a zona de retração coincide com S/R
+
     divergencia_rsi_janela_pivos: int = 5
     bollinger_squeeze_percentil_janela: int = 20
     bollinger_squeeze_min_corpo_atr: float = 0.5
@@ -124,6 +138,7 @@ class Configuracao:
     cooldown_pos_ordem_segundos: float = 0.0  # 0 = desligado; >0 = bloqueia nova entrada por N segundos após resultado
     cooldown_pos_ordem_por_ativo_candles: int = 0  # 0 = desligado; >0 = bloqueia N candles após ordem no mesmo ativo
     max_ordens_paralelas: int = 0  # 0 = sem limite; 1 = só 1 ativo por vez (anti-race no anti-martingale)
+    bloquear_direcao_paralela: bool = False  # bloqueia 2a entrada na mesma direcao (call/put) enquanto outra estiver aberta em par diferente — evita triplicar a mesma aposta quando pares correlacionados (EURUSD/GBPUSD) disparam juntos
     filtro_candle_entrada_atr: float = 0.0  # 0 = desligado; >0 = cancela se candle N+1 abre > N×ATR contra o sinal
     bloquear_noticia_alto_impacto: bool = False  # bloqueia entrada em janela de notícia HIGH (ativos reais)
     ia_como_filtro: bool = True  # True = IA bloqueia sinais contrários (media/alta confiança); False = só exibe parecer
@@ -224,6 +239,11 @@ class Configuracao:
     # Permite usar expiração diferente da padrão de acordo com o setup.
     # None = usa expiracao_minutos para todos. Ex: {"pullback_confluencia": 30, "sr_rejeicao": 15}
     expiracao_por_setup: dict | None = None
+
+    # --- Sizing por setup (proporcional ao WR provado em backtest) ---
+    # Multiplica valor_por_ordem pelo fator do setup. None/ausente = 1.0 (padrao).
+    # Ex: {"sr_rejeicao": 1.0, "fibo_sr_retracao": 0.85, "pin_bar_sr": 0.7}
+    multiplicador_por_setup: dict | None = None
 
     # --- Drawdown máximo percentual ---
     # Para o bot quando (banca_pico - banca_atual) / banca_pico >= este valor.
@@ -488,12 +508,30 @@ def configuracao_scalping_m15(base: Configuracao | None = None) -> Configuracao:
         # 0.5 (default M5) bloqueava ~39% dos pullbacks válidos no M15.
         pullback_slope_forte_multiplo_atr=1.0,
         # pullback standalone: 25% WR histórico — desabilitado.
-        # pullback_confluencia (fibo + SR simultâneos) continua ativo via padrão.
         pullback_ativo=False,
+        # pullback_confluencia: backtest 2026-08-25 n=1731 WR=49.8% vs breakeven 54.1%,
+        # IC95%=[47.4%, 52.2%] inteiro abaixo do breakeven (-136.3u). Edge negativo provado.
+        pullback_confluencia_ativo=False,
+        # Apuração de resultado: o cálculo por candle usava o Close PARCIAL do candle em
+        # formação como referência e encerrava antes da expiração real do mark da IQ
+        # (ex: ordem 12:15:10 marcada 'win' às 12:16:02, expiração real 12:45). Isso gravou
+        # win em trades que a IQ pagou loss. consultar_resultado() já rejeita opção aberta
+        # (status open/pending) e usa pnl_net real — é a fonte de verdade.
+        verificar_resultado_por_candle=False,
+        confiar_resultado_automatico=True,
         # Opção B+: padrões de vela em S/R — confiáveis no M15, ruído no M5
         pin_bar_sr_ativo=True,
         engulfing_sr_ativo=True,
         sr_rejeicao_ativo=True,
+        # retracao_intracandle: backtest 2026-08-25 (candle fechado, sem lookahead)
+        # n=280 WR=50.4% IC95%=[44.5%,56.2%] edge=-3.7pp — cruza o breakeven, sem
+        # vantagem estatistica. Desabilitado.
+        retracao_intracandle_ativo=False,
+        retracao_exigir_sr=True,
+        # bloqueia 2a entrada na mesma direcao enquanto outro par estiver aberto —
+        # evita apostar 3x na mesma exposicao quando os 3 setups disparam juntos
+        # em EURUSD/GBPUSD/USDJPY (frequentemente correlacionados via forca do USD)
+        bloquear_direcao_paralela=True,
         # macd_crossover: 33% WR (-R$17/dia) — desabilitado ambas as variantes.
         macd_crossover_ativo=False,
         macd_crossover_tendencia_ativo=False,
@@ -508,11 +546,21 @@ def configuracao_scalping_m15(base: Configuracao | None = None) -> Configuracao:
         horario_por_setup=None,
         # Expiração variável por setup
         expiracao_por_setup={
-            "pullback_confluencia": 30,
-            "fibo_sr_retracao":     30,
-            "pin_bar_sr":           30,
-            "engulfing_sr":         30,
-            "sr_rejeicao":          15,
+            "pullback_confluencia":    30,
+            "fibo_sr_retracao":        30,
+            "pin_bar_sr":              30,
+            "engulfing_sr":            30,
+            "sr_rejeicao":             15,
+            "retracao_intracandle":    15,
+        },
+        # Sizing proporcional ao edge medido em backtest (WR - breakeven 54.1%):
+        # sr_rejeicao edge=+25.9pp (WR~80%), fibo_sr_retracao edge=+21.4pp (WR 75.5%),
+        # pin_bar_sr edge=+20.5pp (WR 74.6%), engulfing_sr n=15 amostra pequena/inconclusivo.
+        multiplicador_por_setup={
+            "sr_rejeicao":          1.0,
+            "fibo_sr_retracao":     0.85,
+            "pin_bar_sr":           0.8,
+            "engulfing_sr":         0.6,
         },
     )
 
@@ -614,6 +662,12 @@ def configuracao_scalping_m1(base: Configuracao | None = None) -> Configuracao:
         bloquear_noticia_alto_impacto=True,
         # Sem filtro de horário em testes
         horario_por_setup=None,
+        # Apuração pela corretora, não por candle. O cálculo por candle usava o Close
+        # PARCIAL do candle em formação como referência e encerrava antes da expiração
+        # real do mark da IQ, gravando 'win' em ordens pagas como loss.
+        # consultar_resultado() rejeita opção ainda aberta e usa pnl_net real.
+        verificar_resultado_por_candle=False,
+        confiar_resultado_automatico=True,
     )
 
 
@@ -640,6 +694,10 @@ def configuracao_scalping_h1(base: Configuracao | None = None) -> Configuracao:
         ema_macro_periodo=21,
         porta_grafico=8774,
         sufixo_banco="scalping_h1",
+        # watchdog padrao (15min) e calibrado pro ciclo do M15 — no H1 o bot processa
+        # os ativos em poucos segundos e dorme ~55min ate o proximo candle fechar,
+        # o que disparava falso-positivo o tempo todo. 65min = 60min do candle + folga.
+        watchdog_timeout_minutos=65.0,
         sr_rejeicao_ativo=True,
         pin_bar_sr_ativo=True,
         engulfing_sr_ativo=True,
@@ -647,9 +705,10 @@ def configuracao_scalping_h1(base: Configuracao | None = None) -> Configuracao:
         filtro_h4_ativo=True,
         filtro_h1_ativo=False,
         expiracao_por_setup={
-            "sr_rejeicao": 60,
-            "pin_bar_sr": 120,
-            "engulfing_sr": 120,
+            "sr_rejeicao":          60,
+            "pin_bar_sr":          120,
+            "engulfing_sr":        120,
+            "retracao_intracandle": 60,
         },
     )
 

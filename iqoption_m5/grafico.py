@@ -235,6 +235,7 @@ class GraficoM5:
                 "status": sinal.detalhes.get("status_grafico", "confirmado"),
                 "fatores": list(sinal.detalhes.get("fatores", [])),
                 "setup": sinal.detalhes.get("setup", sinal.motivo),
+                "razao": list(sinal.detalhes.get("razao", [])),
             }
             if sinal.detalhes.get("setup") in ("pullback", "pullback_confluencia"):
                 pullbacks.append(item)
@@ -283,6 +284,7 @@ class GraficoM5:
                     "aberta": op["status"] == "aberta", "lucro": op["lucro"],
                     "status": op["status"],
                     "setup": op.get("setup", ""), "preco": op.get("preco"),
+                    "razao": list(op.get("razao", [])),
                 }
                 for op in operacoes
             ],

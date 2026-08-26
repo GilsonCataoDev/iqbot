@@ -385,8 +385,8 @@ class MercadoIQ:
                 print(f" [DIAG] {ativo}: buy() ERRO: {e!r}")
 
         # Tentativa 3: lock liberado durante o sleep para não bloquear snapshots
-        print(f" [DIAG] {ativo}: retry após 1s...")
-        time.sleep(1.0)
+        print(f" [DIAG] {ativo}: retry após 0.2s...")
+        time.sleep(0.2)
         with self._lock_api:
             if id_fresco is not None:
                 try:
@@ -430,7 +430,12 @@ class MercadoIQ:
         if not self.config.confiar_resultado_automatico:
             return None
         minutos = expiracao_minutos if expiracao_minutos is not None else self.config.expiracao_minutos
-        espera_inicial = max(0.0, minutos * 60 - 30)
+        # Espera ATE DEPOIS da expiracao real (nao antes). Consultar a IQ antes do
+        # fechamento pode retornar pnl_net provisorio de uma opcao ainda aberta se
+        # o filtro de status em _extrair_lucro_historico nao reconhecer o campo
+        # exato que a IQ usa pra "ainda aberta" — resultado: grava win/loss que
+        # ainda pode reverter nos segundos finais do candle.
+        espera_inicial = minutos * 60 + 5
         time.sleep(espera_inicial)
         limite = time.monotonic() + 120
         while time.monotonic() < limite:

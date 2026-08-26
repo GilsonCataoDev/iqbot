@@ -11,6 +11,11 @@ echo ============================================================
 echo.
 
 echo ATENCAO: este teste envia ordens de R$15 na conta PRACTICE.
+echo.
+echo  M1 PAUSADO - EDGE NEGATIVO PROVADO (25/08/2026): backtest offline
+echo  pullback n=4323 WR=49.3%%, pullback_confluencia n=2192 WR=49.0%%
+echo  (breakeven=54.1%%, IC95%% inteiro abaixo). Ao vivo hoje: -21.67u.
+echo.
 set "CONFIRMA="
 set /p CONFIRMA=Digite SIM para iniciar M1 e M15:
 if /I not "%CONFIRMA%"=="SIM" (

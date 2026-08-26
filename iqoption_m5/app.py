@@ -1,6 +1,7 @@
 import math
 import threading
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import replace
 
 try:
@@ -135,11 +136,27 @@ def main(config: Configuracao | None = None) -> None:
                 print(f"[{datetime.now():%H:%M:%S}] [grafico-worker] erro: {e}")
 
     def _grafico_rt_worker():
-        """Atualiza só o candle em formação (OHLC) a cada 1s — sem recalcular indicadores."""
+        """Atualiza candle em formação (OHLC) a cada 1s e entradas/stats a cada 15s."""
+        _ultima_entradas: float = 0.0
         while grafico_thread_viva:
             time.sleep(1.0)
             if grafico is None:
                 continue
+
+            # Atualiza entradasDetalhadas e statsGlobais a cada 15s — sem esperar candle fechar.
+            agora_rt = time.time()
+            _entradas_frescas: dict | None = None
+            if agora_rt - _ultima_entradas >= 15.0:
+                try:
+                    _entradas_frescas = {
+                        "entradasDetalhadas": registro.entradas_hoje_detalhadas(),
+                        "statsGlobais": registro.stats_globais(),
+                    }
+                    grafico.semear_historico(registro)
+                    _ultima_entradas = agora_rt
+                except Exception:
+                    pass
+
             for ativo in config.ativos:
                 base = _cache_dados_rt.get(ativo)
                 if base is None:
@@ -165,14 +182,21 @@ def main(config: Configuracao | None = None) -> None:
                         candles = candles + [novo]
                     else:
                         continue  # dado mais antigo que o cache — ignora
-                    grafico_fila.put((ativo, {
+                    patch = {
                         **base,
-                        "atualizado_em": time.time(),
+                        "atualizado_em": agora_rt,
                         "mercadoAberto": bool(sn.mercado_aberto),
                         "candles": candles,
-                    }))
+                    }
+                    if _entradas_frescas:
+                        patch.update(_entradas_frescas)
+                    grafico_fila.put((ativo, patch))
                 except Exception:
-                    pass
+                    # Snapshot falhou — reescreve com timestamp fresco para evitar 304.
+                    patch = {**base, "atualizado_em": agora_rt}
+                    if _entradas_frescas:
+                        patch.update(_entradas_frescas)
+                    grafico_fila.put((ativo, patch))
 
     if grafico is not None:
         threading.Thread(target=_grafico_worker,    name="grafico-io", daemon=True).start()
@@ -240,7 +264,7 @@ def main(config: Configuracao | None = None) -> None:
         print("Operação anterior pendente. Conectando para recuperar o resultado na IQ...")
         mercado.iniciar()
         mercado_conectado = True
-        recuperar_operacoes_pendentes(mercado, registro)
+        recuperar_operacoes_pendentes(mercado, registro, config)
 
     risco = GerenciadorRisco(config, registro.estado_hoje())
     executor = ExecutorSeguro(config, mercado, risco, registro)
@@ -270,6 +294,40 @@ def main(config: Configuracao | None = None) -> None:
             url_grafico = grafico.iniciar(abrir_navegador=config.abrir_navegador)
             print(f"Gráfico aberto: {url_grafico}")
             grafico.semear_historico(registro)
+            # Seed inicial: escreve JSON com candles atuais imediatamente, antes de qualquer
+            # candle fechar. Elimina 404 no startup (M15 até 15min, H1 até 60min sem dados).
+            for _ativo_seed in config.ativos:
+                try:
+                    _sn_seed = mercado.snapshot(_ativo_seed)
+                    _conv = grafico._unix
+                    _candles_seed = [
+                        {"time": _conv(i), "open": float(r.Open), "high": float(r.High),
+                         "low": float(r.Low), "close": float(r.Close)}
+                        for i, r in _sn_seed.candles.iterrows()
+                    ]
+                    if _candles_seed:
+                        _dados_seed = {
+                            "par": _ativo_seed, "timeframe": config.rotulo_timeframe,
+                            "timeframeSeg": config.timeframe_segundos,
+                            "janelaEntradaSeg": config.entrada_max_segundos_no_candle,
+                            "atualizado_em": time.time(),
+                            "mercadoAberto": bool(_sn_seed.mercado_aberto),
+                            "payout": _sn_seed.payout,
+                            "candles": _candles_seed,
+                            "volume": [], "bandaSup": [], "bandaInf": [], "bandaMedia": [],
+                            "emaMicro": [], "emaMacro": [], "rsi": [],
+                            "tendenciaMacro": "lateral", "tendenciaMicro": "lateral",
+                            "pullbacks": [], "niveis": [], "fib": [], "confluencias": [],
+                            "sinais": [], "alertaProximo": None, "operacoesReais": [],
+                            "alerta": None, "explicacao": [], "noticias": [],
+                            "parecerIA": None, "gatilhos": None, "desempenho": None,
+                            "desempenhoPorSetup": None, "desempenhoSimuladoPorSetup": None,
+                            "funil": None, "statsGlobais": None, "entradasDetalhadas": None,
+                            "niveisSR": None,
+                        }
+                        grafico.atualizar(_ativo_seed, _dados_seed)
+                except Exception:
+                    pass
         except Exception as erro:
             print(f"Gráfico indisponível ({erro}); o robô continuará protegido no terminal.")
             grafico = None
@@ -351,19 +409,21 @@ def main(config: Configuracao | None = None) -> None:
         print(f"[{datetime.now():%H:%M:%S}] [INICIO] {ativo}")
         indicadores = estrategia.calcular_indicadores(snapshot.candles, ativo)
 
-        # Contexto H4: atualiza tendência macro a cada 4h (1 candle H4).
+        # Contexto H4/H1/M5/M15: usa pré-cache quando disponível, fallback para busca síncrona.
+        with _ctx_cache_lock:
+            _cached = _ctx_cache.pop(ativo, {})
+
         if config.filtro_h4_ativo:
             _agora_h4 = time.time()
             if _agora_h4 - _ultima_h4_por_ativo.get(ativo, 0) >= config.h4_atualizar_segundos:
                 try:
-                    _candles_h4 = mercado.buscar_h4(ativo, config.h4_num_candles)
+                    _c = _cached.get("h4"); _candles_h4 = _c if _c is not None and not _c.empty else mercado.buscar_h4(ativo, config.h4_num_candles)
                     _tendencia_h4 = estrategia.calcular_tendencia_h4(_candles_h4)
                     estrategia.atualizar_contexto_h4(ativo, _tendencia_h4)
                     _ultima_h4_por_ativo[ativo] = _agora_h4
                     print(f"    [H4] {ativo}: TendenciaH4={_tendencia_h4}")
-                    # Agente de regime: classificação LLM complementar ao EMA H4
                     try:
-                        _candles_h1_regime = mercado.buscar_h1(ativo, config.h1_num_candles)
+                        _c = _cached.get("h1"); _candles_h1_regime = _c if _c is not None and not _c.empty else mercado.buscar_h1(ativo, config.h1_num_candles)
                         _regime = regime_classificar(ativo, _candles_h4, _candles_h1_regime)
                         if _regime:
                             _regime_por_ativo[ativo] = _regime
@@ -375,38 +435,33 @@ def main(config: Configuracao | None = None) -> None:
                         print(f"    [REGIME] {ativo}: erro — {_e_reg}")
                 except Exception as _e_h4:
                     print(f"    [H4] falha ao buscar H4 para {ativo}: {_e_h4}")
-        # Contexto M5: atualiza estrutura direcional do M5 quando configurado.
-        # Throttle: refetch só após m5_atualizar_segundos (padrão 5min = 1 candle M5).
         if config.filtro_m5_ativo:
             _agora_m5 = time.time()
             if _agora_m5 - _ultima_m5_por_ativo.get(ativo, 0) >= config.m5_atualizar_segundos:
                 try:
-                    _candles_m5 = mercado.buscar_m5(ativo, config.m5_num_candles)
+                    _c = _cached.get("m5"); _candles_m5 = _c if _c is not None and not _c.empty else mercado.buscar_m5(ativo, config.m5_num_candles)
                     _estrutura_m5 = estrategia.calcular_estrutura_m5(_candles_m5)
                     estrategia.atualizar_contexto_m5(ativo, _estrutura_m5)
                     _ultima_m5_por_ativo[ativo] = _agora_m5
                     print(f"    [M5] {ativo}: EstruturaM5={_estrutura_m5}")
                 except Exception as _e_m5:
                     print(f"    [M5] falha ao buscar M5 para {ativo}: {_e_m5}")
-        # Contexto H1: atualiza tendência do timeframe superior quando configurado.
-        # Throttle: refetch M15 context a cada candle M15 (contexto para nova estratégia M1)
         if config.filtro_m15_ativo:
             _agora_m15 = time.time()
             if _agora_m15 - _ultima_m15_por_ativo.get(ativo, 0) >= config.m15_atualizar_segundos:
                 try:
-                    _candles_m15 = mercado.buscar_m15(ativo, config.m15_num_candles)
+                    _c = _cached.get("m15"); _candles_m15 = _c if _c is not None and not _c.empty else mercado.buscar_m15(ativo, config.m15_num_candles)
                     _ctx_m15 = estrategia.calcular_contexto_m15(_candles_m15)
                     estrategia.atualizar_contexto_m15(ativo, _ctx_m15)
                     _ultima_m15_por_ativo[ativo] = _agora_m15
                     print(f"    [M15] {ativo}: ContextoM15={_ctx_m15}")
                 except Exception as _e_m15:
                     print(f"    [M15] falha ao buscar M15 para {ativo}: {_e_m15}")
-        # Throttle: refetch só após h1_atualizar_segundos (padrão 15min = 1 candle M15).
         if config.filtro_h1_ativo:
             _agora_h1 = time.time()
             if _agora_h1 - _ultima_h1_por_ativo.get(ativo, 0) >= config.h1_atualizar_segundos:
                 try:
-                    _candles_h1 = mercado.buscar_h1(ativo, config.h1_num_candles)
+                    _c = _cached.get("h1"); _candles_h1 = _c if _c is not None and not _c.empty else mercado.buscar_h1(ativo, config.h1_num_candles)
                     _tendencia_h1 = estrategia.calcular_tendencia_h1(_candles_h1)
                     estrategia.atualizar_contexto_h1(ativo, _tendencia_h1)
                     _ultima_h1_por_ativo[ativo] = _agora_h1
@@ -1091,6 +1146,54 @@ def main(config: Configuracao | None = None) -> None:
         ultima_explicacao[ativo] = todos_motivos
         print(f"[{datetime.now():%H:%M:%S}] [FIM] {ativo}")
 
+    # --- Pré-cache de contexto H4/H1/M5/M15 em thread dedicada ---
+    # Roda fora do path crítico: atualiza caches antes do candle fechar,
+    # eliminando 3-24s de latência no pior caso (quando vários timers vencem juntos).
+    _ctx_cache_lock = threading.Lock()
+    _ctx_cache: dict[str, dict] = {}  # ativo -> {"h4": candles, "h1": candles, ...}
+
+    def _precache_contexto_worker():
+        while not risco.resumo().encerrado:
+            for _av in config.ativos:
+                try:
+                    _dados: dict = {}
+                    if config.filtro_h4_ativo:
+                        _agora = time.time()
+                        if _agora - _ultima_h4_por_ativo.get(_av, 0) >= config.h4_atualizar_segundos * 0.8:
+                            try:
+                                _dados["h4"] = mercado.buscar_h4(_av, config.h4_num_candles)
+                            except Exception:
+                                pass
+                    if config.filtro_h1_ativo:
+                        _agora = time.time()
+                        if _agora - _ultima_h1_por_ativo.get(_av, 0) >= config.h1_atualizar_segundos * 0.8:
+                            try:
+                                _dados["h1"] = mercado.buscar_h1(_av, config.h1_num_candles)
+                            except Exception:
+                                pass
+                    if config.filtro_m5_ativo:
+                        _agora = time.time()
+                        if _agora - _ultima_m5_por_ativo.get(_av, 0) >= config.m5_atualizar_segundos * 0.8:
+                            try:
+                                _dados["m5"] = mercado.buscar_m5(_av, config.m5_num_candles)
+                            except Exception:
+                                pass
+                    if config.filtro_m15_ativo:
+                        _agora = time.time()
+                        if _agora - _ultima_m15_por_ativo.get(_av, 0) >= config.m15_atualizar_segundos * 0.8:
+                            try:
+                                _dados["m15"] = mercado.buscar_m15(_av, config.m15_num_candles)
+                            except Exception:
+                                pass
+                    if _dados:
+                        with _ctx_cache_lock:
+                            _ctx_cache[_av] = _dados
+                except Exception:
+                    pass
+            time.sleep(30)
+
+    threading.Thread(target=_precache_contexto_worker, name="precache-ctx", daemon=True).start()
+
     _ultimo_teste_conexao: float = 0.0
     try:
         while not risco.resumo().encerrado:
@@ -1113,20 +1216,22 @@ def main(config: Configuracao | None = None) -> None:
             agora_utc = datetime.now(timezone.utc)
             calendario.atualizar()
 
-            # Fase 1: snapshots sequenciais
+            # Fase 1: snapshots em paralelo (reduz latência de 6s→2s com 3 ativos)
             snapshots: dict = {}
             ts_servidor_ref: int | None = None
             t_local_ref: float = time.time()
-            for ativo in config.ativos:
-                if ativos_toggle is not None and ativo not in ativos_toggle:
-                    continue
-                try:
-                    sn = mercado.snapshot(ativo)
-                    snapshots[ativo] = sn
-                    ts_servidor_ref = sn.timestamp_servidor
-                    t_local_ref = time.time()
-                except MercadoIndisponivel as e:
-                    print(f"[{datetime.now():%H:%M:%S}] {ativo}: mercado indisponível ({e})")
+            _ativos_ciclo = [a for a in config.ativos if ativos_toggle is None or a in ativos_toggle]
+            with ThreadPoolExecutor(max_workers=len(_ativos_ciclo) or 1) as _snap_pool:
+                _snap_futures = {_snap_pool.submit(mercado.snapshot, a): a for a in _ativos_ciclo}
+                for fut in as_completed(_snap_futures):
+                    _av = _snap_futures[fut]
+                    try:
+                        sn = fut.result()
+                        snapshots[_av] = sn
+                        ts_servidor_ref = sn.timestamp_servidor
+                        t_local_ref = time.time()
+                    except MercadoIndisponivel as e:
+                        print(f"[{datetime.now():%H:%M:%S}] {_av}: mercado indisponível ({e})")
 
             # Fase 2: avaliação sequencial (sem ThreadPoolExecutor)
             for av, sn in snapshots.items():

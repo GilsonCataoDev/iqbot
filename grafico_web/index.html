@@ -180,6 +180,32 @@
   .win-color { color: var(--green); }
   .loss-color { color: var(--red); }
 
+  /* tooltip educativo */
+  #tooltip-razao {
+    display: none; position: absolute; z-index: 999;
+    background: var(--surface); border: 1px solid var(--accent);
+    border-radius: var(--radius); padding: 10px 14px;
+    max-width: 360px; min-width: 200px; font-size: 12px;
+    box-shadow: 0 4px 20px rgba(0,0,0,.5); pointer-events: auto;
+  }
+  #tooltip-razao .tr-header {
+    display: flex; align-items: center; gap: 6px;
+    font-weight: 700; font-size: 13px; margin-bottom: 8px;
+    padding-bottom: 6px; border-bottom: 1px solid var(--border);
+  }
+  #tooltip-razao .tr-step {
+    display: flex; gap: 6px; margin: 4px 0; line-height: 1.4;
+  }
+  #tooltip-razao .tr-num {
+    color: var(--accent); font-weight: 700; font-size: 11px; min-width: 16px; flex-shrink: 0;
+  }
+  #tooltip-razao .tr-text { color: var(--text); }
+  #tooltip-razao .tr-close {
+    position: absolute; top: 4px; right: 8px; cursor: pointer;
+    color: var(--muted); font-size: 16px; line-height: 1;
+  }
+  #tooltip-razao .tr-close:hover { color: var(--text); }
+
   /* entradas compactas */
   #cartao-entradas { max-height: 200px; overflow-y: auto; }
   .entrada-item { padding: 4px 0; border-bottom: 1px solid #1a2035; font-size: 11px; }
@@ -356,10 +382,11 @@
   </div><!-- /sidebar -->
 
   <!-- ── Charts ── -->
-  <div id="charts-area">
+  <div id="charts-area" style="position:relative">
     <div id="chart-preco"></div>
     <div id="chart-volume"></div>
     <div id="chart-rsi"></div>
+    <div id="tooltip-razao"><span class="tr-close" onclick="document.getElementById('tooltip-razao').style.display='none'">&times;</span><div id="tr-body"></div></div>
   </div>
 
 </div><!-- /main -->
@@ -377,7 +404,7 @@
 <script>
 // ── Estado global ──
 const params = new URLSearchParams(window.location.search);
-const fonte = params.get('fonte') || 'binance';
+const fonte = params.get('fonte') || 'iqoption_m5';
 const CHAVE_LS = `monitor_ativo_selecionado_${fonte}`;
 let ativoAtual = null;
 let listaAtivos = [];
@@ -458,11 +485,11 @@ function atualizarCountdown() {
 setInterval(atualizarCountdown, 500);
 
 // ── Fetch ──
-async function buscarJson(url, ms = 2500) {
+async function buscarJson(url, ms = 5000) {
   const ctl = new AbortController();
   const t = setTimeout(() => ctl.abort(), ms);
   try {
-    const r = await fetch(url, { signal: ctl.signal });
+    const r = await fetch(url, { signal: ctl.signal, cache: 'no-store' });
     if (!r.ok) throw new Error(`HTTP ${r.status}`);
     return await r.json();
   } finally { clearTimeout(t); }
@@ -512,6 +539,28 @@ ro.observe(document.getElementById('charts-area'));
 
 let primeiraCarga = true;
 let linhasNiveis = [], linhasFib = [], linhaEntrada = null, linhasGatilho = [];
+let _cacheNiveis = [], _cacheFib = [], _cachePrecisao = 5;
+let _razaoMap = {};
+
+chartPreco.subscribeClick(param => {
+  const tip = document.getElementById('tooltip-razao');
+  if (!param.time || !_razaoMap[param.time]) { tip.style.display = 'none'; return; }
+  const info = _razaoMap[param.time];
+  const corDir = info.direcao === 'compra' ? 'var(--green)' : 'var(--red)';
+  const seta = info.direcao === 'compra' ? '▲ CALL' : '▼ PUT';
+  let html = `<div class="tr-header"><span style="color:${corDir}">${seta}</span> <span>${info.setup}</span></div>`;
+  info.razao.forEach((txt, i) => {
+    html += `<div class="tr-step"><span class="tr-num">${i+1}.</span><span class="tr-text">${txt}</span></div>`;
+  });
+  document.getElementById('tr-body').innerHTML = html;
+  const area = document.getElementById('charts-area');
+  const rect = area.getBoundingClientRect();
+  let x = (param.point?.x || 100) + 12;
+  let y = (param.point?.y || 100) - 20;
+  if (x + 370 > rect.width) x = Math.max(8, x - 390);
+  if (y + 200 > rect.height) y = Math.max(8, rect.height - 220);
+  tip.style.left = x + 'px'; tip.style.top = y + 'px'; tip.style.display = 'block';
+});
 
 const CORES_FIB = { 0:'#787b86', 0.236:'#e0b040', 0.382:'#e08040', 0.5:'#d1d4dc', 0.618:'#40b0e0', 0.786:'#a040e0', 1:'#787b86' };
 
@@ -519,13 +568,31 @@ const chkBandas = document.getElementById('camada-bandas');
 const chkEma    = document.getElementById('camada-ema');
 const chkNiveis = document.getElementById('camada-niveis');
 const chkFib    = document.getElementById('camada-fib');
+function _toggleNiveis() {
+  linhasNiveis.forEach(l => serieCandle.removePriceLine(l));
+  linhasNiveis = chkNiveis.checked ? _cacheNiveis.map(n => serieCandle.createPriceLine({
+    price: n.preco,
+    color: n.tipo === 'resistencia' ? '#ef535099' : '#26a69a99',
+    lineWidth: 1, lineStyle: LightweightCharts.LineStyle.Dashed, axisLabelVisible: true,
+    title: `${n.tipo === 'resistencia' ? 'R' : 'S'} ${n.preco.toFixed(_cachePrecisao)}`,
+  })) : [];
+}
+function _toggleFib() {
+  linhasFib.forEach(l => serieCandle.removePriceLine(l));
+  linhasFib = chkFib.checked ? _cacheFib.map(f => serieCandle.createPriceLine({
+    price: f.preco, color: CORES_FIB[f.nivel] || '#9598a1',
+    lineWidth: 1, lineStyle: LightweightCharts.LineStyle.Dotted, axisLabelVisible: true,
+    title: `Fib ${(f.nivel*100).toFixed(1)}%`,
+  })) : [];
+}
 [chkBandas, chkEma, chkNiveis, chkFib].forEach(chk => chk.addEventListener('change', () => {
   serieBandaSup.applyOptions({ visible: chkBandas.checked });
   serieBandaInf.applyOptions({ visible: chkBandas.checked });
   serieBandaMedia.applyOptions({ visible: chkBandas.checked });
   serieEmaMicro.applyOptions({ visible: chkEma.checked });
   serieEmaMacro.applyOptions({ visible: chkEma.checked });
-  atualizar();
+  _toggleNiveis();
+  _toggleFib();
 }));
 
 function selecionarAtivo(id) {
@@ -637,22 +704,15 @@ async function atualizar() {
     serieEmaMacro.setData(dados.emaMacro || []);
     serieRsi.setData(dados.rsi);
 
-    // S/R lines (com preço no label)
-    linhasNiveis.forEach(l => serieCandle.removePriceLine(l));
-    linhasNiveis = chkNiveis.checked ? (dados.niveis||[]).map(n => serieCandle.createPriceLine({
-      price: n.preco,
-      color: n.tipo === 'resistencia' ? '#ef535099' : '#26a69a99',
-      lineWidth: 1, lineStyle: LightweightCharts.LineStyle.Dashed, axisLabelVisible: true,
-      title: `${n.tipo === 'resistencia' ? 'R' : 'S'} ${n.preco.toFixed(precisao)}`,
-    })) : [];
-
-    // Fib lines
-    linhasFib.forEach(l => serieCandle.removePriceLine(l));
-    linhasFib = chkFib.checked ? (dados.fib||[]).map(f => serieCandle.createPriceLine({
-      price: f.preco, color: CORES_FIB[f.nivel] || '#9598a1',
-      lineWidth: 1, lineStyle: LightweightCharts.LineStyle.Dotted, axisLabelVisible: true,
-      title: `Fib ${(f.nivel*100).toFixed(1)}%`,
-    })) : [];
+    // Atualiza cache de S/R e Fib
+    _cacheNiveis = dados.niveis || [];
+    _cacheFib = dados.fib || [];
+    if (dados.candles.length) {
+      const precoRef2 = dados.candles[dados.candles.length-1].close;
+      _cachePrecisao = precoRef2 < 50 ? 5 : (precoRef2 < 1000 ? 3 : 2);
+    }
+    _toggleNiveis();
+    _toggleFib();
 
     // Linha de entrada ativa
     if (linhaEntrada) { serieCandle.removePriceLine(linhaEntrada); linhaEntrada = null; }
@@ -744,6 +804,15 @@ async function atualizar() {
     const marcadores = [...marcadoresSinal, ...marcadoresPullback, ...marcadoresConfl,
       ...marcadoresAlerta, ...marcadoresReaisOp].sort((a,b) => a.time - b.time);
     serieCandle.setMarkers(marcadores);
+
+    // Mapa de razões por timestamp (para tooltip educativo)
+    _razaoMap = {};
+    for (const s of dados.sinais) {
+      if (s.razao && s.razao.length) _razaoMap[s.time] = { setup: s.setup, direcao: s.direcao, razao: s.razao };
+    }
+    for (const o of (dados.operacoesReais||[])) {
+      if (o.razao && o.razao.length) _razaoMap[o.time] = { setup: o.setup, direcao: o.direcao, razao: o.razao };
+    }
 
     // status bar compacta
     const desemp = dados.desempenho;
@@ -967,10 +1036,32 @@ function renderizarPainel(dados) {
 async function carregarHistoricoHoje() {
   try {
     const hist = await buscarJson(`${fonte}/historico_hoje.json?_=` + Date.now());
-    if (hist.statsGlobais) {
-      const s = hist.statsGlobais;
-      if (s.otc.entradas>0 || s.normal.entradas>0) {
-        // renderizarPainel já cuida disso no próximo ciclo; aqui só garantimos que não fica vazio
+    // Atualiza painel de entradas diretamente do historico_hoje.json (atualizado a cada 15s pelo bot)
+    if (hist.entradasDetalhadas && hist.entradasDetalhadas.length) {
+      const cartaoEntradas = document.getElementById('cartao-entradas');
+      if (cartaoEntradas) {
+        const fmtE = e => {
+          const dCls = e.direcao==='call'?'entrada-dir-call':'entrada-dir-put';
+          const dLbl = e.direcao==='call'?'▲':'▼';
+          let sCls, sStr;
+          if (e.status==='aberta')               { sCls='entrada-status-aberta'; sStr='⏳'; }
+          else if (e.lucro!=null && e.lucro>0)   { sCls='entrada-status-ganho';  sStr=`✓+${e.lucro.toFixed(2)}`; }
+          else if (e.lucro!=null && e.lucro<0)   { sCls='entrada-status-perda';  sStr=`✗${e.lucro.toFixed(2)}`; }
+          else if (e.lucro===0)                  { sCls='entrada-status-outro';  sStr='='; }
+          else                                   { sCls='entrada-status-outro';  sStr=escapar(e.status); }
+          return `<div class="entrada-item"><div class="entrada-cabecalho">` +
+            `<span class="entrada-hora">${escapar(e.hora)}</span>` +
+            `<span class="entrada-ativo">${escapar(e.ativo)}</span>` +
+            `<span class="${dCls}">${dLbl}</span>` +
+            `<span class="entrada-setup">${escapar(e.setup)}</span>` +
+            `<span class="${sCls}">${sStr}</span></div></div>`;
+        };
+        const t = hist.entradasDetalhadas.length;
+        const w = hist.entradasDetalhadas.filter(e => e.lucro != null && e.lucro > 0).length;
+        const resumo = document.getElementById('entradas-resumo');
+        if (resumo) resumo.textContent = t > 0 ? `${w}/${t}` : '';
+        cartaoEntradas.innerHTML = '<h3>Detalhes <span id="entradas-resumo" style="font-weight:400;color:var(--muted);font-size:10px;text-transform:none;letter-spacing:0">' + (t>0?`${w}/${t}`:'') + '</span></h3>' +
+          [...hist.entradasDetalhadas].reverse().map(fmtE).join('');
       }
     }
   } catch(_) {}

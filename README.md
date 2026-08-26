@@ -1,14 +1,25 @@
-# IQ Option M5
+# IQ Option Bot
 
-Ferramenta de pesquisa e validação de estratégias M5 para IQ Option. Analisa candles, compara candidatos, abre um painel local e registra sinais. **O modo padrão é PESQUISA: monitora 10 ativos e não envia ordens.** O envio em `PRACTICE` ou `REAL` exige perfil e confirmação explícitos.
+Ferramenta de pesquisa e validação de estratégias para IQ Option (opções binárias M5/M15/H1 e um laboratório de CFD Forex separado). Analisa candles, compara candidatos, abre um painel local e registra sinais. **O modo padrão é PESQUISA: monitora os ativos e não envia ordens.** O envio em `PRACTICE` ou `REAL` exige perfil e confirmação explícitos.
 
-## Começar em 3 passos
+Credenciais nunca ficam no código: são lidas de `IQ_OPTION_EMAIL` / `IQ_OPTION_SENHA` (via `.env.bat`, que é ignorado pelo git) ou digitadas no terminal.
+
+## Perfis ativos
+
+| Perfil | Timeframe | Setups validados | Status |
+|---|---|---|---|
+| **M15** | 15 min | `sr_rejeicao`, `pin_bar_sr`, `fibo_sr_retracao` | Ativo, edge positivo provado |
+| **H1** | 60 min | mesmos setups do M15 | Ativo, edge positivo provado |
+| M1 | 1 min | — | Pausado (edge negativo em todos os setups testados) |
+| Swing/CFD | D1+H4+H1 | `pullback_tendencia`, `sr_rejeicao`, `breakout_reteste`, `divergencia_rsi_h4` | Somente monitor visual — sinal automático tem edge negativo provado |
+
+## Começar em 3 passos (M15/H1)
 
 1. Execute `INSTALAR_DEPENDENCIAS.bat` uma vez.
-2. Execute `INICIAR_IQ_M5.bat`, confirme com `SIM` e use a conta PRACTICE.
-3. Informe o e-mail e a senha da IQ Option no terminal.
+2. Execute `TESTAR_M15_E_H1_PRACTICE.bat` (conta PRACTICE, os dois timeframes juntos) ou `TESTAR_SCALPING_M15_PRACTICE.bat` / rode `python rodar_iqoption_m5.py --scalping-h1-practice --confirmo` para um só.
+3. Informe o e-mail e a senha da IQ Option no terminal, ou defina `IQ_OPTION_EMAIL`/`IQ_OPTION_SENHA` antes de rodar.
 
-Para somente validar estratégias sem enviar ordens, execute `PESQUISAR_IQ_M5.bat`. Pela linha de comando, o perfil PRACTICE é `python rodar_iqoption_m5.py --practice --confirmo`.
+O M5 original (perfil de pesquisa/pausado) continua disponível: `INICIAR_IQ_M5.bat` / `PESQUISAR_IQ_M5.bat`. Pela linha de comando, o perfil PRACTICE M5 é `python rodar_iqoption_m5.py --practice --confirmo`.
 
 ## M5 ou M1
 
@@ -52,7 +63,22 @@ Ativos `-OTC` nunca recebem aviso de notícia: o preço deles é gerado por algo
 
 A fonte do calendário é o feed público semanal do ForexFactory, sem cadastro. Sem internet, a ferramenta usa o último calendário salvo em `iqoption_m5\dados\calendario_economico.json`; sem nenhum dos dois, ela segue funcionando e apenas deixa de avisar.
 
-## Estratégias de entrada
+## Estratégias de entrada (M15/H1 — ativas)
+
+Medidas com `backtest_m15.py --m1-minutos 8` (reconstrói o candle parcial via M1 para remover o viés de lookahead dos setups de reversão). Breakeven a 85% de payout é 54,1%.
+
+| Setup | WR medido | Edge |
+|---|---|---|
+| `sr_rejeicao` | ~80% | +25.9pp |
+| `fibo_sr_retracao` | 75.5% | +21.4pp |
+| `pin_bar_sr` | 74.6% | +20.5pp |
+| `retracao_intracandle` | 50.4% | **-3.7pp — desligado** |
+| `pullback` / `pullback_confluencia` | ~49% | **negativo — desligado** |
+| `macd_crossover` | 33% | **negativo — desligado** |
+
+O sizing por ordem é proporcional ao edge de cada setup (`multiplicador_por_setup` em `config.py`). Uma 2ª entrada na mesma direção enquanto outro par tiver posição aberta é bloqueada (`bloquear_direcao_paralela`) para evitar triplicar a mesma exposição quando os setups disparam juntos em pares correlacionados.
+
+## Estratégias antigas (M5 — perfil de pesquisa)
 
 1. `reversao_bollinger_rsi`: retorno para dentro da Banda de Bollinger com confirmação do RSI, somente em mercado lateral.
 2. `pullback`: recuo a favor da tendência que toca Fibonacci de 38,2% a 61,8% e/ou um pivô de suporte/resistência, seguido por candle de confirmação e RSI entre 35 e 65.
@@ -112,15 +138,20 @@ O histórico baixado fica em `iqoption_m5\dados\historico\`, então depois da pr
 
 Cada linha do relatório vale para o ativo daquela linha. Os ativos `-OTC` têm preço sintético gerado pela corretora: o resultado de um `-OTC` não vale para o par real de mesmo nome, nem o contrário.
 
-## Laboratório Forex/CFD
+## Swing / CFD Forex (`iqoption_swing/`)
 
-O executor Forex é separado do executor de opções e permanece exclusivamente em simulação:
+Bot separado para operar CFD (margem/alavancagem) analisando D1 (tendência) + H4 (estrutura, Fibonacci, S/R, RSI) + H1 (confirmação do candle na direção da tendência).
 
 ```
-python rodar_forex_simulacao.py
+python rodar_swing_practice.py         # modo monitor — só exibe sinais (recomendado)
+python backtest_swing.py               # mede a estratégia no histórico H1
 ```
 
-Ele compara rompimento + reteste, toque em LTA/LTB e correção na tendência com Fibonacci 50%–61,8% mais suporte/resistência. As hipóteses usam pivôs confirmados, stop por ATR e alvo estrutural, exigindo retorno/risco mínimo de 1,2. Não chama `buy_order` nem abre posições na IQ. A hipótese precisa ficar positiva fora da amostra antes de qualquer integração PRACTICE.
+**⚠️ Sinal automático com edge negativo provado** (`backtest_swing.py`, cache `dados/bt_h1.pkl`, ~4 meses de H1 em 12 pares): WR 18.4% contra breakeven de 33.3% no R:R 2.0 usado (edge -14.9pp, IC95% inteiro abaixo do breakeven, -102R em 228 trades). Todos os 4 setups (`pullback_tendencia`, `sr_rejeicao`, `breakout_reteste`, `divergencia_rsi_h4`) são negativos ou neutros — nenhum sobrevive.
+
+Use `rodar_swing_practice.py` apenas como **apoio visual** (tendência multi-timeframe, zonas de Fibonacci, S/R) para decisão manual — não siga o card de entrada/SL/TP que ele imprime. `rodar_swing_exec_practice.py` (execução automática) nunca chegou a enviar uma ordem: a compra de CFD via `buy_order`/`get_instruments("forex")` trava com timeout na lib `iqoptionapi`, que parece não suportar bem o produto CFD atual da IQ.
+
+O laboratório antigo de simulação pura (`rodar_forex_simulacao.py`) continua disponível e não chama `buy_order`.
 
 ## Problemas comuns
 
@@ -129,19 +160,25 @@ Ele compara rompimento + reteste, toque em LTA/LTB e correção na tendência co
 - O gráfico não abre: copie no navegador o endereço mostrado depois de `Gráfico M5 aberto:`.
 - Uma aba fica momentaneamente atrasada: o painel mantém o último candle válido e tenta novamente sem apagar o ativo.
 - `operacao_pendente_banco`: abra novamente pelo iniciador correspondente. A ferramenta procura o resultado no histórico. Se a corretora não responder, a operação fica como `resultado_desconhecido`: o risco reserva a perda máxima, mas lucro e win rate não inventam uma perda confirmada.
+- Resultado gravado antes da expiração real: a apuração só consulta a IQ **depois** que a opção expira (nunca antes) — se ainda assim um resultado parecer errado, rode `python reapurar_resultados.py --tf m15 h1 --conta PRACTICE --dry-run` pra conferir contra o histórico real da corretora.
 - Para encerrar: pressione `Ctrl + C` no terminal.
 
 ## Arquivos principais
 
-- `rodar_iqoption_m5.py`: inicia a ferramenta.
-- `rodar_backtest_m5.py`: mede a estratégia no histórico, sem enviar ordens.
-- `rodar_forex_simulacao.py`: executa o laboratório Forex/CFD sem enviar ordens.
-- `iqoption_m5\config.py`: ativos, estratégia e limites.
-- `iqoption_m5\estrategia.py`: cálculo dos sinais.
-- `iqoption_m5\backtest.py`: simulação e relatório estatístico.
-- `iqoption_m5\mercado_iq.py`: conexão e candles da IQ.
-- `iqoption_m5\risco.py`: bloqueios e limite diário.
-- `iqoption_m5\grafico.py`: painel local.
+- `rodar_iqoption_m5.py`: inicia a ferramenta (M5/M15/H1/M1, via flags).
+- `backtest_m15.py`: mede os setups M15/H1 no histórico (`--m1-minutos 8` remove o viés de lookahead das reversões).
+- `reapurar_resultados.py`: corrige win/loss gravados errado contra o histórico real da IQ.
+- `rodar_swing_practice.py` / `rodar_swing_exec_practice.py`: bot swing CFD (monitor / execução).
+- `backtest_swing.py`: mede a estratégia swing no histórico H1.
+- `rodar_forex_simulacao.py`: laboratório Forex/CFD antigo, só simulação.
+- `iqoption_m5\config.py`: ativos, estratégias, limites e perfis (M5/M15/H1/M1).
+- `iqoption_m5\estrategia.py`: cálculo dos sinais das opções binárias.
+- `iqoption_m5\executor.py`: envio de ordens, sizing por setup, retry.
+- `iqoption_m5\mercado_iq.py`: conexão, candles e apuração de resultado na IQ.
+- `iqoption_m5\risco.py`: bloqueios, limite diário e concentração de direção.
+- `iqoption_m5\grafico.py`: painel local (M5/M15/H1).
+- `iqoption_m5\registro.py`: persistência SQLite das operações.
 - `iqoption_m5\alerta.py`: alertas explicados, sem enviar ordem.
 - `iqoption_m5\noticias.py`: calendário econômico do dia.
+- `iqoption_swing\`: estratégia, executor e mercado do bot swing CFD.
 - `DOCUMENTACAO_TECNICA.md`: arquitetura e manutenção.

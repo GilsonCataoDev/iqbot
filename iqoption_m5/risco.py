@@ -42,7 +42,7 @@ class GerenciadorRisco:
         self._encerrado = estado.ordem_pendente
         self._motivo_encerramento = "operacao_pendente_banco" if estado.ordem_pendente else None
         self._cooldown_ate: float = 0.0
-        self._ordens_abertas: set[str] = set()
+        self._ordens_abertas: dict[str, str] = {}  # ativo_base -> direcao ("call"/"put")
         # Drawdown: rastreia banca pico para calcular drawdown percentual
         self._banca_pico: float = max(config.banca_inicial + estado.lucro_total, config.banca_inicial)
         # Circuit breaker: bloqueia por tempo após N perdas seguidas
@@ -156,6 +156,12 @@ class GerenciadorRisco:
         if (self.config.max_ordens_paralelas > 0
                 and len(self._ordens_abertas) >= self.config.max_ordens_paralelas):
             return Autorizacao(False, "limite_paralelas")
+        if (self.config.bloquear_direcao_paralela
+                and decisao.direcao in self._ordens_abertas.values()):
+            # já existe posição aberta na mesma direção em outro par — evita
+            # apostar 3x na mesma exposição quando os setups disparam juntos
+            # em pares correlacionados (ex: EURUSD e GBPUSD).
+            return Autorizacao(False, "direcao_ja_exposta")
         if self.config.cooldown_pos_ordem_segundos > 0 and time.time() < self._cooldown_ate:
             return Autorizacao(False, "cooldown_pos_ordem")
         # 3. Circuit breaker
@@ -189,7 +195,7 @@ class GerenciadorRisco:
         with self._lock:
             autorizacao = self._avaliar_sem_lock(snapshot, decisao)
             if autorizacao.permitida:
-                self._ordens_abertas.add(_base_ativo(snapshot.ativo))
+                self._ordens_abertas[_base_ativo(snapshot.ativo)] = decisao.direcao
                 self._enviadas += 1
             return autorizacao
 
@@ -197,12 +203,12 @@ class GerenciadorRisco:
         with self._lock:
             key = _base_ativo(ativo)
             if key in self._ordens_abertas:
-                self._ordens_abertas.discard(key)
+                self._ordens_abertas.pop(key, None)
                 self._enviadas = max(0, self._enviadas - 1)
 
     def registrar_resultado(self, lucro: float | None, ativo: str) -> None:
         with self._lock:
-            self._ordens_abertas.discard(_base_ativo(ativo))
+            self._ordens_abertas.pop(_base_ativo(ativo), None)
             if self.config.cooldown_pos_ordem_segundos > 0:
                 self._cooldown_ate = time.time() + self.config.cooldown_pos_ordem_segundos
             self._finalizadas += 1

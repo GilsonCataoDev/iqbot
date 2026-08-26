@@ -135,26 +135,35 @@ class ExecutorSeguro:
         minutos = math.ceil(restante / 60)
         return max(1, min(minutos, self.config.expiracao_minutos))
 
-    def _valor_da_entrada(self) -> float:
+    def _multiplicador_setup(self, decisao: Decisao) -> float:
+        tabela = self.config.multiplicador_por_setup
+        if not tabela:
+            return 1.0
+        setup = decisao.detalhes.get("setup", decisao.motivo)
+        return float(tabela.get(setup, 1.0))
+
+    def _valor_da_entrada(self, decisao: Decisao) -> float:
+        fator_setup = self._multiplicador_setup(decisao)
         if self.config.valor_percentual_banca > 0:
             banca_atual = self.risco.resumo().banca_atual
-            return max(2.0, round(banca_atual * self.config.valor_percentual_banca, 2))
+            base_pct = max(2.0, round(banca_atual * self.config.valor_percentual_banca, 2))
+            return round(base_pct * fator_setup, 2)
         base = self.config.valor_por_ordem
         if self.config.anti_martingale_ativo:
             niveis = self.config.anti_martingale_niveis
             wins = self.risco.resumo().wins_consecutivos
             multiplicador = niveis[min(wins, len(niveis) - 1)]
-            valor = round(base * multiplicador, 2)
+            valor = round(base * multiplicador * fator_setup, 2)
             if self.config.alavancagem_maximo > 0:
                 valor = min(valor, self.config.alavancagem_maximo)
             return valor
         if not self.config.alavancagem_pyramid:
-            return base
+            return round(base * fator_setup, 2)
         bonus = max(0.0, self.risco.resumo().ultimo_lucro)
-        return min(base + bonus, self.config.alavancagem_maximo)
+        return round(min(base + bonus, self.config.alavancagem_maximo) * fator_setup, 2)
 
     def _processar(self, snapshot: SnapshotMercado, decisao: Decisao) -> None:
-        valor = self._valor_da_entrada()
+        valor = self._valor_da_entrada(decisao)
         payout = float(snapshot.payout)
         expiracao = self._expiracao_dinamica(snapshot, decisao)
 
@@ -177,6 +186,17 @@ class ExecutorSeguro:
                 decisao.direcao,
                 expiracao,
             )
+            # "not available at the moment" costuma ser um soluço passageiro do
+            # feed da IQ (não é suspensão real) — 1 retry rápido recupera o sinal
+            # em vez de perder o candle inteiro.
+            if not enviada and "not available" in str(id_ordem).lower():
+                no_prazo_retry, _, _ = self._validar_instante_envio()
+                if no_prazo_retry:
+                    time.sleep(1.5)
+                    print(f"    [retry] {decisao.ativo}: ativo indisponível, tentando de novo...")
+                    enviada, id_ordem = self.mercado.comprar(
+                        valor, decisao.ativo, decisao.direcao, expiracao,
+                    )
         except Exception as e:
             self.risco.cancelar_reserva(decisao.ativo)
             self.registro.registrar_falha(decisao, f"excecao_buy:{e}", valor=valor)

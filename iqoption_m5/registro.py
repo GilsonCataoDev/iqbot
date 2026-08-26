@@ -504,7 +504,7 @@ class RegistroSQLite:
         with self._lock, self._sessao() as db:
             linhas = db.execute(
                 """
-                SELECT id_ordem, ativo, direcao, enviada_em, valor, payout
+                SELECT id_ordem, ativo, direcao, enviada_em, valor, payout, setup
                 FROM operacoes
                 WHERE status IN ('aberta', 'resultado_desconhecido')
                 ORDER BY enviada_em ASC
@@ -518,8 +518,9 @@ class RegistroSQLite:
                 enviada_em=datetime.fromisoformat(enviada_em),
                 valor=float(valor),
                 payout=float(payout),
+                setup=setup or "desconhecido",
             )
-            for id_ordem, ativo, direcao, enviada_em, valor, payout in linhas
+            for id_ordem, ativo, direcao, enviada_em, valor, payout, setup in linhas
         ]
 
     def operacoes_grafico(self, ativo: str, limite: int = 50) -> list[dict]:

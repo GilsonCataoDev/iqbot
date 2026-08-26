@@ -11,18 +11,19 @@ logger = logging.getLogger(__name__)
 
 PRIORIDADE_SETUP: dict[str, int] = {
     "rejeicao_m1_hierarquico": 0,  # nova — hierarquia M15→M5→M1 com scoring
-    "pullback_confluencia":   1,
-    "fibo_sr_retracao":       2,
-    "reversao_confluencia":   3,
-    "reversao_bollinger_rsi": 4,
-    "sr_rejeicao":            5,
-    "engulfing_sr":           6,
-    "pin_bar_sr":             7,
-    "pullback":               8,
-    "bollinger_squeeze":      9,
-    "divergencia_rsi":       10,
-    "macd_crossover":        11,
-    "reversao_candle":       12,
+    "retracao_intracandle":   1,
+    "pullback_confluencia":   2,
+    "fibo_sr_retracao":       3,
+    "reversao_confluencia":   4,
+    "reversao_bollinger_rsi": 5,
+    "sr_rejeicao":            6,
+    "engulfing_sr":           7,
+    "pin_bar_sr":             8,
+    "pullback":               9,
+    "bollinger_squeeze":     10,
+    "divergencia_rsi":       11,
+    "macd_crossover":        12,
+    "reversao_candle":       13,
 }
 _PRIORIDADE_DEFAULT = 99
 
@@ -278,6 +279,9 @@ class EstrategiaReversaoM5:
         if direcao is None:
             return None
 
+        _rsi_e = float(esticado["RSI"])
+        _rsi_c = float(confirmacao["RSI"])
+        _banda = "inferior (sobrevenda)" if direcao == "call" else "superior (sobrecompra)"
         return Decisao(
             ativo=ativo,
             direcao=direcao,
@@ -286,10 +290,16 @@ class EstrategiaReversaoM5:
             motivo="retorno_bollinger_rsi_m5",
             detalhes={
                 "setup": "reversao_bollinger_rsi",
-                "rsi_estirado": float(esticado["RSI"]),
-                "rsi_confirmacao": float(confirmacao["RSI"]),
+                "rsi_estirado": _rsi_e,
+                "rsi_confirmacao": _rsi_c,
                 "atr": float(confirmacao["ATR"]),
                 "tendencia": str(confirmacao["TendenciaMacro"]),
+                "razao": [
+                    f"Preço violou a Banda de Bollinger {_banda}",
+                    f"RSI esticado em {_rsi_e:.1f} → mercado exausto",
+                    f"Candle de confirmação: RSI voltou para {_rsi_c:.1f}",
+                    f"Fechamento confirma reversão na direção {direcao.upper()}",
+                ],
             },
         )
 
@@ -542,6 +552,8 @@ class EstrategiaReversaoM5:
         setup = "pullback_confluencia" if len(contexto["fatores"]) >= 2 else "pullback"
         if setup == "pullback" and not self.config.pullback_ativo:
             return None
+        if setup == "pullback_confluencia" and not self.config.pullback_confluencia_ativo:
+            return None
         return Decisao(
             ativo=ativo,
             direcao=contexto["direcao"],
@@ -635,6 +647,9 @@ class EstrategiaReversaoM5:
         if not confirmou:
             return None
 
+        _tipo = "suporte" if eh_bull_pin else "resistência"
+        _wick = ponto_wick_bull if eh_bull_pin else ponto_wick_bear
+        _sombra_pct = sombra_inf / total * 100 if eh_bull_pin else sombra_sup / total * 100
         return Decisao(
             ativo=ativo,
             direcao=direcao,
@@ -648,6 +663,13 @@ class EstrategiaReversaoM5:
                 "corpo": round(body, 6),
                 "atr": round(atr, 6),
                 "tendencia_ema": "alta" if ema_alta else "baixa",
+                "razao": [
+                    f"Pin Bar detectado no candle anterior (sombra {_sombra_pct:.0f}% do candle)",
+                    f"Ponta da mecha ({_wick:.5f}) tocou {_tipo} → rejeição forte",
+                    f"Corpo pequeno vs sombra grande = indecisão resolvida",
+                    f"Candle de confirmação fechou na direção esperada ({direcao.upper()})",
+                    f"EMA indica tendência de {'alta' if ema_alta else 'baixa'} — alinhado",
+                ],
             },
         )
 
@@ -714,6 +736,14 @@ class EstrategiaReversaoM5:
                         "mecha_inf_pct": round(mecha_inf * 100),
                         "atr": round(atr, 6),
                         "tendencia_macro": tendencia,
+                        "razao": [
+                            f"Suporte em {sr:.5f} identificado por pivôs recentes",
+                            f"Preço tocou o suporte (Low {v_low:.5f} ≈ S/R)",
+                            f"Mecha inferior de {mecha_inf*100:.0f}% do candle = rejeição do nível",
+                            f"Fechou acima do meio do candle → compradores reagiram",
+                            f"Tendência macro: {tendencia} — contexto favorável a CALL",
+                            "Entrada CALL apostando na rejeição do suporte",
+                        ],
                     },
                 )
 
@@ -745,6 +775,14 @@ class EstrategiaReversaoM5:
                         "mecha_sup_pct": round(mecha_sup * 100),
                         "atr": round(atr, 6),
                         "tendencia_macro": tendencia,
+                        "razao": [
+                            f"Resistência em {sr:.5f} identificada por pivôs recentes",
+                            f"Preço tocou a resistência (High {v_high:.5f} ≈ S/R)",
+                            f"Mecha superior de {mecha_sup*100:.0f}% do candle = rejeição do nível",
+                            f"Fechou abaixo do meio do candle → vendedores reagiram",
+                            f"Tendência macro: {tendencia} — contexto favorável a PUT",
+                            "Entrada PUT apostando na rejeição da resistência",
+                        ],
                     },
                 )
 
@@ -765,10 +803,16 @@ class EstrategiaReversaoM5:
         vela = df.iloc[indice]
         v_open = float(vela["Open"])
         v_close = float(vela["Close"])
-        if contexto["direcao"] == "call" and v_close >= v_open:
+        # Exige candle a favor da direcao (verde=call, vermelho=put) — confirmacao de
+        # reversao no toque da zona, no mesmo padrao do _avaliar_sr_rejeicao. Estava
+        # invertido (exigia candle CONTRA a direcao): backtest 25/08/2026 mediu
+        # WR=23.8% (n=655, IC95%=[21%,27%]) com a condicao trocada.
+        if contexto["direcao"] == "call" and v_close <= v_open:
             return None
-        if contexto["direcao"] == "put" and v_close <= v_open:
+        if contexto["direcao"] == "put" and v_close >= v_open:
             return None
+        _fatores_str = " + ".join(contexto["fatores"])
+        _dir = contexto["direcao"].upper()
         return Decisao(
             ativo=ativo,
             direcao=contexto["direcao"],
@@ -781,8 +825,130 @@ class EstrategiaReversaoM5:
                 "fatores": contexto["fatores"],
                 "nivel_sr": contexto["nivel_sr"],
                 "atr": round(float(vela["ATR"]), 6),
+                "razao": [
+                    f"Preço retraiu para zona de confluência: {_fatores_str}",
+                    f"Nível Fibonacci + S/R em {contexto['nivel_sr']:.5f}",
+                    f"Tendência macro: {contexto['tendencia']} — retração dentro da tendência",
+                    f"Candle fechou na direção do setup ({_dir})",
+                    f"Confluência de fatores aumenta a probabilidade de reversão",
+                ],
             },
         )
+
+    def _avaliar_retracao_intracandle(self, ativo: str, df: pd.DataFrame, indice: int) -> Decisao | None:
+        """Detecta impulso + retração Fibo no candle FECHADO.
+
+        Avalia o candle fechado (indice-1): se fez impulso ≥ 1 ATR e Close
+        retornou para a zona Fibo 38.2-61.8% do impulso, sinaliza entrada
+        no candle seguinte na direção do impulso original. Sem lookahead:
+        todos os dados vêm do candle já concluído.
+
+        CALL: candle fez High-Open ≥ 1 ATR (impulso de alta), Close voltou
+              38-62% desse range mas ficou acima do Open (candle verde).
+        PUT:  candle fez Open-Low ≥ 1 ATR (impulso de baixa), Close voltou
+              38-62% desse range mas ficou abaixo do Open (candle vermelho).
+        """
+        c = self.config
+        if not c.retracao_intracandle_ativo:
+            return None
+        min_candles = max(c.ema_macro_periodo, c.atr_regime_janela, c.pullback_pivo_raio * 2 + 10) + 3
+        if indice < min_candles + 1 or indice >= len(df):
+            return None
+        # Avalia candle FECHADO (indice-1), entrada no candle atual (indice)
+        vela = df.iloc[indice - 1]
+        if any(pd.isna(vela.get(col)) for col in ("Open", "High", "Low", "Close", "ATR", "TendenciaMacro")):
+            return None
+        if not self._atr_regime_valido(df, indice - 1):
+            return None
+
+        v_open = float(vela["Open"])
+        v_close = float(vela["Close"])
+        v_high = float(vela["High"])
+        v_low = float(vela["Low"])
+        atr = float(vela["ATR"])
+        tendencia = str(vela.get("TendenciaMacro", "lateral"))
+
+        impulso_alta = v_high - v_open
+        impulso_baixa = v_open - v_low
+        tolerancia = c.pullback_tolerancia_atr * atr
+
+        suportes, resistencias = self._pivos(df, indice - 1)
+
+        # CALL: impulso de alta no candle fechado, Close retornou para zona Fibo
+        if impulso_alta >= c.retracao_impulso_min_atr * atr and tendencia in ("alta", "lateral"):
+            retracao = v_high - v_close
+            fib_ratio = retracao / impulso_alta if impulso_alta > 0 else 0
+            if c.retracao_fib_min <= fib_ratio <= c.retracao_fib_max:
+                if v_close > v_open:
+                    if c.retracao_exigir_sr:
+                        sr = min(suportes, key=lambda p: abs(p - v_low), default=None)
+                        if sr is None or abs(sr - v_low) > tolerancia:
+                            return None
+                    else:
+                        sr = None
+                    vela_atual = df.iloc[indice]
+                    _sr_txt = f" com suporte em {sr:.5f}" if sr else ""
+                    return Decisao(
+                        ativo=ativo,
+                        direcao="call",
+                        preco=float(vela_atual["Close"]),
+                        candle_hora=pd.Timestamp(df.index[indice]),
+                        motivo="retracao_intracandle_m5",
+                        detalhes={
+                            "setup": "retracao_intracandle",
+                            "impulso": round(impulso_alta, 6),
+                            "fib_ratio": round(fib_ratio, 3),
+                            "nivel_sr": round(sr, 6) if sr else None,
+                            "atr": round(atr, 6),
+                            "tendencia_macro": tendencia,
+                            "razao": [
+                                f"Candle anterior fez impulso de ALTA de {impulso_alta:.5f} (≥ 1 ATR)",
+                                f"Preço retornou {fib_ratio*100:.1f}% do impulso (zona Fibo 38-62%)",
+                                f"Fechou acima da abertura (candle verde) = força mantida",
+                                f"Retração saudável{_sr_txt}",
+                                "Entrada CALL: continuação do impulso de alta",
+                            ],
+                        },
+                    )
+
+        # PUT: impulso de baixa no candle fechado, Close retornou para zona Fibo
+        if impulso_baixa >= c.retracao_impulso_min_atr * atr and tendencia in ("baixa", "lateral"):
+            retracao = v_close - v_low
+            fib_ratio = retracao / impulso_baixa if impulso_baixa > 0 else 0
+            if c.retracao_fib_min <= fib_ratio <= c.retracao_fib_max:
+                if v_close < v_open:
+                    if c.retracao_exigir_sr:
+                        sr = min(resistencias, key=lambda p: abs(p - v_high), default=None)
+                        if sr is None or abs(sr - v_high) > tolerancia:
+                            return None
+                    else:
+                        sr = None
+                    vela_atual = df.iloc[indice]
+                    _sr_txt = f" com resistência em {sr:.5f}" if sr else ""
+                    return Decisao(
+                        ativo=ativo,
+                        direcao="put",
+                        preco=float(vela_atual["Close"]),
+                        candle_hora=pd.Timestamp(df.index[indice]),
+                        motivo="retracao_intracandle_m5",
+                        detalhes={
+                            "setup": "retracao_intracandle",
+                            "impulso": round(impulso_baixa, 6),
+                            "fib_ratio": round(fib_ratio, 3),
+                            "nivel_sr": round(sr, 6) if sr else None,
+                            "atr": round(atr, 6),
+                            "tendencia_macro": tendencia,
+                            "razao": [
+                                f"Candle anterior fez impulso de BAIXA de {impulso_baixa:.5f} (≥ 1 ATR)",
+                                f"Preço retornou {fib_ratio*100:.1f}% do impulso (zona Fibo 38-62%)",
+                                f"Fechou abaixo da abertura (candle vermelho) = pressão mantida",
+                                f"Retração saudável{_sr_txt}",
+                                "Entrada PUT: continuação do impulso de baixa",
+                            ],
+                        },
+                    )
+
+        return None
 
     def _avaliar_macd(self, ativo: str, df: pd.DataFrame, indice: int) -> Decisao | None:
         if not self.config.macd_crossover_ativo:
@@ -1234,6 +1400,7 @@ class EstrategiaReversaoM5:
             self._avaliar_indicadores,
             self._avaliar_pullback_indicadores,
             self._avaliar_macd,
+            self._avaliar_retracao_intracandle,
         ):
             nome = fn.__name__
             if nome in self._estrategias_desativadas:

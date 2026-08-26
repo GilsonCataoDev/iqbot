@@ -30,12 +30,32 @@ def _consultar_com_limite(mercado, id_ordem: str, timeout_segundos: float):
 def recuperar_operacoes_pendentes(
     mercado,
     registro: RegistroSQLite,
+    config=None,
     timeout_segundos: float = 25.0,
     idade_perda_tecnica_segundos: float = 600.0,
 ) -> tuple[int, int]:
     recuperadas = 0
     falhas = 0
     for pendente in registro.operacoes_pendentes():
+        # Nunca consulta a IQ antes da expiracao real da opcao — um resultado
+        # devolvido cedo demais pode ser pnl_net provisorio de opcao ainda aberta
+        # (mesma causa raiz do bug corrigido em mercado_iq.aguardar_resultado).
+        if config is not None:
+            expiracao_min = (
+                (config.expiracao_por_setup or {}).get(pendente.setup)
+                if config.expiracao_por_setup
+                else None
+            )
+            if expiracao_min is None:
+                expiracao_min = config.expiracao_minutos
+            idade = (datetime.now() - pendente.enviada_em).total_seconds()
+            if idade < expiracao_min * 60 + 5:
+                print(
+                    f">> {pendente.ativo}: ordem {pendente.id_ordem} ainda nao "
+                    f"expirou (idade={idade:.0f}s, expiracao={expiracao_min}min) — "
+                    f"aguardando proximo restart pra recuperar"
+                )
+                continue
         try:
             bruto = _consultar_com_limite(
                 mercado, pendente.id_ordem, timeout_segundos
