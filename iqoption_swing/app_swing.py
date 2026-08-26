@@ -15,9 +15,9 @@ from .mercado_swing import MercadoSwing, MercadoSwingIndisponivel
 from .registro_swing import RegistroSwing
 
 
-def _h1_atual(ts: int) -> int:
-    """Retorna o timestamp de início do H1 corrente."""
-    return (ts // 3600) * 3600
+def _m15_atual(ts: int) -> int:
+    """Retorna o timestamp de início do M15 corrente."""
+    return (ts // 900) * 900
 
 
 def main(config: SwingConfig) -> None:
@@ -130,7 +130,7 @@ def main(config: SwingConfig) -> None:
                 f"WR={resumo['wr']:.0%}  ({resumo['total']} sinais resolvidos)"
             )
 
-    ultimo_h1 = 0
+    ultimo_m15 = 0
     reconexoes = 0
     # Cache dos dados estruturais (S/R, Fib, canal, indicadores H4) por ativo.
     # Preenchido no fechamento do H1; reutilizado nos refreshes de tick entre closes.
@@ -162,7 +162,7 @@ def main(config: SwingConfig) -> None:
     while True:
         try:
             ts = mercado.timestamp_servidor()
-            h1_corrente = _h1_atual(ts)
+            h1_corrente = _m15_atual(ts)
 
             # Verifica ordens pendentes a cada ciclo
             try:
@@ -176,18 +176,18 @@ def main(config: SwingConfig) -> None:
             except Exception as e:
                 print(f"[SWING] Erro ao verificar monitor: {e!r}")
 
-            # Entre fechamentos de H1: atualiza candle atual no dashboard
-            if h1_corrente == ultimo_h1 and _cache_estrutural:
+            # Entre ciclos M15: atualiza candle atual no dashboard
+            if h1_corrente == ultimo_m15 and _cache_estrutural:
                 try:
                     _refresh_tick_grafico()
                 except Exception as e:
                     print(f"[SWING] Erro no refresh de tick: {e!r}")
 
-            # Avalia sinais apenas na virada do H1
-            if h1_corrente > ultimo_h1:
-                ultimo_h1 = h1_corrente
+            # Avalia sinais a cada virada de M15
+            if h1_corrente > ultimo_m15:
+                ultimo_m15 = h1_corrente
                 hora_utc = datetime.fromtimestamp(ts, tz=timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
-                print(f"\n[SWING] === H1 close: {hora_utc} ===")
+                print(f"\n[SWING] === M15 close: {hora_utc} ===")
 
                 # Filtro de notícias — bloqueia hora inteira se evento de alto impacto
                 _noticia_bloqueada, _noticia_desc = verificar_noticias(janela_minutos=120)

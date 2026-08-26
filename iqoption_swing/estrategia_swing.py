@@ -321,7 +321,9 @@ class EstrategiaSwing:
         df = self._adicionar_indicadores(df_h1)
         if len(df) < 5:
             return False
-        ultimo = df.iloc[-1]
+        # Usa o penúltimo candle (último FECHADO) — o ciclo agora é M15,
+        # então df.iloc[-1] é o candle H1 ainda em formação.
+        ultimo = df.iloc[-2]
         atr = self._atr_ultimo(df)
         if atr <= 0:
             return False
