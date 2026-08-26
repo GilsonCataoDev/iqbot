@@ -13,6 +13,7 @@ import numpy as np
 import pandas as pd
 
 from iqoption_m5.grafico import GraficoM5
+from .estrategia_swing import AnaliseSwing
 
 _JANELA_CANAL = 60  # candles H4 (~10 dias) usados pra ajustar o canal
 
@@ -98,16 +99,9 @@ class GraficoSwing:
         resistencias: list[float],
         zona_fib: tuple[float, float] | None,
         mercado_aberto: bool = True,
-        sinal_info: dict | None = None,
+        analise: "AnaliseSwing | None" = None,
     ) -> None:
-        """Publica candles H1 (leitura) + EMA/RSI do H1 + S/R/Fib/canal do H4 (estrutura).
-
-        `sinal_info`, quando presente, marca o alerta de entrada no grafico:
-        {"direcao": "call"|"put", "preco": float, "sl": float, "tp": float,
-         "setup": str, "score": int}. E so um aviso visual — a decisao de
-         entrar continua manual (o veredito automatico tem edge negativo
-         provado em backtest_swing.py).
-        """
+        """Publica candles H1 + S/R/Fib/canal H4. Mostra estado ENTRAR/ESPERAR/EVITAR."""
         df = df_h1_indicadores.copy()
         df["TendenciaMacro"] = tendencia_d1 or "lateral"
         if "EMA20" in df.columns:
@@ -116,24 +110,32 @@ class GraficoSwing:
             df["EMA_Macro"] = df["EMA50"]
 
         preco_atual = float(df["Close"].iloc[-1]) if len(df) else 0.0
-        _n_mais_proximos = 3  # poucas linhas — leitura simples do candle
+        _n_mais_proximos = 3
         suportes_top = sorted(suportes, key=lambda p: abs(p - preco_atual))[:_n_mais_proximos]
         resistencias_top = sorted(resistencias, key=lambda p: abs(p - preco_atual))[:_n_mais_proximos]
         niveis_sr = {"suportes": suportes_top, "resistencias": resistencias_top}
         snapshot = _SnapshotFake(ativo=ativo, mercado_aberto=mercado_aberto)
 
         sinais = []
-        if sinal_info is not None and len(df):
+        if analise is not None and analise.estado in ("ENTRAR", "ESPERAR") and len(df):
+            dir_iq = "call" if analise.direcao == "compra" else "put"
+            estado_label = analise.estado
+            pendentes_str = " | ".join(analise.pendentes) if analise.pendentes else ""
+            razao = [f"[{estado_label}] {analise.setup or ''}"]
+            if pendentes_str:
+                razao.append(f"Falta: {pendentes_str}")
+            if analise.zona_entrada:
+                razao.append(f"Zona: {analise.zona_entrada[0]:.5f}–{analise.zona_entrada[1]:.5f}")
+            if analise.tp1:
+                rr_str = f"  R:R {analise.rr:.1f}" if analise.rr else ""
+                razao.append(f"TP1={analise.tp1:.5f}{rr_str}")
             sinais.append(_SinalFake(
                 ativo=ativo,
-                direcao=sinal_info["direcao"],
-                preco=float(sinal_info["preco"]),
+                direcao=dir_iq,
+                preco=preco_atual,
                 candle_hora=df.index[-1],
-                motivo=sinal_info.get("setup", ""),
-                detalhes={
-                    "setup": sinal_info.get("setup", ""),
-                    "razao": [f"score={sinal_info.get('score','?')}/10 — sinal do bot swing, decisao final e manual"],
-                },
+                motivo=analise.setup or "",
+                detalhes={"setup": analise.setup or "", "razao": razao},
             ))
 
         dados = self._grafico.montar_dados(
@@ -151,13 +153,18 @@ class GraficoSwing:
                 {"nivel": 0.618, "preco": hi if lo < hi else lo},
             ]
         dados["canal"] = _canal_tendencia(df_h4_indicadores, self._grafico._unix)
-        if sinal_info is not None:
+
+        # Alerta visual: SL/TP no gráfico quando há análise ativa
+        if analise is not None and analise.estado in ("ENTRAR", "ESPERAR"):
+            zona = analise.zona_entrada
+            preco_entrada = ((zona[0] + zona[1]) / 2) if zona else preco_atual
             dados["alerta"] = {
-                "precoEntrada": float(sinal_info["preco"]),
-                "direcao": sinal_info["direcao"],
-                "entradaConfirmada": True,
-                "sl": float(sinal_info["sl"]),
-                "tp": float(sinal_info["tp"]),
+                "precoEntrada": preco_entrada,
+                "direcao": "call" if analise.direcao == "compra" else "put",
+                "entradaConfirmada": analise.estado == "ENTRAR",
+                "sl": analise.invalidacao or 0.0,
+                "tp": analise.tp1 or 0.0,
+                "estado": analise.estado,
             }
         self._grafico.atualizar(ativo, dados)
 

@@ -151,20 +151,37 @@ class MercadoSwing:
             df["Volume"] = 0
         return df[["timestamp", "Open", "High", "Low", "Close", "Volume"]].set_index("timestamp").sort_index()
 
-    def _buscar(self, ativo: str, tf: int, n: int) -> pd.DataFrame:
+    @staticmethod
+    def _somente_fechados(
+        candles: pd.DataFrame, timeframe_segundos: int, timestamp_servidor: float
+    ) -> pd.DataFrame:
+        limite = pd.to_datetime(timestamp_servidor, unit="s")
+        fechamentos = candles.index + pd.to_timedelta(timeframe_segundos, unit="s")
+        return candles.loc[fechamentos <= limite]
+
+    def _buscar(
+        self, ativo: str, tf: int, n: int, somente_fechados: bool = False
+    ) -> pd.DataFrame:
         with self._lock:
             ts = self._api.get_server_timestamp()
-            dados = self._api.get_candles(ativo, tf, n, ts)
-        return self._para_df(dados)
+            dados = self._api.get_candles(ativo, tf, n + int(somente_fechados), ts)
+        df = self._para_df(dados)
+        if somente_fechados:
+            df = self._somente_fechados(df, tf, ts).tail(n)
+        return df
 
     def candles_d1(self, ativo: str) -> pd.DataFrame:
-        return self._buscar(ativo, self.TF_D1, self.config.d1_num_candles)
+        return self._buscar(ativo, self.TF_D1, self.config.d1_num_candles, True)
 
     def candles_h4(self, ativo: str) -> pd.DataFrame:
-        return self._buscar(ativo, self.TF_H4, self.config.h4_num_candles)
+        return self._buscar(ativo, self.TF_H4, self.config.h4_num_candles, True)
 
     def candles_h1(self, ativo: str) -> pd.DataFrame:
-        return self._buscar(ativo, self.TF_H1, self.config.h1_num_candles)
+        return self._buscar(ativo, self.TF_H1, self.config.h1_num_candles, True)
+
+    def candles_h1_recente(self, ativo: str, n: int = 8) -> pd.DataFrame:
+        """Busca só os últimos N candles H1 — rápido, para refresh de tick."""
+        return self._buscar(ativo, self.TF_H1, n)
 
     # -------------------------------------------------------------------------
     # Payout e estado

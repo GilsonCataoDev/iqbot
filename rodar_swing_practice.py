@@ -2,23 +2,24 @@
 from iqoption_swing.config_swing import SwingConfig
 from iqoption_swing.app_swing import main
 
-# Matriz completa dos cruzamentos das 8 moedas major/minor mais liquidas
-# (EUR, GBP, AUD, NZD, USD, CAD, CHF, JPY) = 28 pares.
-PARES_MAJOR_MINOR = (
+# 11 pares mais liquidos e relevantes do forex — melhor custo/beneficio
+# entre cobertura de mercado e velocidade de atualizacao do dashboard.
+PARES_PRINCIPAIS = (
+    # Majors USD (mais volume e spread menor)
     "EURUSD", "GBPUSD", "AUDUSD", "NZDUSD", "USDCAD", "USDCHF", "USDJPY",
-    "EURGBP", "EURAUD", "EURNZD", "EURCAD", "EURCHF", "EURJPY",
-    "GBPAUD", "GBPNZD", "GBPCAD", "GBPCHF", "GBPJPY",
-    "AUDNZD", "AUDCAD", "AUDCHF", "AUDJPY",
-    "NZDCAD", "NZDCHF", "NZDJPY",
-    "CADCHF", "CADJPY",
-    "CHFJPY",
+    # Crosses EUR e GBP com JPY (volatilidade e oportunidades de tendencia)
+    "EURJPY", "GBPJPY",
+    # Cross EUR/GBP (correlacao inversa util como filtro)
+    "EURGBP",
+    # AUD/JPY (proxy de risco global)
+    "AUDJPY",
 )
 
 config = SwingConfig(
     modo="forex",
     conta="PRACTICE",
     executar_ordens=False,   # modo monitor — só exibe sinais para entrada manual
-    ativos=PARES_MAJOR_MINOR,
+    ativos=PARES_PRINCIPAIS,
     rr_ratio=2.0,
     sl_atr_multiplo=1.5,
     pontuacao_minima=7,      # 7+ já é sinal válido; 8+ é forte

@@ -11,11 +11,42 @@ from .config_swing import SwingConfig
 
 @dataclass(frozen=True)
 class SinalSwing:
+    """Mantido apenas para compatibilidade com executor_swing. Não usar em código novo."""
     ativo: str
-    direcao: str          # "call" | "put"
+    direcao: str
     setup: str
     pontuacao: int
     detalhes: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
+class AnaliseSwing:
+    """Análise de decisão manual: ENTRAR / ESPERAR / EVITAR."""
+    ativo: str
+    estado: str                            # "ENTRAR" | "ESPERAR" | "EVITAR"
+    direcao: str | None                    # "compra" | "venda" | None
+    setup: str | None
+    zona_entrada: tuple[float, float] | None   # (preco_min, preco_max)
+    invalidacao: float | None              # stop técnico (preço de invalidação)
+    tp1: float | None
+    tp2: float | None
+    rr: float | None                       # R:R estimado vs TP1
+    validade_candles_h4: int               # candles H4 até expirar a análise
+    bloqueadores: list[str]                # razões para EVITAR
+    pendentes: list[str]                   # o que falta para sair de ESPERAR
+    detalhes: dict[str, Any] = field(default_factory=dict)
+
+    def como_sinal_legado(self) -> SinalSwing | None:
+        """Converte para SinalSwing se estado==ENTRAR (compatibilidade executor)."""
+        if self.estado != "ENTRAR" or self.direcao is None or self.setup is None:
+            return None
+        return SinalSwing(
+            ativo=self.ativo,
+            direcao="call" if self.direcao == "compra" else "put",
+            setup=self.setup,
+            pontuacao=10,
+            detalhes=self.detalhes,
+        )
 
 
 class EstrategiaSwing:
@@ -322,148 +353,231 @@ class EstrategiaSwing:
             return False, f"mercado explosivo (ATR {ratio:.1f}× mediana)"
         return True, f"{ratio:.1f}× mediana"
 
+    # -------------------------------------------------------------------------
+    # Helpers de cálculo de alvos e zonas
+    # -------------------------------------------------------------------------
+
+    def _calcular_invalidacao(
+        self, df_h4: pd.DataFrame, tendencia: str, zona_entrada: tuple[float, float]
+    ) -> float:
+        """Stop técnico: S/R estrutural mais próximo abaixo/acima da zona de entrada."""
+        df = self._adicionar_indicadores(df_h4)
+        atr = self._atr_ultimo(df)
+        suportes, resistencias = self._pivos_h4(df_h4)
+        z_min, z_max = zona_entrada
+        margem = atr * 0.5
+        if tendencia == "alta":
+            candidatos = [s for s in suportes if s < z_min - margem]
+            return (max(candidatos) - margem) if candidatos else (z_min - atr * 1.5)
+        candidatos = [r for r in resistencias if r > z_max + margem]
+        return (min(candidatos) + margem) if candidatos else (z_max + atr * 1.5)
+
+    def _calcular_tp2(
+        self, df_h4: pd.DataFrame, tendencia: str, tp1: float, entrada: float
+    ) -> float | None:
+        """TP2: próximo S/R além do TP1 ou TP1 + extensão igual ao TP1."""
+        suportes, resistencias = self._pivos_h4(df_h4)
+        dist = abs(tp1 - entrada)
+        if tendencia == "alta":
+            candidatos = [r for r in resistencias if r > tp1 + dist * 0.3]
+            return min(candidatos) if candidatos else tp1 + dist
+        candidatos = [s for s in suportes if s < tp1 - dist * 0.3]
+        return max(candidatos) if candidatos else tp1 - dist
+
+    def _calcular_rr(
+        self, tendencia: str, zona_entrada: tuple[float, float], tp1: float, invalidacao: float
+    ) -> float | None:
+        entrada = (zona_entrada[0] + zona_entrada[1]) / 2
+        ganho = abs(tp1 - entrada)
+        risco = abs(entrada - invalidacao)
+        if risco <= 0:
+            return None
+        return round(ganho / risco, 2)
+
+    def _evitar(
+        self, ativo: str, direcao: str | None, bloqueadores: list[str], detalhes: dict
+    ) -> AnaliseSwing:
+        return AnaliseSwing(
+            ativo=ativo, estado="EVITAR", direcao=direcao, setup=None,
+            zona_entrada=None, invalidacao=None, tp1=None, tp2=None, rr=None,
+            validade_candles_h4=0, bloqueadores=bloqueadores, pendentes=[],
+            detalhes=detalhes,
+        )
+
+    def _esperar(
+        self, ativo: str, direcao: str, setup: str,
+        zona_entrada: tuple[float, float], invalidacao: float,
+        tp1: float | None, tp2: float | None, rr: float | None,
+        pendentes: list[str], detalhes: dict,
+    ) -> AnaliseSwing:
+        return AnaliseSwing(
+            ativo=ativo, estado="ESPERAR", direcao=direcao, setup=setup,
+            zona_entrada=zona_entrada, invalidacao=invalidacao,
+            tp1=tp1, tp2=tp2, rr=rr,
+            validade_candles_h4=2, bloqueadores=[], pendentes=pendentes,
+            detalhes=detalhes,
+        )
+
+    def _entrar(
+        self, ativo: str, direcao: str, setup: str,
+        zona_entrada: tuple[float, float], invalidacao: float,
+        tp1: float | None, tp2: float | None, rr: float | None,
+        detalhes: dict,
+    ) -> AnaliseSwing:
+        return AnaliseSwing(
+            ativo=ativo, estado="ENTRAR", direcao=direcao, setup=setup,
+            zona_entrada=zona_entrada, invalidacao=invalidacao,
+            tp1=tp1, tp2=tp2, rr=rr,
+            validade_candles_h4=2, bloqueadores=[], pendentes=[],
+            detalhes=detalhes,
+        )
+
+    # -------------------------------------------------------------------------
+    # Avaliação principal — retorna SEMPRE AnaliseSwing (nunca None)
+    # -------------------------------------------------------------------------
+
     def avaliar(
         self,
         ativo: str,
         df_d1: pd.DataFrame,
         df_h4: pd.DataFrame,
         df_h1: pd.DataFrame,
-    ) -> SinalSwing | None:
-        """AVISO — premissa FALSIFICADA pelo backtest. Ver backtest_swing.py.
+    ) -> AnaliseSwing:
+        """Painel de decisão manual: ENTRAR / ESPERAR / EVITAR.
 
-        Backtest de 10 meses (jan-ago/2026), 12 pares, 313 sinais:
-            WR 18.4% contra breakeven 33.3% (R:R 2.0) -> -0.33R por trade, -102R
-            IC95% [13.4%, 23.5%] — inteiramente abaixo do breakeven.
-            Perde nas duas metades do periodo (21.1% e 15.8%): nao e regime.
+        Lógica em cascata:
+          1. D1 define o regime (tendência ou lateral).
+          2. H4 localiza o preço (S/R, Fib, breakout, divergência RSI).
+          3. H1 confirma o gatilho (candle de confirmação fechado).
+          Se faltou H4 → EVITAR. Se faltou H1 → ESPERAR + pendentes.
+          Se tudo alinhado → ENTRAR + zona/stop/alvos calculados.
 
-        Nao e falta de calibracao. Testado e descartado:
-          - score_min 7/8/9 ......... 18.9% / 18.4% / 18.3%
-          - R:R 1.5 ................. 28.5% vs breakeven 40.0%
-          - confirmacao de entrada .. rejeicao/saiu_zona/ambas: 18-21%
-          - horizonte 12/24/36 H4 ... 20.6% / 22.9% / 25.4%
-          - piso de SL .............. +15R, longe de fechar a diferenca de -87R
-
-        O que enterra a premissa: quanto MAIS forte a tendencia D1, PIOR o
-        resultado — ADX 20-25 da 32.8%, ADX 40+ da 20.0%. Um sistema de
-        continuacao de tendencia teria o gradiente oposto.
-
-        Inverter a direcao da +32R no agregado, mas so no regime recente
-        (1a metade -11R / 2a metade +43R; Q1 28% -> Q2 41% -> Q3 51%).
-        Nao e edge estavel — por isso NAO foi invertida.
-
-        Consequencia: manter em executar_ordens=False ate existir uma tese
-        nova validada no backtest. Rode RODAR_BACKTEST_SWING.bat antes de
-        confiar em qualquer alteracao aqui.
+        AVISO: edge da estratégia atual é negativo (WR 21%, -0.277R/trade).
+        Este método informa apenas para decisão manual. Não executa ordens.
         """
+        detalhes: dict[str, Any] = {}
+
+        # 1. Regime D1
         tendencia, adx_d1 = self._tendencia_d1(df_d1)
-        if tendencia is None:
-            return None
+        detalhes["adx_d1"] = round(adx_d1, 1)
 
-        # ADX D1 fraco = mercado lateral disfarçado → não opera
-        if adx_d1 < 20:
-            return None
+        if tendencia is None or adx_d1 < 20:
+            motivo = "D1 sem tendência (ADX {:.0f} < 20)".format(adx_d1) if adx_d1 < 20 else "D1 lateral — sem viés direcional"
+            return self._evitar(ativo, None, [motivo], detalhes)
 
-        # ATR H4 fora do regime normal → não opera
+        direcao = "compra" if tendencia == "alta" else "venda"
+        detalhes["tendencia_d1"] = tendencia
+
+        # 2. Bloqueadores de volatilidade
         atr_ok, atr_regime = self._atr_regime_ok(df_h4)
         if not atr_ok:
-            print(f"  [{ativo}] bloqueado: {atr_regime}")
-            return None
-
-        pontuacao_base = 2  # D1 tendência clara
-        if adx_d1 >= 25:
-            pontuacao_base += 1  # +1 ADX forte
-        detalhes: dict[str, Any] = {"tendencia_d1": tendencia, "adx_d1": round(adx_d1, 1)}
-
-        estrutura_ok = self._estrutura_h4(df_h4, tendencia)
-        if estrutura_ok:
-            pontuacao_base += 2
-            detalhes["estrutura_h4"] = True
-
-        rsi_ok, rsi_h4 = self._rsi_h4_ok(df_h4, tendencia)
-        detalhes["rsi_h4"] = round(rsi_h4, 1)
-
-        h1_ok = self._confirmacao_h1(df_h1, tendencia)
-        detalhes["h1_ok"] = h1_ok
+            return self._evitar(ativo, direcao, [f"volatilidade anormal ({atr_regime})"], detalhes)
 
         df_h4_ind = self._adicionar_indicadores(df_h4)
         preco_atual = float(df_h4_ind.iloc[-1]["Close"])
         ema20_h4    = float(df_h4_ind["EMA20"].dropna().iloc[-1])
+        atr_h4      = self._atr_ultimo(df_h4_ind)
         detalhes["ema20_h4"] = round(ema20_h4, 5)
+        detalhes["atr_h4"]   = round(atr_h4, 5)
 
-        # Filtro de preço vs EMA20 H4: para PUT o preço deve estar abaixo da EMA20;
-        # para CALL acima. Preço do lado errado = H4 contradiz D1 → bloqueia todos os setups.
         preco_acima_ema20 = preco_atual > ema20_h4
         if tendencia == "baixa" and preco_acima_ema20:
-            print(f"  [{ativo}] PUT bloqueado: preco={preco_atual:.5f} acima EMA20_H4={ema20_h4:.5f}")
-            return None
+            return self._evitar(ativo, direcao,
+                [f"preço {preco_atual:.5f} acima EMA20_H4 {ema20_h4:.5f} — H4 contradiz venda"],
+                detalhes)
         if tendencia == "alta" and not preco_acima_ema20:
-            print(f"  [{ativo}] CALL bloqueado: preco={preco_atual:.5f} abaixo EMA20_H4={ema20_h4:.5f}")
-            return None
+            return self._evitar(ativo, direcao,
+                [f"preço {preco_atual:.5f} abaixo EMA20_H4 {ema20_h4:.5f} — H4 contradiz compra"],
+                detalhes)
 
-        # --- Setup 1: Pullback em Tendência (Fibonacci) ---
-        # Exige estrutura H4 alinhada — sem ela o H4 está indo contra o D1.
-        zona = self._zona_fibonacci_h4(df_h4, tendencia)
-        if zona is not None and estrutura_ok and self._toque_zona_h4(df_h4, zona, tendencia):
-            score = pontuacao_base + 4  # +2 zona fib + +2 toque (estrutura já soma nos pontos base)
-            if h1_ok:
-                score += 1
-            if rsi_ok:
-                score += 1
-            tp_sr = self._tp_sr_alvo(df_h4, tendencia, preco_atual)
-            if score >= self.config.pontuacao_minima:
-                return SinalSwing(
-                    ativo=ativo,
-                    direcao="call" if tendencia == "alta" else "put",
-                    setup="pullback_tendencia",
-                    pontuacao=score,
-                    detalhes={**detalhes, "zona_fib": list(zona), "tp_sr": tp_sr},
-                )
+        rsi_ok, rsi_h4 = self._rsi_h4_ok(df_h4, tendencia)
+        estrutura_ok   = self._estrutura_h4(df_h4, tendencia)
+        h1_ok          = self._confirmacao_h1(df_h1, tendencia)
+        detalhes["rsi_h4"]      = round(rsi_h4, 1)
+        detalhes["estrutura_h4"] = estrutura_ok
+        detalhes["h1_confirmado"] = h1_ok
 
-        # --- Setup 2: Divergência RSI H4 ---
-        # Exige H1 confirmação — divergência sem momentum H1 é sinal fraco.
-        if h1_ok and self._divergencia_rsi_h4(df_h4, tendencia):
-            score = pontuacao_base + 3
-            score += 1  # h1_ok já confirmado
-            if rsi_ok:
-                score += 1
-            tp_sr = self._tp_sr_alvo(df_h4, tendencia, preco_atual)
-            if score >= self.config.pontuacao_minima:
-                return SinalSwing(
-                    ativo=ativo,
-                    direcao="call" if tendencia == "alta" else "put",
-                    setup="divergencia_rsi_h4",
-                    pontuacao=score,
-                    detalhes={**detalhes, "tp_sr": tp_sr},
-                )
+        # 3. Identificar setup H4 + calcular zona/stop/alvos
+        # Cada setup retorna (zona_entrada, nome) se localização detectada, senão (None, None).
 
-        # --- Setup 3: SR Rejeição ---
-        nivel_sr = self._sr_proximo(df_h4, tendencia)
-        if nivel_sr is not None and rsi_ok and h1_ok:
-            score = pontuacao_base + 3 + 1  # +1 h1_ok obrigatório
-            tp_sr = self._tp_sr_alvo(df_h4, tendencia, preco_atual)
-            if score >= self.config.pontuacao_minima:
-                return SinalSwing(
-                    ativo=ativo,
-                    direcao="call" if tendencia == "alta" else "put",
-                    setup="sr_rejeicao",
-                    pontuacao=score,
-                    detalhes={**detalhes, "nivel_sr": nivel_sr, "tp_sr": tp_sr},
-                )
+        zona_entrada: tuple[float, float] | None = None
+        setup_nome: str | None = None
+        pendentes: list[str] = []
+        tp1: float | None = None
 
-        # --- Setup 4: Breakout + Reteste ---
-        nivel_br, retestou = self._breakout_reteste_h4(df_h4, tendencia)
-        if nivel_br is not None and retestou and h1_ok:
-            score = pontuacao_base + 3 + 1  # +1 h1_ok obrigatório
-            if rsi_ok:
-                score += 1
-            tp_sr = self._tp_sr_alvo(df_h4, tendencia, preco_atual)
-            if score >= self.config.pontuacao_minima:
-                return SinalSwing(
-                    ativo=ativo,
-                    direcao="call" if tendencia == "alta" else "put",
-                    setup="breakout_reteste",
-                    pontuacao=score,
-                    detalhes={**detalhes, "nivel_breakout": nivel_br, "tp_sr": tp_sr},
-                )
+        # Setup 1: Pullback Fibonacci (exige estrutura H4)
+        zona_fib = self._zona_fibonacci_h4(df_h4, tendencia)
+        if zona_fib and estrutura_ok and self._toque_zona_h4(df_h4, zona_fib, tendencia):
+            zona_entrada = zona_fib
+            setup_nome   = "pullback_tendencia"
+            tp1 = self._tp_sr_alvo(df_h4, tendencia, preco_atual)
+            if not rsi_ok:
+                pendentes.append(f"RSI H4 esticado ({rsi_h4:.0f}) — aguardar recuar")
 
-        return None
+        # Setup 2: SR Rejeição
+        if zona_entrada is None:
+            nivel_sr = self._sr_proximo(df_h4, tendencia)
+            if nivel_sr is not None:
+                tol = atr_h4 * self.config.h4_tolerancia_atr
+                zona_entrada = (nivel_sr - tol, nivel_sr + tol)
+                setup_nome   = "sr_rejeicao"
+                tp1 = self._tp_sr_alvo(df_h4, tendencia, preco_atual)
+                if not rsi_ok:
+                    pendentes.append(f"RSI H4 esticado ({rsi_h4:.0f})")
+
+        # Setup 3: Breakout + Reteste
+        if zona_entrada is None:
+            nivel_br, retestou = self._breakout_reteste_h4(df_h4, tendencia)
+            if nivel_br is not None and retestou:
+                tol = atr_h4 * self.config.h4_tolerancia_atr
+                zona_entrada = (nivel_br - tol, nivel_br + tol)
+                setup_nome   = "breakout_reteste"
+                tp1 = self._tp_sr_alvo(df_h4, tendencia, preco_atual)
+
+        # Setup 4: Divergência RSI H4
+        if zona_entrada is None and self._divergencia_rsi_h4(df_h4, tendencia):
+            tol = atr_h4 * self.config.h4_tolerancia_atr
+            zona_entrada = (preco_atual - tol, preco_atual + tol)
+            setup_nome   = "divergencia_rsi_h4"
+            tp1 = self._tp_sr_alvo(df_h4, tendencia, preco_atual)
+
+        if zona_entrada is None or setup_nome is None:
+            return self._evitar(ativo, direcao,
+                ["sem setup H4 identificado (aguardar o preço chegar em S/R, Fib ou breakout)"],
+                detalhes)
+
+        detalhes["setup"] = setup_nome
+        detalhes["zona_entrada"] = [round(zona_entrada[0], 5), round(zona_entrada[1], 5)]
+
+        invalidacao = self._calcular_invalidacao(df_h4, tendencia, zona_entrada)
+        tp2 = self._calcular_tp2(df_h4, tendencia, tp1, preco_atual) if tp1 else None
+        rr  = self._calcular_rr(tendencia, zona_entrada, tp1, invalidacao) if tp1 else None
+        detalhes["tp1"] = round(tp1, 5) if tp1 else None
+        detalhes["tp2"] = round(tp2, 5) if tp2 else None
+        detalhes["rr"]  = rr
+
+        # 4. H1: gatilho de entrada
+        if not h1_ok:
+            preco_ref = zona_entrada[0] if tendencia == "alta" else zona_entrada[1]
+            dir_str = "acima" if tendencia == "alta" else "abaixo"
+            pendentes.insert(0, f"aguardar H1 fechar {dir_str} de {preco_ref:.5f}")
+            return self._esperar(ativo, direcao, setup_nome, zona_entrada, invalidacao,
+                                 tp1, tp2, rr, pendentes, detalhes)
+
+        if pendentes:
+            return self._esperar(ativo, direcao, setup_nome, zona_entrada, invalidacao,
+                                 tp1, tp2, rr, pendentes, detalhes)
+
+        return self._entrar(ativo, direcao, setup_nome, zona_entrada, invalidacao,
+                            tp1, tp2, rr, detalhes)
+
+    def avaliar_legado(
+        self,
+        ativo: str,
+        df_d1: pd.DataFrame,
+        df_h4: pd.DataFrame,
+        df_h1: pd.DataFrame,
+    ) -> SinalSwing | None:
+        """Wrapper legado para compatibilidade com executor_swing."""
+        analise = self.avaliar(ativo, df_d1, df_h4, df_h1)
+        return analise.como_sinal_legado()
