@@ -515,6 +515,8 @@ const serieBandaInf  = chartPreco.addLineSeries({ color: '#4a5568', lineWidth: 1
 const serieBandaMedia= chartPreco.addLineSeries({ color: '#4a5568', lineWidth: 1, lineStyle: LightweightCharts.LineStyle.Dotted });
 const serieEmaMicro  = chartPreco.addLineSeries({ color: '#ffb74d', lineWidth: 1, title: 'EMA micro', visible: false });
 const serieEmaMacro  = chartPreco.addLineSeries({ color: '#42a5f5', lineWidth: 2, title: 'EMA macro', visible: false });
+const serieCanalSup  = chartPreco.addLineSeries({ color: '#ab47bc', lineWidth: 2, lineStyle: LightweightCharts.LineStyle.Dashed, title: 'canal sup', lastValueVisible: false, priceLineVisible: false });
+const serieCanalInf  = chartPreco.addLineSeries({ color: '#ab47bc', lineWidth: 2, lineStyle: LightweightCharts.LineStyle.Dashed, title: 'canal inf', lastValueVisible: false, priceLineVisible: false });
 const serieVolume    = chartVolume.addHistogramSeries({ priceFormat: { type: 'volume' } });
 const serieRsi       = chartRsi.addLineSeries({ color: '#b388ff', lineWidth: 1 });
 const serieRsi70     = chartRsi.addLineSeries({ color: '#ef5350', lineWidth: 1, lineStyle: LightweightCharts.LineStyle.Dashed });
@@ -703,6 +705,15 @@ async function atualizar() {
     serieEmaMicro.setData(dados.emaMicro || []);
     serieEmaMacro.setData(dados.emaMacro || []);
     serieRsi.setData(dados.rsi);
+
+    // Canal de tendencia (regressao linear alta/baixa)
+    if (dados.canal && dados.canal.superior && dados.canal.superior.length === 2) {
+      serieCanalSup.setData(dados.canal.superior);
+      serieCanalInf.setData(dados.canal.inferior);
+    } else {
+      serieCanalSup.setData([]);
+      serieCanalInf.setData([]);
+    }
 
     // Atualiza cache de S/R e Fib
     _cacheNiveis = dados.niveis || [];

@@ -10,6 +10,7 @@ from .calendario_swing import verificar_noticias
 from .config_swing import SwingConfig
 from .estrategia_swing import EstrategiaSwing
 from .executor_swing import ExecutorSwing
+from .grafico_swing import GraficoSwing
 from .mercado_swing import MercadoSwing, MercadoSwingIndisponivel
 from .registro_swing import RegistroSwing
 
@@ -33,6 +34,14 @@ def main(config: SwingConfig) -> None:
     executor = ExecutorSwing(config, mercado, registro)
 
     mercado.iniciar()
+
+    grafico = GraficoSwing(config.ativos, config.porta_grafico)
+    try:
+        url = grafico.iniciar()
+        print(f"[SWING] Gráfico aberto: {url}")
+    except Exception as e:
+        print(f"[SWING] Gráfico indisponível ({e!r}); o robô continua sem o painel.")
+        grafico = None
 
     # Expiração automática: sinais sem resolução após N candles H4 (~2 dias úteis)
     _MONITOR_TIMEOUT_H4 = 12
@@ -145,6 +154,28 @@ def main(config: SwingConfig) -> None:
                         df_d1 = mercado.candles_d1(ativo)
                         df_h4 = mercado.candles_h4(ativo)
                         df_h1 = mercado.candles_h1(ativo)
+
+                        # Publica no dashboard: candle H1 (leitura fina) + S/R,
+                        # Fib e canal calculados no H4 (estrutural) — independente
+                        # de ter sinal, serve de apoio visual mesmo sem confluencia.
+                        if grafico is not None:
+                            try:
+                                df_h1_ind = estrategia._adicionar_indicadores(df_h1)
+                                df_h4_ind = estrategia._adicionar_indicadores(df_h4)
+                                tendencia_d1, _adx_d1 = estrategia._tendencia_d1(df_d1)
+                                suportes, resistencias = estrategia._pivos_h4(df_h4)
+                                zona_fib = (
+                                    estrategia._zona_fibonacci_h4(df_h4, tendencia_d1)
+                                    if tendencia_d1
+                                    else None
+                                )
+                                grafico.atualizar_ativo(
+                                    ativo, df_h1_ind, df_h4_ind, tendencia_d1,
+                                    suportes, resistencias, zona_fib,
+                                    mercado_aberto=mercado.aberto(ativo),
+                                )
+                            except Exception as e:
+                                print(f"[SWING] {ativo}: falha ao atualizar gráfico — {e!r}")
 
                         sinal = estrategia.avaliar(ativo, df_d1, df_h4, df_h1)
                         if sinal is None:
