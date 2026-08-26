@@ -143,6 +143,11 @@ def main(config: SwingConfig) -> None:
                     time.sleep(config.intervalo_loop_segundos)
                     continue
 
+                # Sinais pendentes (aguardando SL/TP) por ativo — usados pra manter
+                # o alerta visivel no dashboard enquanto nao resolve, nao so no
+                # ciclo em que foi encontrado.
+                _pendentes_por_ativo = {p["ativo"]: p for p in registro.monitor_pendentes()}
+
                 sinais_hora: list = []
                 for ativo in config.ativos:
                     try:
@@ -169,10 +174,20 @@ def main(config: SwingConfig) -> None:
                                     if tendencia_d1
                                     else None
                                 )
+                                _pend = _pendentes_por_ativo.get(ativo)
+                                sinal_info = (
+                                    {
+                                        "direcao": _pend["direcao"], "preco": _pend["entrada"],
+                                        "sl": _pend["sl"], "tp": _pend["tp"],
+                                        "setup": _pend["setup"], "score": _pend["pontuacao"],
+                                    }
+                                    if _pend else None
+                                )
                                 grafico.atualizar_ativo(
                                     ativo, df_h1_ind, df_h4_ind, tendencia_d1,
                                     suportes, resistencias, zona_fib,
                                     mercado_aberto=mercado.aberto(ativo),
+                                    sinal_info=sinal_info,
                                 )
                             except Exception as e:
                                 print(f"[SWING] {ativo}: falha ao atualizar gráfico — {e!r}")

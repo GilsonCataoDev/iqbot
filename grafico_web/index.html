@@ -541,6 +541,7 @@ ro.observe(document.getElementById('charts-area'));
 
 let primeiraCarga = true;
 let linhasNiveis = [], linhasFib = [], linhaEntrada = null, linhasGatilho = [];
+let linhaSL = null, linhaTP = null;
 let _cacheNiveis = [], _cacheFib = [], _cachePrecisao = 5;
 let _razaoMap = {};
 
@@ -734,6 +735,20 @@ async function atualizar() {
         lineWidth: 2,
         lineStyle: dados.alerta.entradaConfirmada ? LightweightCharts.LineStyle.Solid : LightweightCharts.LineStyle.Dashed,
         axisLabelVisible: true, title: `ENTRADA ${(dados.alerta.direcao||'').toUpperCase()}`,
+      });
+    }
+
+    // Linhas de SL/TP (swing) — so aparecem se o alerta trouxer os dois valores
+    if (linhaSL) { serieCandle.removePriceLine(linhaSL); linhaSL = null; }
+    if (linhaTP) { serieCandle.removePriceLine(linhaTP); linhaTP = null; }
+    if (dados.alerta && dados.alerta.sl != null && dados.alerta.tp != null) {
+      linhaSL = serieCandle.createPriceLine({
+        price: dados.alerta.sl, color: '#ef5350', lineWidth: 1,
+        lineStyle: LightweightCharts.LineStyle.Dotted, axisLabelVisible: true, title: 'SL',
+      });
+      linhaTP = serieCandle.createPriceLine({
+        price: dados.alerta.tp, color: '#26a69a', lineWidth: 1,
+        lineStyle: LightweightCharts.LineStyle.Dotted, axisLabelVisible: true, title: 'TP',
       });
     }
 

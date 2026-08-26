@@ -70,6 +70,16 @@ class _SnapshotFake:
     candles: object = field(default=None)
 
 
+@dataclass
+class _SinalFake:
+    ativo: str
+    direcao: str  # "call" | "put"
+    preco: float
+    candle_hora: object
+    motivo: str = ""
+    detalhes: dict = field(default_factory=dict)
+
+
 class GraficoSwing:
     def __init__(self, ativos: tuple[str, ...], porta_grafico: int = 8773):
         self._cfg = _ConfigGraficoSwing(ativos=tuple(ativos), porta_grafico=porta_grafico)
@@ -88,8 +98,16 @@ class GraficoSwing:
         resistencias: list[float],
         zona_fib: tuple[float, float] | None,
         mercado_aberto: bool = True,
+        sinal_info: dict | None = None,
     ) -> None:
-        """Publica candles H1 (leitura) + EMA/RSI do H1 + S/R/Fib/canal do H4 (estrutura)."""
+        """Publica candles H1 (leitura) + EMA/RSI do H1 + S/R/Fib/canal do H4 (estrutura).
+
+        `sinal_info`, quando presente, marca o alerta de entrada no grafico:
+        {"direcao": "call"|"put", "preco": float, "sl": float, "tp": float,
+         "setup": str, "score": int}. E so um aviso visual — a decisao de
+         entrar continua manual (o veredito automatico tem edge negativo
+         provado em backtest_swing.py).
+        """
         df = df_h1_indicadores.copy()
         df["TendenciaMacro"] = tendencia_d1 or "lateral"
         if "EMA20" in df.columns:
@@ -103,10 +121,25 @@ class GraficoSwing:
         resistencias_top = sorted(resistencias, key=lambda p: abs(p - preco_atual))[:_n_mais_proximos]
         niveis_sr = {"suportes": suportes_top, "resistencias": resistencias_top}
         snapshot = _SnapshotFake(ativo=ativo, mercado_aberto=mercado_aberto)
+
+        sinais = []
+        if sinal_info is not None and len(df):
+            sinais.append(_SinalFake(
+                ativo=ativo,
+                direcao=sinal_info["direcao"],
+                preco=float(sinal_info["preco"]),
+                candle_hora=df.index[-1],
+                motivo=sinal_info.get("setup", ""),
+                detalhes={
+                    "setup": sinal_info.get("setup", ""),
+                    "razao": [f"score={sinal_info.get('score','?')}/10 — sinal do bot swing, decisao final e manual"],
+                },
+            ))
+
         dados = self._grafico.montar_dados(
             snapshot=snapshot,
             indicadores=df,
-            sinais=[],
+            sinais=sinais,
             possivel=None,
             operacoes=[],
             niveis_sr=niveis_sr,
@@ -118,6 +151,14 @@ class GraficoSwing:
                 {"nivel": 0.618, "preco": hi if lo < hi else lo},
             ]
         dados["canal"] = _canal_tendencia(df_h4_indicadores, self._grafico._unix)
+        if sinal_info is not None:
+            dados["alerta"] = {
+                "precoEntrada": float(sinal_info["preco"]),
+                "direcao": sinal_info["direcao"],
+                "entradaConfirmada": True,
+                "sl": float(sinal_info["sl"]),
+                "tp": float(sinal_info["tp"]),
+            }
         self._grafico.atualizar(ativo, dados)
 
     def fechar(self) -> None:
