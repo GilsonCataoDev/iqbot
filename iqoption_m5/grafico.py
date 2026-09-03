@@ -92,7 +92,12 @@ class GraficoM5:
             return None
         try:
             dados = json.loads(arquivo.read_text(encoding="utf-8"))
-            self._toggle_cache = {ativo for ativo, ligado in dados.items() if ligado}
+            # O arquivo persiste entre reinícios. Quando um perfil recebe
+            # novos ativos, eles não podem ficar invisíveis por não existirem
+            # no toggle antigo: ausente significa ligado por padrão.
+            self._toggle_cache = {
+                ativo for ativo in self.config.ativos if dados.get(ativo, True)
+            }
         except (OSError, json.JSONDecodeError):
             self._toggle_cache = None
         return self._toggle_cache
@@ -184,6 +189,8 @@ class GraficoM5:
         stats_globais: dict | None = None,
         entradas_detalhadas: list | None = None,
         niveis_sr: dict | None = None,
+        plano_forex: dict | None = None,
+        movimentos_unicos: dict | None = None,
     ) -> dict:
         conversor = self._unix
         candles = [
@@ -289,6 +296,10 @@ class GraficoM5:
                 for op in operacoes
             ],
             "alerta": alerta,
+            # Campo proprio: o plano forex tem de aparecer mesmo quando existe
+            # outro alerta. Antes ele so ia como fallback de `alerta` e sumia
+            # justamente quando havia mais coisa acontecendo na tela.
+            "planoForex": plano_forex,
             "explicacao": list(explicacao or []),
             "noticias": list(noticias or []),
             "parecerIA": parecer_ia,
@@ -300,6 +311,7 @@ class GraficoM5:
             "statsGlobais": stats_globais,
             "entradasDetalhadas": entradas_detalhadas,
             "niveisSR": niveis_sr,
+            "movimentosUnicos": movimentos_unicos,
         }
 
     def atualizar(self, ativo: str, dados: dict) -> None:

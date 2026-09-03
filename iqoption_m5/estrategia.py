@@ -13,17 +13,25 @@ PRIORIDADE_SETUP: dict[str, int] = {
     "rejeicao_m1_hierarquico": 0,  # nova — hierarquia M15→M5→M1 com scoring
     "retracao_intracandle":   1,
     "pullback_confluencia":   2,
-    "fibo_sr_retracao":       3,
-    "reversao_confluencia":   4,
-    "reversao_bollinger_rsi": 5,
-    "sr_rejeicao":            6,
-    "engulfing_sr":           7,
-    "pin_bar_sr":             8,
-    "pullback":               9,
-    "bollinger_squeeze":     10,
-    "divergencia_rsi":       11,
-    "macd_crossover":        12,
-    "reversao_candle":       13,
+    "ema920_pullback":         3,
+    "ema920_prime":            3,
+    "ema921_rsi_pullback":     3,
+    "ema921_rsi_intravela":    3,
+    "nzd_trend_pullback_v1":   3,
+    "forex_reteste_m15":      3,
+    "breakout_reteste":       4,
+    "noticia_confirmada":     5,
+    "fibo_sr_retracao":       6,
+    "reversao_confluencia":   6,
+    "reversao_bollinger_rsi": 7,
+    "sr_rejeicao":            8,
+    "engulfing_sr":           9,
+    "pin_bar_sr":            10,
+    "pullback":              11,
+    "bollinger_squeeze":     12,
+    "divergencia_rsi":       13,
+    "macd_crossover":        14,
+    "reversao_candle":       15,
 }
 _PRIORIDADE_DEFAULT = 99
 
@@ -221,6 +229,22 @@ class EstrategiaReversaoM5:
             axis=1,
         ).max(axis=1)
         df["ATR"] = true_range.rolling(c.atr_periodo).mean()
+        # ADX/DI: mede se há tendência suficiente para tratar a EMA como
+        # suporte/resistência dinâmica, em vez de operar um cruzamento lateral.
+        movimento_alta = high.diff()
+        movimento_baixa = -low.diff()
+        dm_mais = movimento_alta.where(
+            (movimento_alta > movimento_baixa) & (movimento_alta > 0), 0.0
+        )
+        dm_menos = movimento_baixa.where(
+            (movimento_baixa > movimento_alta) & (movimento_baixa > 0), 0.0
+        )
+        atr_seguro = df["ATR"].replace(0, np.nan)
+        df["DI_Mais"] = 100 * dm_mais.rolling(c.atr_periodo).mean() / atr_seguro
+        df["DI_Menos"] = 100 * dm_menos.rolling(c.atr_periodo).mean() / atr_seguro
+        soma_di = (df["DI_Mais"] + df["DI_Menos"]).replace(0, np.nan)
+        dx = 100 * (df["DI_Mais"] - df["DI_Menos"]).abs() / soma_di
+        df["ADX"] = dx.rolling(c.atr_periodo).mean()
         df["EMA_Micro"] = close.ewm(span=c.ema_micro_periodo, adjust=False).mean()
         df["EMA_Macro"] = close.ewm(span=c.ema_macro_periodo, adjust=False).mean()
 
@@ -542,10 +566,24 @@ class EstrategiaReversaoM5:
         if not confirmou:
             return None
 
+        atr_conf = float(confirmacao["ATR"])
+        if self.config.pullback_alvo_min_atr > 0 and atr_conf > 0:
+            janela_inicio = max(0, indice_confirmacao - self.config.pullback_janela)
+            trecho = df.iloc[janela_inicio:indice_confirmacao]
+            preco_conf = float(confirmacao["Close"])
+            if contexto["direcao"] == "call":
+                alvo_movimento = float(trecho["High"].max())
+                espaco_ate_alvo = alvo_movimento - preco_conf
+            else:
+                alvo_movimento = float(trecho["Low"].min())
+                espaco_ate_alvo = preco_conf - alvo_movimento
+            if espaco_ate_alvo < self.config.pullback_alvo_min_atr * atr_conf:
+                return None
+
         # §9: filtro de corpo mínimo no candle de confirmação
         if self.config.pullback_confirmacao_corpo_atr > 0:
             corpo_conf = abs(float(confirmacao["Close"]) - float(confirmacao["Open"]))
-            if corpo_conf < self.config.pullback_confirmacao_corpo_atr * float(confirmacao["ATR"]):
+            if corpo_conf < self.config.pullback_confirmacao_corpo_atr * atr_conf:
                 return None
 
         zona = contexto["zona_fib"]
@@ -566,12 +604,90 @@ class EstrategiaReversaoM5:
                 "tendencia": contexto["tendencia"],
                 "rsi_recuo": float(recuo["RSI"]),
                 "rsi_confirmacao": rsi,
-                "atr": float(confirmacao["ATR"]),
+                "atr": atr_conf,
                 "fib_min": zona[0] if zona else None,
                 "fib_max": zona[1] if zona else None,
                 "nivel_sr": contexto["nivel_sr"],
             },
         )
+
+    def _avaliar_breakout_reteste(
+        self, ativo: str, df: pd.DataFrame, indice_confirmacao: int
+    ) -> Decisao | None:
+        if not self.config.breakout_reteste_ativo:
+            return None
+        if indice_confirmacao < max(self.config.ema_macro_periodo, self.config.atr_regime_janela) + 3:
+            return None
+        if indice_confirmacao >= len(df):
+            return None
+        romp = df.iloc[indice_confirmacao - 2]
+        reteste = df.iloc[indice_confirmacao - 1]
+        conf = df.iloc[indice_confirmacao]
+        obrigatorias = ("Open", "High", "Low", "Close", "ATR", "TendenciaMacro")
+        if any(pd.isna(v.get(campo)) for v in (romp, reteste, conf) for campo in obrigatorias):
+            return None
+        if not self._atr_regime_valido(df, indice_confirmacao):
+            return None
+
+        atr = float(conf["ATR"])
+        if atr <= 0:
+            return None
+        tolerancia = self.config.pullback_tolerancia_atr * atr
+        suportes, resistencias = self._pivos(df, indice_confirmacao - 2)
+        tendencia = str(conf.get("TendenciaMacro", "lateral"))
+
+        if tendencia == "alta" and resistencias:
+            nivel = min(resistencias, key=lambda p: abs(p - float(romp["Close"])))
+            rompeu = float(romp["Close"]) > nivel + tolerancia
+            retestou = float(reteste["Low"]) <= nivel + tolerancia and float(reteste["Close"]) >= nivel - tolerancia
+            confirmou = float(conf["Close"]) > float(conf["Open"]) and float(conf["Close"]) > float(reteste["High"])
+            if rompeu and retestou and confirmou:
+                return Decisao(
+                    ativo=ativo,
+                    direcao="call",
+                    preco=float(conf["Close"]),
+                    candle_hora=pd.Timestamp(df.index[indice_confirmacao]),
+                    motivo="breakout_reteste_m5",
+                    detalhes={
+                        "setup": "breakout_reteste",
+                        "nivel_sr": round(nivel, 6),
+                        "tipo_sr": "resistencia_rompida",
+                        "tendencia_macro": tendencia,
+                        "atr": round(atr, 6),
+                        "razao": [
+                            f"rompeu resistencia {nivel:.5f}",
+                            "voltou no reteste e segurou acima da zona",
+                            "confirmou retomada com candle de alta",
+                        ],
+                    },
+                )
+
+        if tendencia == "baixa" and suportes:
+            nivel = min(suportes, key=lambda p: abs(p - float(romp["Close"])))
+            rompeu = float(romp["Close"]) < nivel - tolerancia
+            retestou = float(reteste["High"]) >= nivel - tolerancia and float(reteste["Close"]) <= nivel + tolerancia
+            confirmou = float(conf["Close"]) < float(conf["Open"]) and float(conf["Close"]) < float(reteste["Low"])
+            if rompeu and retestou and confirmou:
+                return Decisao(
+                    ativo=ativo,
+                    direcao="put",
+                    preco=float(conf["Close"]),
+                    candle_hora=pd.Timestamp(df.index[indice_confirmacao]),
+                    motivo="breakout_reteste_m5",
+                    detalhes={
+                        "setup": "breakout_reteste",
+                        "nivel_sr": round(nivel, 6),
+                        "tipo_sr": "suporte_rompido",
+                        "tendencia_macro": tendencia,
+                        "atr": round(atr, 6),
+                        "razao": [
+                            f"rompeu suporte {nivel:.5f}",
+                            "voltou no reteste e rejeitou a zona",
+                            "confirmou continuacao com candle de baixa",
+                        ],
+                    },
+                )
+        return None
 
     def _avaliar_pin_bar(
         self, ativo: str, df: pd.DataFrame, indice_confirmacao: int
@@ -1388,6 +1504,399 @@ class EstrategiaReversaoM5:
             },
         )
 
+    def _estrutura_candle(self, df: pd.DataFrame, indice: int, direcao: str) -> tuple[bool, dict]:
+        """Filtro de vela: força, fechamento e rejeição por pavio.
+
+        Retorna (aprovado, métricas). Não usa o candle seguinte, evitando
+        lookahead no backtest. Para CALL, rejeição é pavio inferior; para PUT,
+        pavio superior. A confirmação exige corpo na direção do sinal e/ou
+        fechamento no extremo favorável.
+        """
+        if indice < 0 or indice >= len(df):
+            return False, {}
+        v = df.iloc[indice]
+        try:
+            o, h, l, c = (float(v[x]) for x in ("Open", "High", "Low", "Close"))
+        except (KeyError, TypeError, ValueError):
+            return False, {}
+        faixa = h - l
+        if faixa <= 0:
+            return False, {}
+        corpo = abs(c - o)
+        corpo_ratio = corpo / faixa
+        pavio_sup = h - max(o, c)
+        pavio_inf = min(o, c) - l
+        pavio = pavio_inf if direcao == "call" else pavio_sup
+        fechamento_favoravel = (c - l) / faixa if direcao == "call" else (h - c) / faixa
+        corpo_favoravel = (c > o) if direcao == "call" else (c < o)
+        pavio_ratio = pavio / corpo if corpo > 0 else float("inf")
+        evidencias = {
+            "corpo_direcao": bool(corpo_favoravel),
+            "vela_forte": bool(corpo_ratio >= self.config.candle_forca_min_ratio),
+            "fechamento_extremo": bool(fechamento_favoravel >= 1.0 - self.config.candle_fechamento_extremo_ratio),
+            "pavio_rejeicao": bool(pavio_ratio >= self.config.candle_pavio_rejeicao_min_ratio),
+        }
+        # Confirmação (corpo + fechamento) ou rejeição (pavio + fechamento).
+        score = int(evidencias["corpo_direcao"]) + int(evidencias["vela_forte"]) + int(
+            evidencias["pavio_rejeicao"] or evidencias["fechamento_extremo"]
+        )
+        aprovado = (
+            corpo_ratio >= self.config.candle_corpo_min_ratio
+            and score >= self.config.candle_filtro_score_minimo
+        ) or (
+            evidencias["pavio_rejeicao"]
+            and evidencias["fechamento_extremo"]
+        )
+        return aprovado, {
+            "candle_score": score,
+            "candle_corpo_ratio": round(corpo_ratio, 3),
+            "candle_pavio_ratio": round(pavio_ratio, 2) if np.isfinite(pavio_ratio) else 99.0,
+            "candle_fechamento_favoravel": round(fechamento_favoravel, 3),
+            "candle_evidencias": [k for k, ok in evidencias.items() if ok],
+        }
+
+    def _filtrar_estrutura_candle(self, sinais: list[Decisao], df: pd.DataFrame, indice: int) -> list[Decisao]:
+        if not self.config.filtro_candle_estrutura_ativo:
+            return sinais
+        aprovados = []
+        for sinal in sinais:
+            ok, metricas = self._estrutura_candle(df, indice, sinal.direcao)
+            if ok:
+                aprovados.append(_dc_replace(sinal, detalhes={**sinal.detalhes, **metricas}))
+            else:
+                logger.info("[CANDLE] %s: bloqueou %s (%s)", sinal.ativo, sinal.direcao, sinal.detalhes.get("setup", sinal.motivo))
+        return aprovados
+
+    def _avaliar_ema920_pullback(self, ativo: str, df: pd.DataFrame, indice: int) -> Decisao | None:
+        """Pullback M1/M5 na faixa EMA9-EMA20, a favor da tendência."""
+        if not self.config.ema920_pullback_ativo or indice < 25 or indice >= len(df):
+            return None
+        close = df["Close"]
+        ema9 = close.ewm(span=9, adjust=False).mean()
+        ema20 = close.ewm(span=20, adjust=False).mean()
+        v = df.iloc[indice]
+        atr = v.get("ATR")
+        if pd.isna(atr) or float(atr) <= 0:
+            return None
+        e9, e20, atr = float(ema9.iloc[indice]), float(ema20.iloc[indice]), float(atr)
+        faixa_min, faixa_max = min(e9, e20), max(e9, e20)
+        o, h, l, c = (float(v[x]) for x in ("Open", "High", "Low", "Close"))
+        toca = l <= faixa_max + 0.15 * atr and h >= faixa_min - 0.15 * atr
+        if not toca:
+            return None
+        inclinacao9 = float(ema9.iloc[indice] - ema9.iloc[indice - 3])
+        inclinacao20 = float(ema20.iloc[indice] - ema20.iloc[indice - 3])
+        bullish = e9 > e20 and inclinacao9 > 0 and inclinacao20 >= 0
+        bearish = e9 < e20 and inclinacao9 < 0 and inclinacao20 <= 0
+        faixa = h - l
+        if faixa <= 0:
+            return None
+        corpo = abs(c - o)
+        rejeicao_call = c > o and c > faixa_max and (c - l) / faixa >= 0.55
+        rejeicao_put = c < o and c < faixa_min and (h - c) / faixa >= 0.55
+        direcao = "call" if bullish and rejeicao_call else "put" if bearish and rejeicao_put else None
+        if direcao is None:
+            return None
+        return Decisao(
+            ativo=ativo, direcao=direcao, preco=c,
+            candle_hora=pd.Timestamp(df.index[indice]), motivo="ema920_pullback",
+            detalhes={"setup": "ema920_pullback", "ema9": e9, "ema20": e20,
+                      "atr": atr, "toque_faixa": True,
+                      "confirmacao": "fechamento_rejeicao", "corpo_ratio": round(corpo / faixa, 3)},
+        )
+
+    def _avaliar_ema921_rsi_pullback(self, ativo: str, df: pd.DataFrame, indice: int) -> Decisao | None:
+        """Pullback na faixa EMA9/21 com RSI14 segurando a tendência."""
+        if not self.config.ema921_rsi_pullback_ativo or indice < 25 or indice >= len(df):
+            return None
+        v = df.iloc[indice]
+        atr, rsi = v.get("ATR"), v.get("RSI")
+        if pd.isna(atr) or pd.isna(rsi) or float(atr) <= 0:
+            return None
+        close = df["Close"]
+        ema9 = close.ewm(span=9, adjust=False).mean()
+        ema21 = close.ewm(span=21, adjust=False).mean()
+        e9, e21 = float(ema9.iloc[indice]), float(ema21.iloc[indice])
+        o, h, l, c = (float(v[x]) for x in ("Open", "High", "Low", "Close"))
+        faixa_min, faixa_max = min(e9, e21), max(e9, e21)
+        toca = l <= faixa_max + 0.15 * float(atr) and h >= faixa_min - 0.15 * float(atr)
+        if not toca or h <= l:
+            return None
+        incl9 = float(ema9.iloc[indice] - ema9.iloc[indice - 3])
+        incl21 = float(ema21.iloc[indice] - ema21.iloc[indice - 3])
+        rsi_f = float(rsi)
+        call = (
+            e9 > e21 and incl9 > 0 and incl21 >= 0
+            and 40 <= rsi_f <= 55 and c > o and c > faixa_max
+            and (c - l) / (h - l) >= 0.55
+        )
+        put = (
+            e9 < e21 and incl9 < 0 and incl21 <= 0
+            and 45 <= rsi_f <= 60 and c < o and c < faixa_min
+            and (h - c) / (h - l) >= 0.55
+        )
+        direcao = "call" if call else "put" if put else None
+        if direcao is None:
+            return None
+        return Decisao(
+            ativo=ativo, direcao=direcao, preco=c,
+            candle_hora=pd.Timestamp(df.index[indice]), motivo="ema921_rsi_pullback",
+            detalhes={
+                "setup": "ema921_rsi_pullback", "ema9": e9, "ema21": e21,
+                "rsi14": round(rsi_f, 1), "atr": float(atr), "toque_faixa": True,
+                "confirmacao": "fechamento_rejeicao_rsi",
+            },
+        )
+
+    def _avaliar_ema920_prime(self, ativo: str, df: pd.DataFrame, indice: int) -> Decisao | None:
+        """EMA9/20 de pesquisa: primeiro reteste, impulso e espaço estrutural.
+
+        É deliberadamente mais seletiva que a EMA9/20 normal. A variante fica
+        em sombra no laboratório até que os resultados, por par, confirmem que
+        remover sinais compensou a menor frequência.
+        """
+        cfg = self.config
+        if not cfg.ema920_prime_ativo or indice < 25 or indice >= len(df):
+            return None
+        close = df["Close"]
+        ema9 = close.ewm(span=9, adjust=False).mean()
+        ema20 = close.ewm(span=20, adjust=False).mean()
+        vela = df.iloc[indice]
+        atr = vela.get("ATR")
+        if pd.isna(atr) or float(atr) <= 0:
+            return None
+        e9, e20, atr_f = float(ema9.iloc[indice]), float(ema20.iloc[indice]), float(atr)
+        abertura, maxima, minima, fechamento = (float(vela[campo]) for campo in ("Open", "High", "Low", "Close"))
+        faixa_min, faixa_max = min(e9, e20), max(e9, e20)
+        range_vela = maxima - minima
+        if range_vela <= 0:
+            return None
+        tocou = minima <= faixa_max + 0.15 * atr_f and maxima >= faixa_min - 0.15 * atr_f
+        if not tocou:
+            return None
+        incl9 = float(ema9.iloc[indice] - ema9.iloc[indice - 3])
+        incl20 = float(ema20.iloc[indice] - ema20.iloc[indice - 3])
+        alta = e9 > e20 and incl9 > 0 and incl20 >= 0
+        baixa = e9 < e20 and incl9 < 0 and incl20 <= 0
+        corpo_ratio = abs(fechamento - abertura) / range_vela
+        extremo = cfg.ema920_prime_fechamento_extremo_ratio
+        call = (
+            alta and fechamento > abertura and fechamento > faixa_max
+            and corpo_ratio >= cfg.ema920_prime_corpo_min_ratio
+            and (fechamento - minima) / range_vela >= 1 - extremo
+        )
+        put = (
+            baixa and fechamento < abertura and fechamento < faixa_min
+            and corpo_ratio >= cfg.ema920_prime_corpo_min_ratio
+            and (maxima - fechamento) / range_vela >= 1 - extremo
+        )
+        direcao = "call" if call else "put" if put else None
+        if direcao is None:
+            return None
+
+        # O toque atual é o reteste. Mais de um toque recente indica que o
+        # preço já está serrilhando as médias, não retomando uma tendência.
+        inicio_toques = max(0, indice - cfg.ema920_prime_janela_toques)
+        anteriores = df.iloc[inicio_toques:indice]
+        ema9_ant = ema9.iloc[inicio_toques:indice]
+        ema20_ant = ema20.iloc[inicio_toques:indice]
+        atr_ant = df["ATR"].iloc[inicio_toques:indice]
+        toca_anterior = (
+            (anteriores["Low"] <= np.maximum(ema9_ant, ema20_ant) + 0.15 * atr_ant)
+            & (anteriores["High"] >= np.minimum(ema9_ant, ema20_ant) - 0.15 * atr_ant)
+        )
+        toques_anteriores = int(toca_anterior.fillna(False).sum())
+        if toques_anteriores > cfg.ema920_prime_max_toques_anteriores:
+            return None
+
+        # Deve existir impulso mensurável antes do recuo; não aceita uma EMA
+        # inclinada por ruído de poucos ticks.
+        inicio_impulso = max(0, indice - cfg.ema920_prime_janela_impulso)
+        antes = df.iloc[inicio_impulso:indice]
+        if antes.empty:
+            return None
+        impulso = (
+            float(antes["Close"].iloc[-1]) - float(antes["Low"].min())
+            if direcao == "call"
+            else float(antes["High"].max()) - float(antes["Close"].iloc[-1])
+        )
+        if impulso < cfg.ema920_prime_impulso_min_atr * atr_f:
+            return None
+
+        # Descarta entrada espremida contra o próximo pivô contrário.
+        suportes, resistencias = self._pivos(df, indice)
+        if direcao == "call":
+            obstaculos = [nivel for nivel in resistencias if nivel > fechamento]
+            espaco_sr = min(obstaculos) - fechamento if obstaculos else float("inf")
+        else:
+            obstaculos = [nivel for nivel in suportes if nivel < fechamento]
+            espaco_sr = fechamento - max(obstaculos) if obstaculos else float("inf")
+        if espaco_sr < cfg.ema920_prime_espaco_sr_min_atr * atr_f:
+            return None
+
+        return Decisao(
+            ativo=ativo,
+            direcao=direcao,
+            preco=fechamento,
+            candle_hora=pd.Timestamp(df.index[indice]),
+            motivo="ema920_prime",
+            detalhes={
+                "setup": "ema920_prime",
+                "ema9": e9,
+                "ema20": e20,
+                "atr": atr_f,
+                "toque_faixa": True,
+                "confirmacao": "primeiro_reteste_rejeicao_forte",
+                "corpo_ratio": round(corpo_ratio, 3),
+                "toques_anteriores": toques_anteriores,
+                "impulso_atr": round(impulso / atr_f, 3),
+                "espaco_sr_atr": round(espaco_sr / atr_f, 3) if np.isfinite(espaco_sr) else None,
+            },
+        )
+
+    def _avaliar_ema921_rsi_intravela(self, ativo: str, df: pd.DataFrame, indice: int) -> Decisao | None:
+        """Entrada no toque AO VIVO da faixa EMA9/21, sem confirmação de fechamento.
+
+        A direção continua protegida por alinhamento/inclinação das médias e RSI
+        de pullback. O preço precisa estar dentro da faixa (com pequena folga de
+        ATR) no instante da leitura; um toque antigo seguido de afastamento não
+        gera ordem tardia.
+        """
+        if not self.config.ema921_rsi_intravela_ativo or indice < 25 or indice >= len(df):
+            return None
+        v = df.iloc[indice]
+        atr, rsi = v.get("ATR"), v.get("RSI")
+        if pd.isna(atr) or pd.isna(rsi) or float(atr) <= 0:
+            return None
+        close = df["Close"]
+        ema9 = close.ewm(span=9, adjust=False).mean()
+        ema21 = close.ewm(span=21, adjust=False).mean()
+        e9, e21 = float(ema9.iloc[indice]), float(ema21.iloc[indice])
+        atr_f, rsi_f = float(atr), float(rsi)
+        o, h, l, preco = (float(v[x]) for x in ("Open", "High", "Low", "Close"))
+        faixa_min, faixa_max = min(e9, e21), max(e9, e21)
+        folga = float(self.config.ema921_rsi_intravela_tolerancia_atr) * atr_f
+        # "tocou" exige histórico de preço na faixa e "agora_na_faixa" impede
+        # entrar depois que o preço já percorreu boa parte do movimento.
+        tocou = l <= faixa_max + folga and h >= faixa_min - folga
+        agora_na_faixa = faixa_min - folga <= preco <= faixa_max + folga
+        if not tocou or not agora_na_faixa:
+            return None
+        incl9 = float(ema9.iloc[indice] - ema9.iloc[indice - 3])
+        incl21 = float(ema21.iloc[indice] - ema21.iloc[indice - 3])
+        call = e9 > e21 and incl9 > 0 and incl21 >= 0 and 40 <= rsi_f <= 60
+        put = e9 < e21 and incl9 < 0 and incl21 <= 0 and 40 <= rsi_f <= 60
+        direcao = "call" if call else "put" if put else None
+        if direcao is None:
+            return None
+        return Decisao(
+            ativo=ativo, direcao=direcao, preco=preco,
+            candle_hora=pd.Timestamp(df.index[indice]), motivo="ema921_rsi_intravela",
+            detalhes={
+                "setup": "ema921_rsi_intravela", "ema9": e9, "ema21": e21,
+                "rsi14": round(rsi_f, 1), "atr": atr_f, "toque_faixa": True,
+                "confirmacao": "toque_ao_vivo", "folga_atr": round(folga, 8),
+                "nivel_sr": (faixa_min + faixa_max) / 2,
+            },
+        )
+
+    def avaliar_nzd_trend_pullback(
+        self,
+        ativo: str,
+        df_m5: pd.DataFrame,
+        df_m15: pd.DataFrame,
+        indice: int,
+    ) -> Decisao | None:
+        """Candidato NZDUSD em sombra: pullback M5 só com contexto M15 forte.
+
+        A decisão é propositalmente separada das EMAs genéricas. Isso evita que
+        uma melhoria experimental herde resultados ou envie ordem pelo setup
+        anterior. O laboratório a registra como ``nzd_trend_pullback_v1``.
+        """
+        c = self.config
+        if (
+            not c.nzd_trend_pullback_ativo
+            or ativo.upper() != "NZDUSD"
+            or indice < 25
+            or len(df_m15) < 25
+            or indice >= len(df_m5)
+        ):
+            return None
+        v = df_m5.iloc[indice]
+        campos = ("ATR", "RSI", "ADX", "DI_Mais", "DI_Menos")
+        if any(pd.isna(v.get(campo)) for campo in campos) or float(v["ATR"]) <= 0:
+            return None
+
+        close_m5 = df_m5["Close"]
+        ema9_m5 = close_m5.ewm(span=9, adjust=False).mean()
+        ema21_m5 = close_m5.ewm(span=21, adjust=False).mean()
+        # M15 fechado: nunca usa a vela maior ainda em formação como filtro.
+        indice_m15 = len(df_m15) - 2
+        if indice_m15 < 3:
+            return None
+        close_m15 = df_m15["Close"]
+        ema9_m15 = close_m15.ewm(span=9, adjust=False).mean()
+        ema21_m15 = close_m15.ewm(span=21, adjust=False).mean()
+
+        e9, e21 = float(ema9_m5.iloc[indice]), float(ema21_m5.iloc[indice])
+        e9_15, e21_15 = float(ema9_m15.iloc[indice_m15]), float(ema21_m15.iloc[indice_m15])
+        atr, rsi, adx = float(v["ATR"]), float(v["RSI"]), float(v["ADX"])
+        di_mais, di_menos = float(v["DI_Mais"]), float(v["DI_Menos"])
+        o, h, l, fechamento = (float(v[x]) for x in ("Open", "High", "Low", "Close"))
+        faixa_min, faixa_max = min(e9, e21), max(e9, e21)
+        toca = l <= faixa_max + 0.15 * atr and h >= faixa_min - 0.15 * atr
+        if not toca or h <= l:
+            return None
+
+        separacao_atr = abs(e9 - e21) / atr
+        incl9 = float(ema9_m5.iloc[indice] - ema9_m5.iloc[indice - 3])
+        incl21 = float(ema21_m5.iloc[indice] - ema21_m5.iloc[indice - 3])
+        tendencia_alta = (
+            e9 > e21 and e9_15 > e21_15 and incl9 > 0 and incl21 > 0
+            and di_mais > di_menos
+        )
+        tendencia_baixa = (
+            e9 < e21 and e9_15 < e21_15 and incl9 < 0 and incl21 < 0
+            and di_menos > di_mais
+        )
+        qualidade = separacao_atr >= c.nzd_trend_separacao_atr and adx >= c.nzd_trend_adx_minimo
+        call = (
+            tendencia_alta and qualidade and 40 <= rsi <= 55
+            and fechamento > o and fechamento > faixa_max
+            and (fechamento - l) / (h - l) >= 0.55
+        )
+        put = (
+            tendencia_baixa and qualidade and 45 <= rsi <= 60
+            and fechamento < o and fechamento < faixa_min
+            and (h - fechamento) / (h - l) >= 0.55
+        )
+        direcao = "call" if call else "put" if put else None
+        if direcao is None:
+            return None
+        return Decisao(
+            ativo=ativo,
+            direcao=direcao,
+            preco=fechamento,
+            candle_hora=pd.Timestamp(df_m5.index[indice]),
+            motivo="nzd_trend_pullback_v1",
+            detalhes={
+                "setup": "nzd_trend_pullback_v1",
+                "ema9": e9,
+                "ema21": e21,
+                "ema9_m15": e9_15,
+                "ema21_m15": e21_15,
+                "rsi14": round(rsi, 1),
+                "adx14": round(adx, 1),
+                "di_mais": round(di_mais, 1),
+                "di_menos": round(di_menos, 1),
+                "atr": atr,
+                "separacao_atr": round(separacao_atr, 3),
+                "toque_faixa": True,
+                "confirmacao": "fechamento_rejeicao_m5_m15",
+                "tendencia_m15": "alta" if direcao == "call" else "baixa",
+            },
+        )
+
     def _avaliar_todas_estrategias(
         self, ativo: str, df: pd.DataFrame, indice: int
     ) -> list[Decisao]:
@@ -1399,8 +1908,12 @@ class EstrategiaReversaoM5:
         for fn in (
             self._avaliar_indicadores,
             self._avaliar_pullback_indicadores,
+            self._avaliar_breakout_reteste,
             self._avaliar_macd,
             self._avaliar_retracao_intracandle,
+            self._avaliar_ema920_pullback,
+            self._avaliar_ema920_prime,
+            self._avaliar_ema921_rsi_pullback,
         ):
             nome = fn.__name__
             if nome in self._estrategias_desativadas:
@@ -1514,7 +2027,7 @@ class EstrategiaReversaoM5:
                 bloqueados = antes - len(resultado)
                 if bloqueados:
                     logger.info("[H1] %s: bloqueou %d sinal(is) contra TendenciaH1=%s", ativo, bloqueados, th1)
-        return resultado
+        return self._filtrar_estrutura_candle(resultado, df, indice)
 
     def avaliar_reversoes(self, ativo: str, indicadores: pd.DataFrame) -> list[Decisao]:
         """Setups de reversão avaliados no candle EM FORMAÇÃO (entrada na mesma vela).
@@ -1522,6 +2035,7 @@ class EstrategiaReversaoM5:
         fibo_sr_retracao: toca nível fibo+SR e já está rejeitando intra-candle.
         sr_rejeicao: toca suporte/resistência intra-candle e já está voltando.
         pin_bar_sr: pin bar no candle fechado, confirmação parcial no candle atual.
+        pullback_confluencia: recuo já tocou Fibo+S/R e a vela atual começa a retomar.
         """
         minimo = max(self.config.ema_macro_periodo, self.config.atr_regime_janela) + 3
         if len(indicadores) < minimo:
@@ -1529,6 +2043,10 @@ class EstrategiaReversaoM5:
         indice = len(indicadores) - 1  # candle em formação
         resultado = []
         fns_reversao = [self._avaliar_fibo_sr_retracao, self._avaliar_sr_rejeicao]
+        if self.config.ema921_rsi_intravela_ativo:
+            fns_reversao.append(self._avaliar_ema921_rsi_intravela)
+        if self.config.entrada_intracandle_por_toque_ativo and self.config.pullback_confluencia_ativo:
+            fns_reversao.append(self._avaliar_pullback_indicadores)
         if self.config.pin_bar_sr_ativo:
             fns_reversao.append(self._avaliar_pin_bar)
         for fn in fns_reversao:
@@ -1610,7 +2128,7 @@ class EstrategiaReversaoM5:
                 bloqueados = antes - len(resultado)
                 if bloqueados:
                     logger.info("[H1] %s: bloqueou %d reversão(ões) contra TendenciaH1=%s", ativo, bloqueados, th1)
-        return resultado
+        return self._filtrar_estrutura_candle(resultado, indicadores, indice)
 
     def _avaliar_estrategias(
         self, ativo: str, df: pd.DataFrame, indice_confirmacao: int

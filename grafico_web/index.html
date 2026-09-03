@@ -35,6 +35,8 @@
   }
   #sinal-badge.call { background: rgba(63,185,80,.18); border-color: var(--green); color: var(--green); }
   #sinal-badge.put  { background: rgba(248,81,73,.18);  border-color: var(--red);   color: var(--red);   }
+  #sinal-badge.esperar { background: rgba(227,179,65,.15); border-color: var(--yellow); color: var(--yellow); }
+  #sinal-badge.nao-entrar { background: rgba(149,152,161,.16); border-color: #9598a1; color: #c9d1d9; }
   #sinal-badge.aviso { background: rgba(227,179,65,.15); border-color: var(--yellow); color: var(--yellow); }
   @keyframes pulse-badge { 0%,100% { opacity:1; } 50% { opacity:.65; } }
   #sinal-badge.pulsando { animation: pulse-badge 1.2s ease-in-out infinite; }
@@ -116,6 +118,14 @@
     border-left-color: var(--yellow);
     box-shadow: inset 0 0 0 1px rgba(227,179,65,.15);
   }
+  #cartao-sinal.esperar {
+    border-left-color: var(--yellow);
+    box-shadow: inset 0 0 0 1px rgba(227,179,65,.15);
+  }
+  #cartao-sinal.nao-entrar {
+    border-left-color: #9598a1;
+    box-shadow: inset 0 0 0 1px rgba(149,152,161,.16);
+  }
   @keyframes pulse-sinal { 0%,100% { opacity:1; } 50% { opacity:.7; } }
   #cartao-sinal.pulsando { animation: pulse-sinal 1.3s ease-in-out infinite; }
 
@@ -125,6 +135,8 @@
   }
   .sinal-direcao.call { color: var(--green); }
   .sinal-direcao.put  { color: var(--red); }
+  .sinal-direcao.esperar { color: var(--yellow); }
+  .sinal-direcao.nao-entrar { color: #c9d1d9; }
   .sinal-direcao.aviso { color: var(--yellow); }
   .sinal-h4 {
     display: inline-flex; align-items: center; gap: 3px;
@@ -137,6 +149,45 @@
   .sinal-setup { font-size: 11px; color: var(--muted); margin-bottom: 4px; }
   .sinal-preco { font-size: 14px; font-family: monospace; }
   .sinal-fatores { font-size: 10px; color: var(--muted); margin-top: 4px; }
+  .sinal-fatores div { margin-top: 2px; }
+  .quick-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; }
+  .quick-chip {
+    background: var(--surface2); border: 1px solid var(--border);
+    border-radius: 7px; padding: 6px; min-height: 34px;
+  }
+  .quick-label {
+    color: var(--muted); font-size: 9px; text-transform: uppercase;
+    letter-spacing: .05em; margin-bottom: 2px;
+  }
+  .quick-value { font-size: 12px; font-weight: 800; }
+  .quick-ok { color: var(--green); }
+  .quick-warn { color: var(--yellow); }
+  .quick-danger { color: var(--red); }
+  .quick-info { color: #42a5f5; }
+
+  /* ── Plano forex ── */
+  .plano-forex { border-color: var(--yellow); }
+  .pf-lado {
+    font-size: 11px; font-weight: 800; padding: 2px 7px; border-radius: 5px;
+    margin-left: 6px; vertical-align: middle;
+  }
+  .pf-lado.compra { background: var(--green); color: #08130d; }
+  .pf-lado.venda  { background: var(--red);   color: #17090a; }
+  .pf-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; }
+  .pf-chip {
+    background: var(--surface2); border: 1px solid var(--border);
+    border-radius: 7px; padding: 6px; min-height: 34px;
+  }
+  .pf-chip.largo { grid-column: 1 / -1; }
+  .pf-label {
+    color: var(--muted); font-size: 9px; text-transform: uppercase;
+    letter-spacing: .05em; margin-bottom: 2px;
+  }
+  .pf-valor { font-size: 13px; font-weight: 800; font-family: monospace; }
+  .pf-tp { color: var(--green); }
+  .pf-sl { color: var(--red); }
+  .pf-sub { font-size: 9px; color: var(--muted); font-family: inherit; font-weight: 600; }
+  .pf-nota { font-size: 10px; color: var(--muted); margin-top: 6px; line-height: 1.35; }
 
   /* ── P&L hero card ── */
   #pl-total-hero {
@@ -207,10 +258,14 @@
   #tooltip-razao .tr-close:hover { color: var(--text); }
 
   /* entradas compactas */
-  #cartao-entradas { max-height: 200px; overflow-y: auto; }
+  #cartao-entradas { max-height: 330px; overflow-y: auto; }
   .entrada-item { padding: 4px 0; border-bottom: 1px solid #1a2035; font-size: 11px; }
   .entrada-item:last-child { border-bottom: none; }
   .entrada-cabecalho { display: flex; align-items: center; gap: 5px; }
+  .entrada-auditoria { margin-top: 4px; color: var(--muted); font-size: 10px; line-height: 1.45; }
+  .entrada-auditoria summary { cursor: pointer; color: var(--accent); }
+  .entrada-diagnostico { margin: 5px 0 3px; color: #d9e2f3; }
+  .entrada-criterio { display: inline-block; margin: 2px 3px 0 0; padding: 1px 4px; border: 1px solid #33415d; border-radius: 4px; }
   .entrada-hora { color: var(--muted); font-variant-numeric: tabular-nums; min-width: 34px; font-size: 10px; }
   .entrada-ativo { font-weight: 600; font-size: 11px; }
   .entrada-dir-call { color: var(--green); font-weight: 700; font-size: 10px; }
@@ -333,7 +388,7 @@
 
     <!-- Sinal em destaque -->
     <div class="cartao" id="cartao-sinal">
-      <h3>Próximo sinal <span class="selo-informativo" id="sinal-nota">aguardando</span></h3>
+      <h3>Decisão <span class="selo-informativo" id="sinal-nota">aguardando</span></h3>
       <p id="sinal-vazio" style="color:var(--muted)">Sem sinal no momento.</p>
       <div id="sinal-corpo" style="display:none">
         <div class="sinal-direcao" id="sinal-dir"></div>
@@ -341,6 +396,21 @@
         <div class="sinal-setup" id="sinal-setup"></div>
         <div class="sinal-preco" id="sinal-preco"></div>
         <div class="sinal-fatores" id="sinal-fat"></div>
+      </div>
+    </div>
+
+    <!-- Plano forex (rompimento + reteste) — some quando não há plano -->
+    <div class="cartao plano-forex" id="cartao-plano-forex" style="display:none">
+      <h3>Plano forex <span id="plano-forex-lado" class="pf-lado"></span></h3>
+      <div class="pf-grid" id="plano-forex-corpo"></div>
+      <div class="pf-nota" id="plano-forex-nota"></div>
+    </div>
+
+    <!-- Leitura rápida -->
+    <div class="cartao" id="cartao-rapido">
+      <h3>Leitura rápida</h3>
+      <div class="quick-grid" id="rapido-corpo">
+        <div class="quick-chip"><div class="quick-label">Estado</div><div class="quick-value">—</div></div>
       </div>
     </div>
 
@@ -415,6 +485,7 @@ let somAtivo = false;
 let ultimoSinalId = null;      // para detectar novo sinal
 let tfSegundos = 900;          // atualizado pela api
 let ultimoAtualizadoEm = null; // timestamp servidor do ultimo update
+const entradasAbertas = new Set();
 
 // ── Web Audio ──
 let audioCtx = null;
@@ -542,7 +613,8 @@ ro.observe(document.getElementById('charts-area'));
 let primeiraCarga = true;
 let linhasNiveis = [], linhasFib = [], linhaEntrada = null, linhasGatilho = [];
 let linhaSL = null, linhaTP = null;
-let _cacheNiveis = [], _cacheFib = [], _cachePrecisao = 5;
+let linhaAlvoProvavel = null;
+let _cacheNiveis = [], _cacheFib = [], _cachePrecisao = 5, _cachePrecoAtual = null;
 let _razaoMap = {};
 
 chartPreco.subscribeClick(param => {
@@ -573,7 +645,10 @@ const chkNiveis = document.getElementById('camada-niveis');
 const chkFib    = document.getElementById('camada-fib');
 function _toggleNiveis() {
   linhasNiveis.forEach(l => serieCandle.removePriceLine(l));
-  linhasNiveis = chkNiveis.checked ? _cacheNiveis.map(n => serieCandle.createPriceLine({
+  const niveisVisiveis = _cachePrecoAtual == null ? _cacheNiveis : [..._cacheNiveis]
+    .sort((a,b) => Math.abs(a.preco - _cachePrecoAtual) - Math.abs(b.preco - _cachePrecoAtual))
+    .slice(0, 4);
+  linhasNiveis = chkNiveis.checked ? niveisVisiveis.map(n => serieCandle.createPriceLine({
     price: n.preco,
     color: n.tipo === 'resistencia' ? '#ef535099' : '#26a69a99',
     lineWidth: 1, lineStyle: LightweightCharts.LineStyle.Dashed, axisLabelVisible: true,
@@ -584,7 +659,7 @@ function _toggleFib() {
   linhasFib.forEach(l => serieCandle.removePriceLine(l));
   linhasFib = chkFib.checked ? _cacheFib.map(f => serieCandle.createPriceLine({
     price: f.preco, color: CORES_FIB[f.nivel] || '#9598a1',
-    lineWidth: 1, lineStyle: LightweightCharts.LineStyle.Dotted, axisLabelVisible: true,
+    lineWidth: 1, lineStyle: LightweightCharts.LineStyle.Dotted, axisLabelVisible: false,
     title: `Fib ${(f.nivel*100).toFixed(1)}%`,
   })) : [];
 }
@@ -721,6 +796,7 @@ async function atualizar() {
     _cacheFib = dados.fib || [];
     if (dados.candles.length) {
       const precoRef2 = dados.candles[dados.candles.length-1].close;
+      _cachePrecoAtual = precoRef2;
       _cachePrecisao = precoRef2 < 50 ? 5 : (precoRef2 < 1000 ? 3 : 2);
     }
     _toggleNiveis();
@@ -729,26 +805,44 @@ async function atualizar() {
     // Linha de entrada ativa
     if (linhaEntrada) { serieCandle.removePriceLine(linhaEntrada); linhaEntrada = null; }
     if (dados.alerta && dados.alerta.precoEntrada != null) {
+      const decisaoVisual = classificarDecisaoVisual(dados.alerta, false);
+      const entradaConfirmada = decisaoVisual.acao === 'ENTRAR';
+      const corEntrada = decisaoVisual.classe === 'nao-entrar' ? '#9598a1'
+        : (dados.alerta.direcao === 'call' ? '#26a69a'
+        : (dados.alerta.direcao === 'put' ? '#ef5350' : '#ffd54f'));
+      const dirLinha = decisaoVisual.direcao;
       linhaEntrada = serieCandle.createPriceLine({
         price: dados.alerta.precoEntrada,
-        color: dados.alerta.direcao === 'call' ? '#26a69a' : '#ef5350',
+        color: corEntrada,
         lineWidth: 2,
-        lineStyle: dados.alerta.entradaConfirmada ? LightweightCharts.LineStyle.Solid : LightweightCharts.LineStyle.Dashed,
-        axisLabelVisible: true, title: `ENTRADA ${(dados.alerta.direcao||'').toUpperCase()}`,
+        lineStyle: entradaConfirmada ? LightweightCharts.LineStyle.Solid : LightweightCharts.LineStyle.Dashed,
+        axisLabelVisible: true, title: `${decisaoVisual.linhaEntrada} ${dirLinha}`,
       });
     }
 
     // Linhas de SL/TP (swing) — so aparecem se o alerta trouxer os dois valores
     if (linhaSL) { serieCandle.removePriceLine(linhaSL); linhaSL = null; }
     if (linhaTP) { serieCandle.removePriceLine(linhaTP); linhaTP = null; }
-    if (dados.alerta && dados.alerta.sl != null && dados.alerta.tp != null) {
+    if (linhaAlvoProvavel) { serieCandle.removePriceLine(linhaAlvoProvavel); linhaAlvoProvavel = null; }
+    // O plano forex tem prioridade: ele existe independente de haver alerta,
+    // e e dele que saem o SL/TP que a pessoa vai executar na mao.
+    const fonteSLTP = (dados.planoForex && dados.planoForex.sl != null && dados.planoForex.tp != null)
+      ? dados.planoForex : dados.alerta;
+    if (fonteSLTP && fonteSLTP.sl != null && fonteSLTP.tp != null) {
       linhaSL = serieCandle.createPriceLine({
-        price: dados.alerta.sl, color: '#ef5350', lineWidth: 1,
+        price: fonteSLTP.sl, color: '#ef5350', lineWidth: 1,
         lineStyle: LightweightCharts.LineStyle.Dotted, axisLabelVisible: true, title: 'SL',
       });
       linhaTP = serieCandle.createPriceLine({
-        price: dados.alerta.tp, color: '#26a69a', lineWidth: 1,
+        price: fonteSLTP.tp, color: '#26a69a', lineWidth: 1,
         lineStyle: LightweightCharts.LineStyle.Dotted, axisLabelVisible: true, title: 'TP',
+      });
+    }
+    if (dados.alerta && dados.alerta.alvoProvavel != null) {
+      linhaAlvoProvavel = serieCandle.createPriceLine({
+        price: dados.alerta.alvoProvavel, color: '#ffd54f', lineWidth: 2,
+        lineStyle: LightweightCharts.LineStyle.Dashed, axisLabelVisible: true,
+        title: `ALVO PROVÁVEL`,
       });
     }
 
@@ -861,6 +955,66 @@ async function atualizar() {
   } finally { atualizando = false; }
 }
 
+function classificarDecisaoVisual(src, ehProximo=false) {
+  const direcaoRaw = (src?.direcao || '').replace('_proxima', '').toLowerCase();
+  const direcaoNormal = (direcaoRaw === 'call' || direcaoRaw === 'compra') ? 'call'
+    : ((direcaoRaw === 'put' || direcaoRaw === 'venda') ? 'put' : null);
+  const radarEstado = String(src?.radarEstado || src?.estado || '').toUpperCase();
+  const mensagem = String(src?.mensagem || '').toLowerCase();
+  const entradaConfirmada = src?.entradaConfirmada !== false;
+  const direcaoTxt = direcaoNormal === 'call' ? 'CALL' : (direcaoNormal === 'put' ? 'PUT' : 'AVISO');
+  const seta = direcaoNormal === 'call' ? '▲' : (direcaoNormal === 'put' ? '▼' : '•');
+  const bloqueio = /EVITAR|BLOQ|BLOQUE|CONTRA|CUIDADO|NAO|NÃO/.test(radarEstado)
+    || direcaoRaw === 'aviso'
+    || direcaoNormal === null
+    || radarEstado.includes('AVISO')
+    || mensagem.includes('aviso')
+    || mensagem.includes('não é entrada')
+    || mensagem.includes('nao é entrada');
+
+  if (bloqueio) {
+    return {
+      acao: 'NÃO ENTRAR',
+      classe: 'nao-entrar',
+      titulo: 'NÃO ENTRAR',
+      direcao: direcaoTxt,
+      label: `■ NÃO ENTRAR`,
+      badge: `NÃO ENTRAR`,
+      nota: radarEstado ? radarEstado.replaceAll('_',' ') : 'só leitura',
+      linhaEntrada: 'REFERÊNCIA',
+      toastAcao: ' — só leitura',
+    };
+  }
+
+  if (!entradaConfirmada || ehProximo || radarEstado.includes('TOCAIA') || radarEstado.includes('ESPERAR')) {
+    const tocaia = radarEstado.includes('TOCAIA');
+    const acaoEspera = tocaia ? 'TOCAIA' : 'ESPERAR';
+    return {
+      acao: acaoEspera,
+      classe: 'esperar',
+      titulo: `${acaoEspera} ${direcaoTxt}`,
+      direcao: direcaoTxt,
+      label: `${seta} ${acaoEspera} ${direcaoTxt}`,
+      badge: `${acaoEspera} ${direcaoTxt}`,
+      nota: radarEstado ? radarEstado.replaceAll('_',' ') : 'aguardar gatilho',
+      linhaEntrada: tocaia ? 'TOCAIA' : 'GATILHO',
+      toastAcao: ' — esperar gatilho',
+    };
+  }
+
+  return {
+    acao: 'ENTRAR',
+    classe: direcaoNormal === 'put' ? 'put' : 'call',
+    titulo: `ENTRAR ${direcaoTxt}`,
+    direcao: direcaoTxt,
+    label: `${seta} ENTRAR ${direcaoTxt}`,
+    badge: `ENTRAR ${direcaoTxt}`,
+    nota: radarEstado ? radarEstado.replaceAll('_',' ') : 'confirmado',
+    linhaEntrada: 'ENTRADA',
+    toastAcao: ' — ENTRAR AGORA',
+  };
+}
+
 // ── Sinal badge no top bar + card sidebar ──
 function renderizarSinalBadge(dados) {
   const badge  = document.getElementById('sinal-badge');
@@ -874,7 +1028,8 @@ function renderizarSinalBadge(dados) {
   const al = dados.alerta;
 
   // detecta novo sinal para tocar som e mostrar toast
-  const sinalIdAtual = ap ? `${ap.time}-${ap.direcao}` : (al ? `${al.time}-${al.direcao}` : null);
+  const srcPrioritario = al || ap;
+  const sinalIdAtual = srcPrioritario ? `${srcPrioritario.id || srcPrioritario.time}-${srcPrioritario.direcao}` : null;
   const novaSinal = sinalIdAtual && sinalIdAtual !== ultimoSinalId;
   if (novaSinal) {
     ultimoSinalId = sinalIdAtual;
@@ -890,24 +1045,31 @@ function renderizarSinalBadge(dados) {
     return;
   }
 
-  const src = ap || al;
+  const src = srcPrioritario;
   const direcaoRaw = (src.direcao || '').replace('_proxima', '');
-  const cls = direcaoRaw === 'call' ? 'call' : (direcaoRaw === 'put' ? 'put' : 'aviso');
-  const ehProximo = !!ap && !al;
-  const label = direcaoRaw === 'call' ? '▲ CALL' : (direcaoRaw === 'put' ? '▼ PUT' : '? AVISO');
+  const radarEstado = (src.radarEstado || '').toUpperCase();
+  const temNoticia = radarEstado.includes('NOTICIA') || (src.mensagem || '').toLowerCase().includes('noticia');
+  const ehTocaia = !ap && !!al && al.entradaConfirmada === false;
+  const ehProximo = (!!ap && !al) || ehTocaia;
+  const decisaoVisual = classificarDecisaoVisual(src, ehProximo);
+  const cls = decisaoVisual.classe;
+  const label = decisaoVisual.label;
   const setup = src.setup || '';
   const preco = src.preco != null ? src.preco.toFixed(5) : '?';
-  const fat   = (src.fatores || []).join(' + ') || '';
+  const fatores = (src.fatores || []).slice(0, 3);
+  const alvoTxt = src.alvoProvavel != null ? `Busca provável: ${Number(src.alvoProvavel).toFixed(5)}` : '';
+  const msgTxt = src.mensagem || '';
+  const fat = [...fatores, alvoTxt, msgTxt].filter(Boolean).map(x => `<div>${escapar(x)}</div>`).join('');
   const rsi   = src.rsi != null ? ` | RSI ${src.rsi}` : '';
 
   // badge
   badge.style.display = 'flex';
-  badge.className = cls + (ehProximo ? '' : ' pulsando');
-  badge.textContent = ehProximo ? `${label} próximo` : `${label} agora`;
+  badge.className = cls + (decisaoVisual.acao === 'ENTRAR' ? ' pulsando' : '');
+  badge.textContent = decisaoVisual.badge;
 
   // card
-  card.className = `cartao ${cls}${ehProximo ? '' : ' pulsando'}`;
-  nota.textContent = ehProximo ? 'próximo' : 'CONFIRMAR';
+  card.className = `cartao ${cls}${decisaoVisual.acao === 'ENTRAR' ? ' pulsando' : ''}`;
+  nota.textContent = decisaoVisual.nota;
   vazio.style.display = 'none'; corpo.style.display = '';
   document.getElementById('sinal-dir').className = `sinal-direcao ${cls}`;
   document.getElementById('sinal-dir').textContent = label;
@@ -921,11 +1083,11 @@ function renderizarSinalBadge(dados) {
   } else { h4El.style.display = 'none'; }
   document.getElementById('sinal-setup').textContent = setup;
   document.getElementById('sinal-preco').textContent = `@ ${preco}${rsi}`;
-  document.getElementById('sinal-fat').textContent = fat;
+  document.getElementById('sinal-fat').innerHTML = fat;
 
   // toast para sinal novo
   if (novaSinal) {
-    const toastTxt = `${label}${ehProximo ? ' — aguardar confirmação' : ' — CONFIRMAR AGORA'}\n${setup} @ ${preco}`;
+    const toastTxt = `${decisaoVisual.titulo}${decisaoVisual.toastAcao}\n${setup} @ ${preco}`;
     mostrarToast(toastTxt, cls);
   }
 }
@@ -934,7 +1096,79 @@ function escapar(v) {
   const d = document.createElement('div'); d.textContent = String(v == null ? '' : v); return d.innerHTML;
 }
 
+function chaveEntrada(e) {
+  // A API de histórico não expõe o id da ordem neste painel. Esta combinação
+  // identifica a mesma entrada depois de o HTML ser redesenhado no refresh.
+  return [e.hora, e.ativo, e.direcao, e.setup, e.preco_entrada ?? ''].join('|');
+}
+
+document.addEventListener('toggle', evento => {
+  const detalhe = evento.target;
+  if (!(detalhe instanceof HTMLDetailsElement) || !detalhe.classList.contains('entrada-auditoria')) return;
+  const chave = detalhe.dataset.chave;
+  if (!chave) return;
+  if (detalhe.open) entradasAbertas.add(chave);
+  else entradasAbertas.delete(chave);
+}, true);
+
+function renderizarLeituraRapida(dados) {
+  const el = document.getElementById('rapido-corpo');
+  if (!el) return;
+  const alerta = dados.alerta || dados.alertaProximo || {};
+  const decisaoVisual = alerta.direcao ? classificarDecisaoVisual(alerta, !!dados.alertaProximo && !dados.alerta) : null;
+  const noticiaHigh = (dados.noticias || []).find(n => n.impacto === 'High' && n.minutos >= -30 && n.minutos <= 120);
+  const aberta = (dados.operacoesReais || []).find(o => o.aberta);
+  const estado = decisaoVisual ? decisaoVisual.acao : 'AGUARDANDO';
+  const estadoCls = /NÃO|NAO|NOTICIA|BLOQ|EVITAR|CONTRA/.test(String(estado)) ? 'quick-danger'
+    : /ESPERAR|APROXIMANDO|PRÓXIMO|PROXIMO/.test(String(estado)) ? 'quick-warn'
+    : /ENTRAR|NA_ZONA|SINAL/.test(String(estado)) ? 'quick-ok' : 'quick-info';
+  const direcao = decisaoVisual ? decisaoVisual.direcao : '—';
+  const alvo = alerta.alvoProvavel != null ? Number(alerta.alvoProvavel).toFixed(5)
+    : (alerta.tp != null && alerta.tp !== 0 ? Number(alerta.tp).toFixed(5) : '—');
+  const risco = noticiaHigh ? `${noticiaHigh.moeda} HIGH ${noticiaHigh.minutos < 0 ? 'há '+Math.abs(noticiaHigh.minutos)+'m' : 'em '+noticiaHigh.minutos+'m'}`
+    : (aberta ? `ordem aberta ${aberta.direcao.toUpperCase()}` : 'livre');
+  const riscoCls = noticiaHigh ? 'quick-danger' : (aberta ? 'quick-warn' : 'quick-ok');
+  el.innerHTML = [
+    ['Estado', estado, estadoCls],
+    ['Direção', direcao, direcao === 'CALL' ? 'quick-ok' : (direcao === 'PUT' ? 'quick-danger' : 'quick-info')],
+    ['Alvo', alvo, 'quick-warn'],
+    ['Risco', risco, riscoCls],
+  ].map(([k,v,c]) => `<div class="quick-chip"><div class="quick-label">${k}</div><div class="quick-value ${c}">${escapar(v)}</div></div>`).join('');
+}
+
+function renderizarPlanoForex(dados) {
+  const cartao = document.getElementById('cartao-plano-forex');
+  if (!cartao) return;
+  const p = dados.planoForex;
+  if (!p) { cartao.style.display = 'none'; return; }
+  cartao.style.display = '';
+
+  const lado = document.getElementById('plano-forex-lado');
+  lado.textContent = p.lado || '';
+  lado.className = 'pf-lado ' + (p.lado === 'COMPRA' ? 'compra' : 'venda');
+
+  const n = (v, casas = 5) => v == null ? '—' : Number(v).toFixed(casas);
+  const casas = String(p.ativo || '').toUpperCase().includes('JPY') ? 3 : 5;
+  const linhas = [
+    ['Entrar em', n(p.entrada, casas), '', ''],
+    ['Nível rompido', n(p.nivel, casas), '', ''],
+    ['Alvo (TP)', n(p.tp, casas), 'pf-tp', p.tpPips != null ? `+${p.tpPips} pips` : ''],
+    ['Stop (SL)', n(p.sl, casas), 'pf-sl', p.slPips != null ? `-${p.slPips} pips` : ''],
+    ['Risco : Retorno', p.rr != null ? `1 : ${p.rr}` : '—', p.rr >= 1 ? 'pf-tp' : 'pf-sl', ''],
+  ];
+  document.getElementById('plano-forex-corpo').innerHTML = linhas.map(
+    ([k, v, cls, sub]) =>
+      `<div class="pf-chip"><div class="pf-label">${escapar(k)}</div>` +
+      `<div class="pf-valor ${cls}">${escapar(v)}` +
+      (sub ? ` <span class="pf-sub">${escapar(sub)}</span>` : '') +
+      `</div></div>`
+  ).join('');
+  document.getElementById('plano-forex-nota').textContent = p.nota || '';
+}
+
 function renderizarPainel(dados) {
+  renderizarPlanoForex(dados);
+  renderizarLeituraRapida(dados);
   // P&L hero card
   const stats = dados.statsGlobais;
   const plTotal = document.getElementById('pl-total-hero');
@@ -957,7 +1191,44 @@ function renderizarPainel(dados) {
     const chips = [];
     if (sN.entradas > 0) chips.push(`<span class="pl-chip ${sN.lucro>=0?'win':'loss'}">Normal ${sN.wins}/${sN.entradas} ${sN.lucro>=0?'+':''}${sN.lucro.toFixed(1)}u</span>`);
     if (sO.entradas > 0) chips.push(`<span class="pl-chip ${sO.lucro>=0?'win':'loss'}">OTC ${sO.wins}/${sO.entradas} ${sO.lucro>=0?'+':''}${sO.lucro.toFixed(1)}u</span>`);
+    const mov = dados.movimentosUnicos;
+    if (mov && mov.movimentos) {
+      const wrMov = mov.winrate == null ? '?' : mov.winrate + '%';
+      const extra = mov.mistos ? ` · ${mov.mistos} misto` : '';
+      chips.push(`<span class="pl-chip">Mov. únicos ${mov.vitorias}/${mov.finalizados} · ${wrMov}${extra}</span>`);
+    }
     plChips.innerHTML = chips.join('');
+  }
+
+  function renderEntradaDetalhada(e) {
+    const dCls = e.direcao==='call'?'entrada-dir-call':'entrada-dir-put';
+    const dLbl = e.direcao==='call'?'▲':'▼';
+    let sCls, sStr;
+    if (e.status==='aberta')                    { sCls='entrada-status-aberta';  sStr='⏳'; }
+    else if (e.lucro!=null && e.lucro>0)        { sCls='entrada-status-ganho';   sStr=`✓+${e.lucro.toFixed(2)}`; }
+    else if (e.lucro!=null && e.lucro<0)        { sCls='entrada-status-perda';   sStr=`✗${e.lucro.toFixed(2)}`; }
+    else if (e.lucro===0)                       { sCls='entrada-status-outro';   sStr='='; }
+    else                                        { sCls='entrada-status-outro';   sStr=escapar(e.status); }
+    const tf = e.timeframe ? `M${Math.max(1, Math.round(e.timeframe/60))}` : '?';
+    const exp = e.expiracao_minutos ? `${e.expiracao_minutos}min` : '?';
+    const criterios = (e.criterios||[]).map(c=>`<span class="entrada-criterio">${escapar(c)}</span>`).join('') || 'Sem critérios auditados.';
+    const comp = e.comparaveis || {};
+    const similares = comp.amostra
+      ? `Casos parecidos: ${comp.wins}W/${comp.losses}L · ${comp.winrate}% (${comp.amostra} casos)`
+      : 'Casos parecidos: ainda sem amostra auditada suficiente.';
+    const chave = chaveEntrada(e);
+    const aberto = entradasAbertas.has(chave) ? ' open' : '';
+    return `<div class="entrada-item"><div class="entrada-cabecalho">` +
+      `<span class="entrada-hora">${escapar(e.hora)}</span>` +
+      `<span class="entrada-ativo">${escapar(e.ativo)}</span>` +
+      `<span class="${dCls}">${dLbl}</span>` +
+      `<span class="entrada-setup">${escapar(e.setup)}</span>` +
+      `<span class="${sCls}">${sStr}</span></div>` +
+      `<details class="entrada-auditoria" data-chave="${escapar(chave)}"${aberto}><summary>ver leitura</summary>` +
+      `<div>${tf} · exp. ${exp}${e.preco_entrada!=null ? ` · @ ${Number(e.preco_entrada).toFixed(5)}` : ''}</div>` +
+      `<div class="entrada-diagnostico">${escapar(e.diagnostico||'')}</div>` +
+      `<div>${escapar(similares)}</div>` +
+      `<div>${criterios}</div></details></div>`;
   }
 
   // Entradas detalhadas
@@ -973,23 +1244,7 @@ function renderizarPainel(dados) {
   if (!entradas || !entradas.length) {
     cartaoEntradas.innerHTML = '<h3>Detalhes</h3><p>Sem entradas hoje ainda.</p>';
   } else {
-    const fmtE = e => {
-      const dCls = e.direcao==='call'?'entrada-dir-call':'entrada-dir-put';
-      const dLbl = e.direcao==='call'?'▲':'▼';
-      let sCls, sStr;
-      if (e.status==='aberta')                    { sCls='entrada-status-aberta';  sStr='⏳'; }
-      else if (e.lucro!=null && e.lucro>0)         { sCls='entrada-status-ganho';   sStr=`✓+${e.lucro.toFixed(2)}`; }
-      else if (e.lucro!=null && e.lucro<0)         { sCls='entrada-status-perda';   sStr=`✗${e.lucro.toFixed(2)}`; }
-      else if (e.lucro===0)                        { sCls='entrada-status-outro';   sStr='='; }
-      else                                         { sCls='entrada-status-outro';   sStr=escapar(e.status); }
-      return `<div class="entrada-item"><div class="entrada-cabecalho">` +
-        `<span class="entrada-hora">${escapar(e.hora)}</span>` +
-        `<span class="entrada-ativo">${escapar(e.ativo)}</span>` +
-        `<span class="${dCls}">${dLbl}</span>` +
-        `<span class="entrada-setup">${escapar(e.setup)}</span>` +
-        `<span class="${sCls}">${sStr}</span></div></div>`;
-    };
-    cartaoEntradas.innerHTML = '<h3>Detalhes</h3>' + [...entradas].reverse().map(fmtE).join('');
+    cartaoEntradas.innerHTML = '<h3>Detalhes</h3>' + [...entradas].reverse().map(renderEntradaDetalhada).join('');
   }
 
   // Notícias
@@ -1066,28 +1321,12 @@ async function carregarHistoricoHoje() {
     if (hist.entradasDetalhadas && hist.entradasDetalhadas.length) {
       const cartaoEntradas = document.getElementById('cartao-entradas');
       if (cartaoEntradas) {
-        const fmtE = e => {
-          const dCls = e.direcao==='call'?'entrada-dir-call':'entrada-dir-put';
-          const dLbl = e.direcao==='call'?'▲':'▼';
-          let sCls, sStr;
-          if (e.status==='aberta')               { sCls='entrada-status-aberta'; sStr='⏳'; }
-          else if (e.lucro!=null && e.lucro>0)   { sCls='entrada-status-ganho';  sStr=`✓+${e.lucro.toFixed(2)}`; }
-          else if (e.lucro!=null && e.lucro<0)   { sCls='entrada-status-perda';  sStr=`✗${e.lucro.toFixed(2)}`; }
-          else if (e.lucro===0)                  { sCls='entrada-status-outro';  sStr='='; }
-          else                                   { sCls='entrada-status-outro';  sStr=escapar(e.status); }
-          return `<div class="entrada-item"><div class="entrada-cabecalho">` +
-            `<span class="entrada-hora">${escapar(e.hora)}</span>` +
-            `<span class="entrada-ativo">${escapar(e.ativo)}</span>` +
-            `<span class="${dCls}">${dLbl}</span>` +
-            `<span class="entrada-setup">${escapar(e.setup)}</span>` +
-            `<span class="${sCls}">${sStr}</span></div></div>`;
-        };
         const t = hist.entradasDetalhadas.length;
         const w = hist.entradasDetalhadas.filter(e => e.lucro != null && e.lucro > 0).length;
         const resumo = document.getElementById('entradas-resumo');
         if (resumo) resumo.textContent = t > 0 ? `${w}/${t}` : '';
         cartaoEntradas.innerHTML = '<h3>Detalhes <span id="entradas-resumo" style="font-weight:400;color:var(--muted);font-size:10px;text-transform:none;letter-spacing:0">' + (t>0?`${w}/${t}`:'') + '</span></h3>' +
-          [...hist.entradasDetalhadas].reverse().map(fmtE).join('');
+          [...hist.entradasDetalhadas].reverse().map(renderEntradaDetalhada).join('');
       }
     }
   } catch(_) {}

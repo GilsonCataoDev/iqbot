@@ -1,6 +1,7 @@
 import json
 import sqlite3
 import threading
+import uuid
 from contextlib import contextmanager
 from datetime import datetime
 
@@ -8,6 +9,8 @@ import pandas as pd
 
 from pathlib import Path
 
+from .config import Configuracao
+from .auditoria_entrada import recuperar_comparaveis, resumo_contexto
 from .modelos import (
     Autorizacao,
     Decisao,
@@ -17,17 +20,20 @@ from .modelos import (
     SnapshotMercado,
 )
 
-VERSAO_SCHEMA = 1
+VERSAO_SCHEMA = 3
 
 
 class RegistroSQLite:
     """Auditoria local: decisões bloqueadas e operações ficam no mesmo banco."""
 
-    def __init__(self, banco: Path):
+    def __init__(self, banco: Path, config: Configuracao | None = None):
         self.caminho = banco
+        self.config = config
+        self.campanha_id = uuid.uuid4().hex
         self.caminho.parent.mkdir(parents=True, exist_ok=True)
         self._lock = threading.Lock()
         self._criar_schema()
+        self._registrar_campanha()
 
     def _conectar(self):
         conexao = sqlite3.connect(self.caminho, timeout=10)
@@ -64,8 +70,10 @@ class RegistroSQLite:
                     permitida INTEGER NOT NULL,
                     motivo_risco TEXT NOT NULL,
                     motivo_estrategia TEXT NOT NULL,
+                    timeframe INTEGER NOT NULL DEFAULT 0,
+                    setup TEXT NOT NULL DEFAULT 'desconhecido',
                     detalhes_json TEXT NOT NULL,
-                    UNIQUE(ativo, candle_hora, direcao)
+                    UNIQUE(ativo, candle_hora, direcao, timeframe, setup)
                 );
 
                 CREATE TABLE IF NOT EXISTS operacoes (
@@ -77,12 +85,23 @@ class RegistroSQLite:
                     valor REAL NOT NULL,
                     payout REAL NOT NULL,
                     setup TEXT NOT NULL DEFAULT 'desconhecido',
+                    timeframe INTEGER NOT NULL DEFAULT 0,
+                    expiracao_minutos INTEGER NOT NULL DEFAULT 0,
                     preco_entrada REAL,
                     hora_sinal TEXT,
                     atraso_envio_ms INTEGER,
                     lucro REAL,
                     resultado_bruto TEXT,
                     status TEXT NOT NULL
+                );
+
+                CREATE TABLE IF NOT EXISTS campanhas (
+                    id TEXT PRIMARY KEY,
+                    iniciada_em TEXT NOT NULL,
+                    config_hash TEXT NOT NULL,
+                    timeframe INTEGER,
+                    janela_entrada_segundos INTEGER,
+                    config_json TEXT NOT NULL
                 );
 
                 CREATE TABLE IF NOT EXISTS simulacoes (
@@ -177,6 +196,52 @@ class RegistroSQLite:
                 db.execute("ALTER TABLE operacoes ADD COLUMN hora_sinal TEXT")
             if "atraso_envio_ms" not in colunas_operacoes:
                 db.execute("ALTER TABLE operacoes ADD COLUMN atraso_envio_ms INTEGER")
+            if "campanha_id" not in colunas_operacoes:
+                db.execute("ALTER TABLE operacoes ADD COLUMN campanha_id TEXT")
+            if "timeframe" not in colunas_operacoes:
+                db.execute("ALTER TABLE operacoes ADD COLUMN timeframe INTEGER NOT NULL DEFAULT 0")
+            if "expiracao_minutos" not in colunas_operacoes:
+                db.execute("ALTER TABLE operacoes ADD COLUMN expiracao_minutos INTEGER NOT NULL DEFAULT 0")
+            colunas_decisoes = {
+                linha[1] for linha in db.execute("PRAGMA table_info(decisoes)").fetchall()
+            }
+            if "timeframe" not in colunas_decisoes or "setup" not in colunas_decisoes:
+                # O schema antigo descartava decisões diferentes do mesmo par,
+                # candle e direção. Reconstrói a tabela preservando o histórico.
+                db.execute("DROP INDEX IF EXISTS idx_decisoes_ativo_data")
+                db.executescript(
+                    """
+                    CREATE TABLE decisoes_nova (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        registrado_em TEXT NOT NULL,
+                        ativo TEXT NOT NULL,
+                        candle_hora TEXT NOT NULL,
+                        direcao TEXT NOT NULL,
+                        preco REAL NOT NULL,
+                        payout REAL,
+                        mercado_aberto INTEGER NOT NULL,
+                        permitida INTEGER NOT NULL,
+                        motivo_risco TEXT NOT NULL,
+                        motivo_estrategia TEXT NOT NULL,
+                        timeframe INTEGER NOT NULL DEFAULT 0,
+                        setup TEXT NOT NULL DEFAULT 'desconhecido',
+                        detalhes_json TEXT NOT NULL,
+                        UNIQUE(ativo, candle_hora, direcao, timeframe, setup)
+                    );
+                    INSERT INTO decisoes_nova (
+                        registrado_em, ativo, candle_hora, direcao, preco, payout,
+                        mercado_aberto, permitida, motivo_risco, motivo_estrategia,
+                        timeframe, setup, detalhes_json
+                    )
+                    SELECT registrado_em, ativo, candle_hora, direcao, preco, payout,
+                           mercado_aberto, permitida, motivo_risco, motivo_estrategia,
+                           0, motivo_estrategia, detalhes_json
+                    FROM decisoes;
+                    DROP TABLE decisoes;
+                    ALTER TABLE decisoes_nova RENAME TO decisoes;
+                    CREATE INDEX idx_decisoes_ativo_data ON decisoes(ativo, candle_hora);
+                    """
+                )
             colunas_simulacoes = {
                 linha[1] for linha in db.execute("PRAGMA table_info(simulacoes)").fetchall()
             }
@@ -186,6 +251,32 @@ class RegistroSQLite:
                     "ALTER TABLE simulacoes ADD COLUMN motivo TEXT NOT NULL DEFAULT 'nao_bloqueado'"
                 )
             db.execute(f"PRAGMA user_version={VERSAO_SCHEMA}")
+
+    def _registrar_campanha(self) -> None:
+        if self.config is None:
+            return
+        with self._lock, self._sessao() as db:
+            db.execute(
+                """
+                INSERT INTO campanhas (
+                    id, iniciada_em, config_hash, timeframe,
+                    janela_entrada_segundos, config_json
+                ) VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    self.campanha_id,
+                    datetime.now().isoformat(),
+                    self.config.config_hash,
+                    self.config.timeframe_segundos,
+                    self.config.entrada_max_segundos_no_candle,
+                    json.dumps(
+                        self.config.configuracao_auditavel(),
+                        ensure_ascii=False,
+                        sort_keys=True,
+                        default=str,
+                    ),
+                ),
+            )
 
     def registrar_latencia(self, lat, id_ordem: str | None = None) -> None:
         """Persiste um LatenciaSinal no banco. Seguro chamar múltiplas vezes
@@ -301,14 +392,16 @@ class RegistroSQLite:
         decisao: Decisao,
         snapshot: SnapshotMercado,
         autorizacao: Autorizacao,
+        timeframe: int | None = None,
     ) -> None:
         with self._lock, self._sessao() as db:
             db.execute(
                 """
                 INSERT OR IGNORE INTO decisoes (
                     registrado_em, ativo, candle_hora, direcao, preco, payout,
-                    mercado_aberto, permitida, motivo_risco, motivo_estrategia, detalhes_json
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    mercado_aberto, permitida, motivo_risco, motivo_estrategia,
+                    timeframe, setup, detalhes_json
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     datetime.now().isoformat(),
@@ -321,6 +414,8 @@ class RegistroSQLite:
                     int(autorizacao.permitida),
                     autorizacao.motivo,
                     decisao.motivo,
+                    int(timeframe if timeframe is not None else (self.config.timeframe_segundos if self.config else 0)),
+                    decisao.detalhes.get("setup", decisao.motivo),
                     json.dumps(decisao.detalhes, ensure_ascii=False),
                 ),
             )
@@ -332,6 +427,8 @@ class RegistroSQLite:
         valor: float,
         payout: float,
         enviada_em: datetime,
+        timeframe: int | None = None,
+        expiracao_minutos: int | None = None,
     ) -> None:
         hora_sinal = decisao.candle_hora.isoformat()
         atraso_envio_ms = max(
@@ -346,13 +443,16 @@ class RegistroSQLite:
                 """
                 INSERT OR REPLACE INTO operacoes (
                     id_ordem, ativo, direcao, enviada_em, valor, payout, setup, preco_entrada,
-                    hora_sinal, atraso_envio_ms, status
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'aberta')
+                    hora_sinal, atraso_envio_ms, campanha_id, timeframe, expiracao_minutos, status
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'aberta')
                 """,
                 (
                     str(id_ordem), decisao.ativo, decisao.direcao, enviada_em.isoformat(),
                     valor, payout, decisao.detalhes.get("setup", "desconhecido"), decisao.preco,
                     hora_sinal, atraso_envio_ms,
+                    self.campanha_id if self.config is not None else None,
+                    int(timeframe if timeframe is not None else (self.config.timeframe_segundos if self.config else 0)),
+                    int(expiracao_minutos or 0),
                 ),
             )
 
@@ -399,8 +499,8 @@ class RegistroSQLite:
                 """
                 INSERT INTO operacoes (
                     id_ordem, ativo, direcao, enviada_em, valor, payout, setup,
-                    resultado_bruto, status
-                ) VALUES (?, ?, ?, ?, ?, 0, ?, ?, 'falha_envio')
+                    resultado_bruto, campanha_id, status
+                ) VALUES (?, ?, ?, ?, ?, 0, ?, ?, ?, 'falha_envio')
                 """,
                 (
                     f"falha-{decisao.ativo}-{decisao.candle_hora.isoformat()}-{datetime.now().timestamp()}",
@@ -410,6 +510,7 @@ class RegistroSQLite:
                     valor,
                     decisao.detalhes.get("setup", "desconhecido"),
                     motivo,
+                    self.campanha_id if self.config is not None else None,
                 ),
             )
 
@@ -504,7 +605,8 @@ class RegistroSQLite:
         with self._lock, self._sessao() as db:
             linhas = db.execute(
                 """
-                SELECT id_ordem, ativo, direcao, enviada_em, valor, payout, setup
+                SELECT id_ordem, ativo, direcao, enviada_em, valor, payout, setup,
+                       timeframe, expiracao_minutos
                 FROM operacoes
                 WHERE status IN ('aberta', 'resultado_desconhecido')
                 ORDER BY enviada_em ASC
@@ -519,8 +621,36 @@ class RegistroSQLite:
                 valor=float(valor),
                 payout=float(payout),
                 setup=setup or "desconhecido",
+                timeframe=int(timeframe or 0),
+                expiracao_minutos=int(expiracao or 0),
             )
-            for id_ordem, ativo, direcao, enviada_em, valor, payout, setup in linhas
+            for id_ordem, ativo, direcao, enviada_em, valor, payout, setup, timeframe, expiracao in linhas
+        ]
+
+    def operacoes_abertas(self) -> list[OperacaoPendente]:
+        with self._lock, self._sessao() as db:
+            linhas = db.execute(
+                """
+                SELECT id_ordem, ativo, direcao, enviada_em, valor, payout, setup,
+                       timeframe, expiracao_minutos
+                FROM operacoes
+                WHERE status='aberta'
+                ORDER BY enviada_em ASC
+                """
+            ).fetchall()
+        return [
+            OperacaoPendente(
+                id_ordem=str(id_ordem),
+                ativo=ativo,
+                direcao=direcao,
+                enviada_em=datetime.fromisoformat(enviada_em),
+                valor=float(valor),
+                payout=float(payout),
+                setup=setup or "desconhecido",
+                timeframe=int(timeframe or 0),
+                expiracao_minutos=int(expiracao or 0),
+            )
+            for id_ordem, ativo, direcao, enviada_em, valor, payout, setup, timeframe, expiracao in linhas
         ]
 
     def operacoes_grafico(self, ativo: str, limite: int = 50) -> list[dict]:
@@ -546,6 +676,47 @@ class RegistroSQLite:
             }
             for enviada_em, direcao, lucro, status, setup, preco_entrada in reversed(linhas)
         ]
+
+    def decisoes_grafico(self, ativo: str, limite: int = 80):
+        """Retorna sinais auditados para o gráfico, inclusive os bloqueados.
+
+        A ordem confirma o que foi executado; esta lista mostra também os
+        pontos que o laboratório enxergou, para comparar leitura e execução.
+        """
+        from .modelos import Decisao
+
+        with self._lock, self._sessao() as db:
+            linhas = db.execute(
+                """
+                SELECT candle_hora, direcao, preco, permitida, motivo_risco,
+                       setup, timeframe, detalhes_json
+                FROM decisoes
+                WHERE ativo=?
+                ORDER BY candle_hora DESC, id DESC LIMIT ?
+                """,
+                (ativo, limite),
+            ).fetchall()
+        saida = []
+        for hora, direcao, preco, permitida, motivo_risco, setup, timeframe, detalhes_json in reversed(linhas):
+            try:
+                detalhes = json.loads(detalhes_json)
+            except (TypeError, json.JSONDecodeError):
+                detalhes = {}
+            rotulo_tf = f"M{max(1, int(timeframe or 300) // 60)}"
+            detalhes["setup"] = f"{rotulo_tf} {setup or 'desconhecido'}"
+            detalhes["status_grafico"] = "confirmado" if permitida else "bloqueado"
+            detalhes.setdefault("razao", [str(motivo_risco)])
+            saida.append(
+                Decisao(
+                    ativo=ativo,
+                    direcao=direcao,
+                    preco=float(preco),
+                    candle_hora=pd.Timestamp(hora),
+                    motivo=setup or "desconhecido",
+                    detalhes=detalhes,
+                )
+            )
+        return saida
 
     def resumo_desempenho(self, ativo: str, limite: int = 200) -> dict:
         """Winrate das ultimas operacoes finalizadas — pra saber se vale confiar no sinal."""
@@ -707,6 +878,52 @@ class RegistroSQLite:
             item["lucro"] = round(item["lucro"], 2)
         return agregado
 
+    def resumo_movimentos_unicos(self) -> dict:
+        """Agrupa ordens do mesmo par/direção/minuto em uma oportunidade.
+
+        O Lab pode abrir EMA9/20 e EMA9/21 sobre o mesmo toque. O financeiro
+        continua contabilizando todas as ordens, mas esta métrica não finge que
+        elas foram oportunidades independentes.
+        """
+        hoje = datetime.now().date().isoformat()
+        with self._lock, self._sessao() as db:
+            linhas = db.execute(
+                """
+                SELECT ativo, direcao, strftime('%Y-%m-%dT%H:%M', enviada_em),
+                       COUNT(*),
+                       SUM(CASE WHEN status='finalizada' AND lucro > 0 THEN 1 ELSE 0 END),
+                       SUM(CASE WHEN status='finalizada' AND lucro < 0 THEN 1 ELSE 0 END),
+                       SUM(CASE WHEN status='finalizada' AND lucro = 0 THEN 1 ELSE 0 END),
+                       SUM(CASE WHEN status != 'finalizada' OR lucro IS NULL THEN 1 ELSE 0 END)
+                FROM operacoes
+                WHERE date(enviada_em)=? AND status != 'falha_envio'
+                GROUP BY ativo, direcao, strftime('%Y-%m-%dT%H:%M', enviada_em)
+                """,
+                (hoje,),
+            ).fetchall()
+        resumo = {
+            "ordens": 0, "movimentos": len(linhas), "finalizados": 0,
+            "vitorias": 0, "perdas": 0, "mistos": 0, "pendentes": 0,
+        }
+        for _, _, _, quantidade, wins, perdas, empates, pendentes in linhas:
+            resumo["ordens"] += int(quantidade)
+            if pendentes:
+                resumo["pendentes"] += 1
+            elif wins and not perdas:
+                resumo["finalizados"] += 1
+                resumo["vitorias"] += 1
+            elif perdas and not wins:
+                resumo["finalizados"] += 1
+                resumo["perdas"] += 1
+            elif wins or perdas or empates:
+                resumo["finalizados"] += 1
+                resumo["mistos"] += 1
+        decisivos = resumo["vitorias"] + resumo["perdas"]
+        resumo["winrate"] = (
+            round(100 * resumo["vitorias"] / decisivos, 1) if decisivos else None
+        )
+        return resumo
+
     def funil_reversao_hoje(self, motivo_estrategia: str = "reversao_candle_curta") -> dict:
         """Quantos sinais confirmados da estrategia validada apareceram hoje
         e quantos viraram ordem de verdade — pra saber se a impressao de
@@ -847,7 +1064,8 @@ class RegistroSQLite:
         with self._lock, self._sessao() as db:
             ops = db.execute(
                 """
-                SELECT id_ordem, ativo, direcao, status, lucro, enviada_em, setup
+                SELECT id_ordem, ativo, direcao, status, lucro, enviada_em, setup,
+                       timeframe, expiracao_minutos, preco_entrada, atraso_envio_ms
                 FROM operacoes
                 WHERE date(enviada_em)=? AND status != 'falha_envio'
                 ORDER BY enviada_em ASC
@@ -856,26 +1074,57 @@ class RegistroSQLite:
             ).fetchall()
             decs = db.execute(
                 """
-                SELECT ativo, direcao, registrado_em, detalhes_json
+                SELECT ativo, direcao, registrado_em, setup, timeframe, detalhes_json
                 FROM decisoes
                 WHERE date(registrado_em)=? AND permitida=1
                 ORDER BY registrado_em ASC
                 """,
                 (hoje,),
             ).fetchall()
+            historico_auditavel = db.execute(
+                """
+                SELECT o.id_ordem, o.ativo, o.direcao, o.setup, o.timeframe,
+                       o.lucro, d.detalhes_json
+                FROM operacoes o
+                JOIN decisoes d ON d.ativo=o.ativo
+                    AND d.direcao=o.direcao
+                    AND d.setup=o.setup
+                    AND d.timeframe=o.timeframe
+                    AND d.permitida=1
+                    AND ABS((julianday(d.registrado_em)-julianday(o.enviada_em))*86400) <= 10
+                WHERE o.status='finalizada' AND o.lucro IS NOT NULL
+                ORDER BY o.enviada_em DESC
+                LIMIT 3000
+                """
+            ).fetchall()
 
-        # Índice de decisões por (ativo, direcao) → lista de (ts_unix, detalhes)
+        # Inclui setup/timeframe na chave. Sem isso, duas estratégias que
+        # coincidam no mesmo minuto poderiam explicar a ordem errada.
         from datetime import datetime as _dt
         dec_idx: dict[tuple, list] = {}
-        for ativo, direcao, reg_em, det_json in decs:
+        for ativo, direcao, reg_em, setup, timeframe, det_json in decs:
             try:
                 ts = _dt.fromisoformat(reg_em).timestamp()
             except Exception:
                 continue
-            dec_idx.setdefault((ativo, direcao), []).append((ts, det_json))
+            dec_idx.setdefault((ativo, direcao, setup, int(timeframe or 0)), []).append((ts, det_json))
+
+        historico_idx: dict[tuple, list[dict]] = {}
+        for ordem, ativo, direcao, setup, timeframe, lucro_hist, detalhes_json in historico_auditavel:
+            try:
+                detalhes_hist = _json.loads(detalhes_json) if detalhes_json else {}
+            except Exception:
+                continue
+            chave = (ativo, direcao, setup, int(timeframe or 0))
+            historico_idx.setdefault(chave, []).append(
+                {"id_ordem": str(ordem), "lucro": float(lucro_hist), "detalhes": detalhes_hist}
+            )
 
         resultado = []
-        for id_ordem, ativo, direcao, status, lucro, enviada_em, setup in ops:
+        for (
+            id_ordem, ativo, direcao, status, lucro, enviada_em, setup,
+            timeframe, expiracao, preco_entrada, atraso_envio_ms,
+        ) in ops:
             try:
                 ts_op = _dt.fromisoformat(enviada_em).timestamp()
             except Exception:
@@ -884,7 +1133,7 @@ class RegistroSQLite:
             # Busca decisão mais próxima (≤10 s)
             detalhes: dict = {}
             if ts_op is not None:
-                candidatos = dec_idx.get((ativo, direcao), [])
+                candidatos = dec_idx.get((ativo, direcao, setup, int(timeframe or 0)), [])
                 melhor = min(
                     candidatos, key=lambda x: abs(x[0] - ts_op), default=None
                 )
@@ -895,7 +1144,7 @@ class RegistroSQLite:
                         detalhes = {}
 
             # Justificativa legível
-            motivos: list[str] = detalhes.get("motivos") or []
+            motivos: list[str] = detalhes.get("motivos") or detalhes.get("razao") or []
             if not motivos:
                 # Para sr_rejeicao e outros: monta do detalhes
                 partes = []
@@ -910,6 +1159,45 @@ class RegistroSQLite:
                 if partes:
                     motivos = [", ".join(partes)]
 
+            criterios: list[str] = list(motivos[:3])
+            if detalhes.get("toque_faixa"):
+                criterios.append("Preço tocou a faixa das médias")
+            ema9, ema_longa = detalhes.get("ema9"), detalhes.get("ema20", detalhes.get("ema21"))
+            if ema9 is not None and ema_longa is not None:
+                relacao = ">" if direcao == "call" else "<"
+                criterios.append(f"EMA9 {relacao} EMA longa")
+            if detalhes.get("rsi14") is not None:
+                criterios.append(f"RSI14 {float(detalhes['rsi14']):.1f}")
+            if detalhes.get("corpo_ratio") is not None:
+                criterios.append(f"Corpo {float(detalhes['corpo_ratio']) * 100:.0f}% do candle")
+            if detalhes.get("toques_anteriores") is not None:
+                criterios.append(f"Toques anteriores: {int(detalhes['toques_anteriores'])}")
+            if detalhes.get("impulso_atr") is not None:
+                criterios.append(f"Impulso: {float(detalhes['impulso_atr']):.2f} ATR")
+            criterios.extend(resumo_contexto(detalhes))
+            comparaveis = recuperar_comparaveis(
+                detalhes,
+                (
+                    item for item in historico_idx.get(
+                        (ativo, direcao, setup, int(timeframe or 0)), []
+                    ) if item["id_ordem"] != str(id_ordem)
+                ),
+            )
+
+            if status == "aberta":
+                diagnostico = "AGUARDANDO — ordem aberta; o diagnóstico do resultado sai no vencimento."
+            elif lucro is not None and lucro > 0:
+                diagnostico = "WIN — o preço confirmou a direção do setup até o vencimento."
+            elif lucro is not None and lucro < 0:
+                diagnostico = (
+                    "LOSS — a direção não se confirmou até o vencimento. "
+                    "Os critérios abaixo descrevem o contexto; não provam uma causa única da perda."
+                )
+            elif lucro == 0:
+                diagnostico = "EMPATE — a operação terminou sem variação financeira."
+            else:
+                diagnostico = "RESULTADO PENDENTE — a IQ ainda não devolveu um desfecho confiável."
+
             resultado.append({
                 "hora": enviada_em[11:16],          # "HH:MM"
                 "ativo": ativo,
@@ -917,7 +1205,13 @@ class RegistroSQLite:
                 "setup": setup or detalhes.get("setup", "?"),
                 "status": status,
                 "lucro": None if lucro is None else float(lucro),
-                "motivos": motivos[:3],              # máximo 3 linhas
+                "timeframe": int(timeframe or 0),
+                "expiracao_minutos": int(expiracao or 0),
+                "preco_entrada": None if preco_entrada is None else float(preco_entrada),
+                "atraso_envio_ms": int(atraso_envio_ms or 0),
+                "criterios": criterios[:9],
+                "diagnostico": diagnostico,
+                "comparaveis": comparaveis,
             })
 
         return resultado

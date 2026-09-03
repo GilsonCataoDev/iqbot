@@ -1,5 +1,7 @@
+import hashlib
+import json
 import os
-from dataclasses import dataclass, field, replace
+from dataclasses import asdict, dataclass, field, replace
 from pathlib import Path
 
 TIMEFRAMES_SUPORTADOS = {60: "M1", 300: "M5", 900: "M15", 3600: "H1"}
@@ -70,6 +72,7 @@ class Configuracao:
     pullback_rsi_min: float = 35.0
     pullback_rsi_max: float = 65.0
     pullback_slope_forte_multiplo_atr: float = 0.5  # bloqueia pullback quando |slope EMA_Macro| > N*ATR
+    pullback_alvo_min_atr: float = 0.35  # exige espaço mínimo até o último topo/fundo do impulso
 
     # --- Melhoria §8: SR Rejeição ---
     # Toggle: exige RSI sobrevendido (CALL) ou sobrecomprado (PUT) no candle que toca o nível.
@@ -87,6 +90,16 @@ class Configuracao:
     # Bloqueia pullbacks onde o mercado já cruzou contra a TendenciaMacro.
     pullback_filtro_cruzamento_ema: bool = True
 
+    # --- Filtro de leitura da vela (corpo, pavios e confirmação) ---
+    # Heurística objetiva; deve ser validada por ativo/timeframe antes de
+    # aumentar stake. O filtro só remove sinais, nunca cria entradas.
+    filtro_candle_estrutura_ativo: bool = False
+    candle_corpo_min_ratio: float = 0.50       # corpo / range total
+    candle_forca_min_ratio: float = 0.60       # corpo / range para vela forte
+    candle_pavio_rejeicao_min_ratio: float = 1.50  # pavio / corpo
+    candle_fechamento_extremo_ratio: float = 0.25  # fechamento nos 25% finais
+    candle_filtro_score_minimo: int = 2        # 2 de 3 evidências
+
     macd_fast: int = 6
     macd_slow: int = 16
     macd_signal: int = 9
@@ -103,6 +116,9 @@ class Configuracao:
     divergencia_rsi_ativo: bool = False
     bollinger_squeeze_ativo: bool = False
     pin_bar_sr_ativo: bool = False  # False = nunca entra em pin_bar_sr
+    breakout_reteste_ativo: bool = False  # rompimento + reteste a favor da tendência
+    forex_reteste_m15_ativo: bool = False  # plano forex visual; executa CALL/PUT binária no gatilho
+    noticia_confirmada_ativo: bool = False  # entrada pós-notícia quando actual/forecast confirma direção
     macd_crossover_time_ativo: bool = False        # variante: só 00h-06h UTC
     macd_crossover_tendencia_ativo: bool = False   # variante: só com TendenciaMacro alinhada
     divergencia_rsi_time_ativo: bool = False       # variante: só 11h-13h UTC
@@ -112,10 +128,40 @@ class Configuracao:
     # WR=49.8%, breakeven=54.1%, IC95%=[47.4%, 52.2%] — IC inteiro ABAIXO do breakeven,
     # edge negativo provado (-136.3u). Desligado no M15/H1; ver configuracao_scalping_m15.
     pullback_confluencia_ativo: bool = True
+    ema920_pullback_ativo: bool = False  # pullback na faixa EMA9/20
+    # Variante de pesquisa da EMA9/20. Exige primeiro reteste após impulso,
+    # rejeição forte e espaço até o próximo nível estrutural. Nunca deve ir
+    # para execução sem uma campanha isolada de resultados.
+    ema920_prime_ativo: bool = False
+    ema920_prime_janela_impulso: int = 3
+    ema920_prime_impulso_min_atr: float = 1.0
+    ema920_prime_janela_toques: int = 5
+    ema920_prime_max_toques_anteriores: int = 1
+    ema920_prime_corpo_min_ratio: float = 0.50
+    ema920_prime_fechamento_extremo_ratio: float = 0.25
+    ema920_prime_espaco_sr_min_atr: float = 0.50
+    ema921_rsi_pullback_ativo: bool = False  # EMA9/21 + RSI14 em pullback
+    # Variante experimental: entra no toque ao vivo da faixa EMA9/21, sem
+    # aguardar o candle fechar. Deve usar banco isolado, pois OHLC não permite
+    # reproduzir com fidelidade o instante exato do toque em backtest.
+    ema921_rsi_intravela_ativo: bool = False
+    ema921_rsi_intravela_tolerancia_atr: float = 0.10
+    # NZD/USD: candidato separado, em modo sombra no laboratório. Mantém o
+    # toque/rejeição, mas só quando M5 e M15 estão alinhados e a tendência tem
+    # força mensurável. Não é uma estratégia validada para envio de ordens.
+    nzd_trend_pullback_ativo: bool = False
+    nzd_trend_separacao_atr: float = 0.10
+    nzd_trend_adx_minimo: float = 20.0
+    # Ativos nesta lista continuam gerando e registrando sinais, mas nunca
+    # recebem ordem. Útil para separar uma campanha de validação por ativo.
+    ativos_somente_sombra: tuple[str, ...] = ()
     # --- Retração intra-candle ---
     # Detecta impulso no candle em formação, espera retração até zona Fibo 38.2-61.8%
     # e entra quando o preço mostra rejeição (volta na direção do impulso).
     retracao_intracandle_ativo: bool = False
+    # Permite setups de toque/rejeição entrarem no MEIO da vela, usando
+    # janela_entrada_por_setup em vez da janelinha global de abertura.
+    entrada_intracandle_por_toque_ativo: bool = False
     retracao_impulso_min_atr: float = 1.0      # impulso mínimo para considerar retração (em ATR)
     retracao_fib_min: float = 0.382             # retração mínima do impulso
     retracao_fib_max: float = 0.618             # retração máxima do impulso
@@ -141,6 +187,7 @@ class Configuracao:
     bloquear_direcao_paralela: bool = False  # bloqueia 2a entrada na mesma direcao (call/put) enquanto outra estiver aberta em par diferente — evita triplicar a mesma aposta quando pares correlacionados (EURUSD/GBPUSD) disparam juntos
     filtro_candle_entrada_atr: float = 0.0  # 0 = desligado; >0 = cancela se candle N+1 abre > N×ATR contra o sinal
     bloquear_noticia_alto_impacto: bool = False  # bloqueia entrada em janela de notícia HIGH (ativos reais)
+    permitir_noticia_confirmada_a_favor: bool = False  # experimental: só liberar HIGH se actual/forecast confirmar a direção
     ia_como_filtro: bool = True  # True = IA bloqueia sinais contrários (media/alta confiança); False = só exibe parecer
     ia_filtro_exceto_setups: tuple[str, ...] = ("sr_rejeicao",)  # setups excluídos do bloqueio de IA mesmo com ia_como_filtro=True
 
@@ -281,6 +328,21 @@ class Configuracao:
     def rotulo_timeframe(self) -> str:
         return TIMEFRAMES_SUPORTADOS.get(self.timeframe_segundos, f"{self.timeframe_segundos}s")
 
+    def configuracao_auditavel(self) -> dict:
+        """Configuração sem credenciais, estável para identificar uma campanha."""
+        dados = asdict(self)
+        dados.pop("email", None)
+        dados.pop("senha", None)
+        dados["pasta_dados"] = str(dados["pasta_dados"])
+        return dados
+
+    @property
+    def config_hash(self) -> str:
+        bruto = json.dumps(
+            self.configuracao_auditavel(), sort_keys=True, ensure_ascii=True, default=str
+        ).encode("utf-8")
+        return hashlib.sha256(bruto).hexdigest()[:16]
+
     def validar(self) -> None:
         if self.conta not in ("PRACTICE", "REAL"):
             raise RuntimeError("CONTA deve ser PRACTICE ou REAL.")
@@ -302,7 +364,9 @@ class Configuracao:
                 "de vez se a banca cair demais)."
             )
         if self.timeframe_segundos not in TIMEFRAMES_SUPORTADOS:
-            raise RuntimeError("Timeframe suportado: M1 (60s), M5 (300s) ou M15 (900s).")
+            raise RuntimeError(
+                "Timeframes suportados: M1 (60s), M5 (300s), M15 (900s) ou H1 (3600s)."
+            )
         if self.expiracao_minutos * 60 < self.timeframe_segundos:
             raise RuntimeError("A expiração não pode ser menor que um candle do timeframe.")
         if not 0 < self.entrada_max_segundos_no_candle < self.timeframe_segundos:
@@ -317,6 +381,14 @@ class Configuracao:
             raise RuntimeError("Faixa de Fibonacci do pullback é inválida.")
         if self.pullback_pivo_raio < 1 or self.pullback_janela < 10:
             raise RuntimeError("Configuração de pivôs do pullback é inválida.")
+        if self.ema920_prime_janela_impulso < 2 or self.ema920_prime_janela_toques < 2:
+            raise RuntimeError("Janelas da EMA9/20 Prime devem ter ao menos 2 candles.")
+        if self.ema920_prime_impulso_min_atr <= 0 or self.ema920_prime_espaco_sr_min_atr < 0:
+            raise RuntimeError("Distâncias ATR da EMA9/20 Prime são inválidas.")
+        if not 0 < self.ema920_prime_corpo_min_ratio <= 1:
+            raise RuntimeError("Corpo mínimo da EMA9/20 Prime deve ficar entre 0 e 1.")
+        if not 0 < self.ema920_prime_fechamento_extremo_ratio < 0.5:
+            raise RuntimeError("Fechamento extremo da EMA9/20 Prime deve ficar entre 0 e 0,5.")
         if not 1024 <= self.porta_grafico <= 65535:
             raise RuntimeError("A porta do gráfico deve ficar entre 1024 e 65535.")
 
@@ -371,6 +443,10 @@ def configuracao_pesquisa_m5(base: Configuracao | None = None) -> Configuracao:
         divergencia_rsi_time_ativo=True,
         divergencia_rsi_tendencia_ativo=True,
         pullback_ativo=True,
+        # Filtro de vela: confirmação/força/rejeição antes do scalping M5.
+        filtro_candle_estrutura_ativo=True,
+        candle_filtro_score_minimo=2,
+        ema920_pullback_ativo=True,
     )
 
 
@@ -392,9 +468,9 @@ def configuracao_practice_m5(base: Configuracao | None = None) -> Configuracao:
         parar_por_prejuizo=False,
         payout_minimo=0.80,
         entrada_max_segundos_no_candle=25,
-        # Anti-martingale: escala nos streaks de win, reset no loss
-        anti_martingale_ativo=True,
-        anti_martingale_niveis=(1.0, 1.5, 2.25),
+        # Gestão conservadora: stake fixa durante a validação; sem progressão automática.
+        anti_martingale_ativo=False,
+        anti_martingale_niveis=(1.0,),
         # Só os 3 melhores por WR: pullback_confluencia, reversao_confluencia, reversao_bollinger_rsi
         macd_crossover_ativo=False,
         macd_crossover_time_ativo=False,
@@ -408,6 +484,44 @@ def configuracao_practice_m5(base: Configuracao | None = None) -> Configuracao:
         divergencia_rsi_tendencia_ativo=False,
         bollinger_squeeze_ativo=False,
         pullback_ativo=True,
+    )
+
+
+def configuracao_todas_practice(base: Configuracao | None = None) -> Configuracao:
+    """PRACTICE de pesquisa: liga todos os setups e registra o setup escolhido.
+
+    A estratégia continua escolhendo somente o sinal de maior prioridade por
+    ativo/candle; isso testa o conjunto sem empilhar ordens correlacionadas.
+    """
+    return replace(
+        configuracao_pesquisa_m5(base),
+        conta="PRACTICE",
+        executar_ordens=True,
+        confirmo_conta_real=False,
+        valor_por_ordem=5.0,
+        timeframe_segundos=300,
+        expiracao_minutos=5,
+        entrada_max_segundos_no_candle=25,
+        max_operacoes_dia=0,
+        max_perdas_consecutivas=0,
+        stop_diario=-999999.0,
+        parar_por_perdas=False,
+        parar_por_prejuizo=False,
+        max_ordens_paralelas=1,
+        cooldown_pos_ordem_por_ativo_candles=1,
+        bloquear_direcao_paralela=True,
+        bloquear_noticia_alto_impacto=True,
+        filtro_candle_estrutura_ativo=True,
+        noticia_confirmada_ativo=True,
+        rejeicao_m1_hierarquico_ativo=True,
+        sr_rejeicao_ativo=True,
+        fibo_sr_retracao_ativo=True,
+        reversao_candle_ativo=True,
+        reversao_bollinger_rsi_ativo=True,
+        macd_crossover_ativo=True,
+        executar_estrategias_nao_validadas=True,
+        sufixo_banco="todas_practice",
+        porta_grafico=8778,
     )
 
 
@@ -467,6 +581,9 @@ def configuracao_scalping_60(base: Configuracao | None = None) -> Configuracao:
         fibo_sr_retracao_ativo=False,
         sr_rejeicao_ativo=False,
         macd_crossover_ativo=False,
+        filtro_candle_estrutura_ativo=True,
+        candle_filtro_score_minimo=2,
+        ema920_pullback_ativo=True,
         bollinger_aceitar_tendencia=False,
         confiar_resultado_automatico=False,
         verificar_resultado_por_candle=True,
@@ -476,27 +593,38 @@ def configuracao_scalping_60(base: Configuracao | None = None) -> Configuracao:
 
 
 def configuracao_scalping_m15(base: Configuracao | None = None) -> Configuracao:
-    """Scalping M15 — Opção B+: pullback + padrões de vela em S/R + MACD.
+    """Scalping M15 — campanha conservadora de rejeição em S/R.
 
-    No M15 os padrões de vela têm peso real (no M5 são ruído):
-    - pin_bar_sr: pino tocando S/R = sinal de exaustão confiável
-    - engulfing_sr: engolfo em S/R = mudança de momentum confirmada
-    - sr_rejeicao: corpo rejeitando nível = pressão direcional clara
-    - pullback/pullback_confluencia: base trend-following (herdado do M5)
-    - macd_crossover_tendencia: cruzamento MACD com zero-line + TendenciaMacro alinhada
+    Apenas ``sr_rejeicao`` executa enquanto o histórico é recalculado com
+    contexto H1/H4 fechado e janela parcial igual à usada ao vivo.
 
-    Money management: R$15→R$20 (sem 3º nível — igual ao M5 atual).
+    Money management: stake fixo de R$5 enquanto o edge é revalidado.
     Cooldown 1 candle = 15 min (suficiente para evitar entradas repetidas).
     Banco isolado: iqoption_m5_practice_scalping_m15.sqlite3.
     """
     return replace(
         configuracao_scalping_60(base),
+        conta="PRACTICE",
+        confirmo_conta_real=False,
         valor_por_ordem=5.0,
+        anti_martingale_ativo=False,
+        anti_martingale_niveis=(1.0,),
         timeframe_segundos=900,
         expiracao_minutos=15,
-        # Só normais: EURUSD 88% WR, GBPUSD 70% WR — OTCs todos negativos no M15
-        # USDJPY adicionado para diversificação
-        ativos=("EURUSD", "GBPUSD", "USDJPY"),
+        # Só mercado normal (nunca OTC). 7 pares validados em backtest 2026-08-26
+        # (n=5000 candles M15/par, sr_rejeicao via M1-parcial 1min, filtro H4 ligado):
+        #   USDCHF  WR=82.7% [79,86]  -> EXCLUÍDO: só existe em OTC, sem par "-op"
+        #   EURUSD  WR=82.1% [78,85]  AUDUSD  WR=82.1% [78,85]  <- novo
+        #   NZDUSD  WR=81.8% [78,85]  <- novo
+        #   USDCAD  WR=81.2% [77,85]  <- novo
+        #   USDJPY  WR=80.4% [77,84]
+        #   EURJPY  WR=78.2% [75,81]  <- novo
+        #   GBPUSD  WR=77.5% [73,81]
+        # Os 4 novos ficam todos acima do GBPUSD, que já operava. Payout 0.87 em
+        # todos (breakeven 53.5%), acima do payout_minimo=0.80 herdado.
+        # max_ordens_paralelas=1 (herdado) mantém a exposição simultânea inalterada:
+        # mais pares = mais candidatos por candle, não mais risco concorrente.
+        ativos=("EURUSD", "GBPUSD", "USDJPY", "AUDUSD", "USDCAD", "NZDUSD", "EURJPY"),
         entrada_max_segundos_no_candle=60,
         cooldown_pos_ordem_por_ativo_candles=1,
         limite_candles=120,
@@ -509,8 +637,9 @@ def configuracao_scalping_m15(base: Configuracao | None = None) -> Configuracao:
         pullback_slope_forte_multiplo_atr=1.0,
         # pullback standalone: 25% WR histórico — desabilitado.
         pullback_ativo=False,
-        # pullback_confluencia: backtest 2026-08-25 n=1731 WR=49.8% vs breakeven 54.1%,
-        # IC95%=[47.4%, 52.2%] inteiro abaixo do breakeven (-136.3u). Edge negativo provado.
+        # Backtest corrigido derrubou as reversões soltas; ficam fora da
+        # execução automática. O M15 passa a operar a ideia "trader": plano
+        # forex visual (entrada/SL/TP) convertido em CALL/PUT binária.
         pullback_confluencia_ativo=False,
         # Apuração de resultado: o cálculo por candle usava o Close PARCIAL do candle em
         # formação como referência e encerrava antes da expiração real do mark da IQ
@@ -519,49 +648,87 @@ def configuracao_scalping_m15(base: Configuracao | None = None) -> Configuracao:
         # (status open/pending) e usa pnl_net real — é a fonte de verdade.
         verificar_resultado_por_candle=False,
         confiar_resultado_automatico=True,
-        # Opção B+: padrões de vela em S/R — confiáveis no M15, ruído no M5
-        pin_bar_sr_ativo=True,
-        engulfing_sr_ativo=True,
-        sr_rejeicao_ativo=True,
+        # SONDA (ligado em 2026-08-26). Backtest sem lookahead (M1-parcial 1min,
+        # 7 pares, 5000 candles/par): n=235 WR=70.2% IC95%=[64%,76%], +70.2u —
+        # IC inteiro acima do breakeven 54.1%. É o único dos 5 candidatos testados
+        # que passou (divergencia_rsi 49.0% [45,53] e bollinger_squeeze 38.6%
+        # [32,45] foram reprovados: IC todo abaixo do breakeven).
+        # RESSALVA: é setup de REVERSÃO, sujeito ao mesmo viés residual do método
+        # M1-parcial que infla sr_rejeicao (backtest 80.3% vs 62.0% ao vivo, n=50
+        # — deflação de ~18pp estatisticamente real). Se a mesma deflação valer
+        # aqui, o WR ao vivo cai pra ~52%, EM CIMA do breakeven de 53.5% (payout
+        # 0.87). Por isso entra como sonda em stake 1.0x, não como setup validado.
+        # CRITÉRIO DE CORTE: reavaliar ao atingir n=100 ao vivo. Se o IC95% do WR
+        # ficar abaixo de 53.5%, desligar.
+        pin_bar_sr_ativo=False,
+        breakout_reteste_ativo=False,
+        forex_reteste_m15_ativo=True,
+        noticia_confirmada_ativo=True,
+        # Amostra M15 ainda inconclusiva (n=15): fica desligado até validar.
+        # Backtest 2026-08-26 confirmou n=23 insuficiente (IC=[49%,84%] cruza o
+        # breakeven) — segue desligado.
+        engulfing_sr_ativo=False,
+        sr_rejeicao_ativo=False,
         # retracao_intracandle: backtest 2026-08-25 (candle fechado, sem lookahead)
         # n=280 WR=50.4% IC95%=[44.5%,56.2%] edge=-3.7pp — cruza o breakeven, sem
         # vantagem estatistica. Desabilitado.
         retracao_intracandle_ativo=False,
+        entrada_intracandle_por_toque_ativo=True,
         retracao_exigir_sr=True,
         # bloqueia 2a entrada na mesma direcao enquanto outro par estiver aberto —
         # evita apostar 3x na mesma exposicao quando os 3 setups disparam juntos
         # em EURUSD/GBPUSD/USDJPY (frequentemente correlacionados via forca do USD)
         bloquear_direcao_paralela=True,
+        # Se o candle abriu contra o sinal, não força entrada atrasada.
+        filtro_candle_entrada_atr=0.35,
+        # Notícias HIGH movem mercado normal rápido demais; notícia a favor fica
+        # em validação/observação, não execução automática.
+        bloquear_noticia_alto_impacto=True,
+        permitir_noticia_confirmada_a_favor=True,
         # macd_crossover: 33% WR (-R$17/dia) — desabilitado ambas as variantes.
         macd_crossover_ativo=False,
         macd_crossover_tendencia_ativo=False,
-        executar_estrategias_nao_validadas=True,
-        # Filtro H4: tendência macro bloqueia contra-tendência
-        filtro_h4_ativo=True,
+        executar_estrategias_nao_validadas=False,
+        # No M15, H4 fica pesado/atrasado demais como bloqueio duro.
+        # A direção maior já vem do H1; H4 segue melhor como leitura visual/swing.
+        filtro_h4_ativo=False,
         # Filtro H1: bloqueia entradas contra tendência do timeframe superior
         filtro_h1_ativo=True,
         # Filtro cruzamento EMA no pullback — bloqueia entrada quando micro < macro
         pullback_filtro_cruzamento_ema=True,
+        filtro_candle_estrutura_ativo=True,
+        candle_corpo_min_ratio=0.50,
+        candle_forca_min_ratio=0.60,
+        candle_pavio_rejeicao_min_ratio=1.50,
+        candle_fechamento_extremo_ratio=0.25,
+        candle_filtro_score_minimo=2,
         # Sem filtro de horário em testes — None = aceita qualquer hora
         horario_por_setup=None,
-        # Expiração variável por setup
+        # Entrada intravela por toque: permite reversões até 9min dentro do M15.
+        # Depois disso sobra pouco tempo útil para a opção respirar.
+        janela_entrada_por_setup={
+            "sr_rejeicao":          540,
+            "fibo_sr_retracao":     540,
+            "pin_bar_sr":           540,
+            "retracao_intracandle": 540,
+            "pullback_confluencia": 600,
+        },
+        # Expiração variável por setup. 0 = fim da vela atual (ver
+        # Executor._expiracao_dinamica) — obrigatório pros setups intravela,
+        # senão a IQ joga o vencimento pra 2-3 velas adiante.
         expiracao_por_setup={
-            "pullback_confluencia":    30,
+            "pullback_confluencia":     0,
+            "breakout_reteste":         30,
+            "noticia_confirmada":       15,
             "fibo_sr_retracao":        30,
             "pin_bar_sr":              30,
             "engulfing_sr":            30,
             "sr_rejeicao":             15,
             "retracao_intracandle":    15,
         },
-        # Sizing proporcional ao edge medido em backtest (WR - breakeven 54.1%):
-        # sr_rejeicao edge=+25.9pp (WR~80%), fibo_sr_retracao edge=+21.4pp (WR 75.5%),
-        # pin_bar_sr edge=+20.5pp (WR 74.6%), engulfing_sr n=15 amostra pequena/inconclusivo.
-        multiplicador_por_setup={
-            "sr_rejeicao":          1.0,
-            "fibo_sr_retracao":     0.85,
-            "pin_bar_sr":           0.8,
-            "engulfing_sr":         0.6,
-        },
+        # Stake neutro enquanto o edge é revalidado com a metodologia corrigida.
+        # pin_bar_sr explícito em 1.0: é sonda, não pode escalar stake sem n=100.
+        multiplicador_por_setup={"sr_rejeicao": 1.0, "pin_bar_sr": 1.0},
     )
 
 
@@ -585,6 +752,8 @@ def configuracao_scalping_m15_r5(base: Configuracao | None = None) -> Configurac
     """
     return replace(
         configuracao_scalping_m15(base),
+        conta="PRACTICE",
+        confirmo_conta_real=False,
         valor_por_ordem=5.0,
         anti_martingale_niveis=(1.0, 1.5, 2.25),  # R$5 → R$7.50 → R$11.25
         alavancagem_maximo=12.0,
@@ -594,6 +763,203 @@ def configuracao_scalping_m15_r5(base: Configuracao | None = None) -> Configurac
         meta_diaria=9.0,
         sufixo_banco="scalping_m15_r5",
         porta_grafico=8773,
+    )
+
+
+def configuracao_ema920_m1_practice(base: Configuracao | None = None) -> Configuracao:
+    """PRACTICE M1 isolado: somente pullback/rejeição na faixa EMA9-EMA20."""
+    return replace(
+        configuracao_scalping_m1(base),
+        conta="PRACTICE",
+        confirmo_conta_real=False,
+        executar_ordens=True,
+        executar_estrategias_nao_validadas=True,
+        timeframe_segundos=60,
+        expiracao_minutos=1,
+        ativos=(
+            "EURUSD", "AUDCAD", "NZDUSD",
+        ),
+        valor_por_ordem=5.0,
+        max_operacoes_dia=0,
+        max_perdas_consecutivas=0,
+        stop_diario=-999999.0,
+        meta_diaria=0.0,
+        parar_por_perdas=False,
+        parar_por_prejuizo=False,
+        circuit_breaker_max_perdas=0,
+        drawdown_maximo_percentual=0.0,
+        ia_como_filtro=False,
+        # Único setup habilitado.
+        ema920_pullback_ativo=True,
+        macd_crossover_ativo=False,
+        sr_rejeicao_ativo=False,
+        fibo_sr_retracao_ativo=False,
+        reversao_candle_ativo=False,
+        reversao_bollinger_rsi_ativo=False,
+        pullback_ativo=False,
+        pullback_confluencia_ativo=False,
+        retracao_intracandle_ativo=False,
+        pin_bar_sr_ativo=False,
+        engulfing_sr_ativo=False,
+        breakout_reteste_ativo=False,
+        noticia_confirmada_ativo=False,
+        divergencia_rsi_ativo=False,
+        bollinger_squeeze_ativo=False,
+        rejeicao_m1_hierarquico_ativo=False,
+        # Este perfil não herda bloqueios de outros setups/timeframes.
+        filtro_h4_ativo=False,
+        filtro_h1_ativo=False,
+        filtro_m5_ativo=False,
+        filtro_m15_ativo=False,
+        filtro_regime_ativo=False,
+        horario_bloqueado=None,
+        horario_por_setup=None,
+        bloquear_noticia_alto_impacto=False,
+        bloquear_emas_proximas_atr=0.0,
+        atr_min_multiplo_mediana=0.0,
+        filtro_candle_entrada_atr=0.0,
+        filtro_candle_estrutura_ativo=False,
+        max_ordens_paralelas=0,
+        cooldown_pos_ordem_segundos=0.0,
+        cooldown_pos_ordem_por_ativo_candles=0,
+        sufixo_banco="ema920_m1_practice",
+        porta_grafico=8779,
+    )
+
+
+def configuracao_ema921_rsi_m1_practice(base: Configuracao | None = None) -> Configuracao:
+    """PRACTICE M1 isolado: pullback EMA9/21 confirmado por RSI14."""
+    return replace(
+        configuracao_ema920_m1_practice(base),
+        ema920_pullback_ativo=False,
+        ema921_rsi_pullback_ativo=True,
+        sufixo_banco="ema921_rsi_m1_practice",
+        porta_grafico=8780,
+    )
+
+
+def configuracao_ema921_rsi_m5_practice(base: Configuracao | None = None) -> Configuracao:
+    """PRACTICE M5: EMA9/21 + RSI14; expiração de 15 minutos."""
+    return replace(
+        configuracao_ema921_rsi_m1_practice(base),
+        timeframe_segundos=300,
+        expiracao_minutos=15,
+        entrada_max_segundos_no_candle=45,
+        limite_candles=180,
+        sufixo_banco="ema921_rsi_m5_practice",
+        porta_grafico=8781,
+    )
+
+
+def configuracao_ema921_rsi_m15_practice(base: Configuracao | None = None) -> Configuracao:
+    """PRACTICE M15: EMA9/21 + RSI14; expiração de 30 minutos."""
+    return replace(
+        configuracao_ema921_rsi_m1_practice(base),
+        timeframe_segundos=900,
+        expiracao_minutos=30,
+        entrada_max_segundos_no_candle=60,
+        limite_candles=180,
+        sufixo_banco="ema921_rsi_m15_practice",
+        porta_grafico=8782,
+    )
+
+
+def configuracao_ema921_rsi_intravela_m5_practice(base: Configuracao | None = None) -> Configuracao:
+    """PRACTICE M5: entrada no toque ao vivo da faixa EMA9/21; vence no fim da vela."""
+    return replace(
+        configuracao_ema921_rsi_m5_practice(base),
+        ema921_rsi_pullback_ativo=False,
+        ema921_rsi_intravela_ativo=True,
+        entrada_intracandle_por_toque_ativo=True,
+        # O toque pode ocorrer até 4min do candle M5; depois disso a operação
+        # fica curta demais para ser uma medição útil.
+        janela_entrada_por_setup={"ema921_rsi_intravela": 240},
+        # 0 = próximo fechamento do candle atual (não 15 minutos depois).
+        expiracao_por_setup={"ema921_rsi_intravela": 0},
+        sufixo_banco="ema921_rsi_intravela_m5_practice",
+        porta_grafico=8783,
+    )
+
+
+def configuracao_ema921_rsi_intravela_m15_practice(base: Configuracao | None = None) -> Configuracao:
+    """PRACTICE M15: entrada no toque ao vivo da faixa EMA9/21; vence no fim da vela."""
+    return replace(
+        configuracao_ema921_rsi_m15_practice(base),
+        ema921_rsi_pullback_ativo=False,
+        ema921_rsi_intravela_ativo=True,
+        entrada_intracandle_por_toque_ativo=True,
+        # Não aceita toque nos últimos 3min: sobra pouco tempo para avaliar.
+        janela_entrada_por_setup={"ema921_rsi_intravela": 720},
+        expiracao_por_setup={"ema921_rsi_intravela": 0},
+        sufixo_banco="ema921_rsi_intravela_m15_practice",
+        porta_grafico=8784,
+    )
+
+
+def configuracao_ema_m5_real(base: Configuracao | None = None) -> Configuracao:
+    """Perfil REAL conservador, isolado do laboratório.
+
+    Usa somente o setup que tem a maior amostra positiva do Lab (EMA9/20 M5
+    fechado). EMA9/21 e intravela seguem em PRACTICE até terem amostra própria
+    suficiente; não há OTC nem pirâmide de valor neste perfil.
+    """
+    return replace(
+        configuracao_ema921_rsi_m5_practice(base),
+        email=os.environ.get("IQ_OPTION_EMAIL", ""),
+        senha=os.environ.get("IQ_OPTION_SENHA", ""),
+        conta="REAL",
+        confirmo_conta_real=True,
+        executar_ordens=True,
+        # EURUSD/AUDCAD já têm a base M5 mais longa; NZDUSD ainda está cedo.
+        ativos=("EURUSD", "AUDCAD"),
+        bloquear_otc_real=True,
+        banca_inicial=100.0,
+        piso_banca=70.0,
+        valor_por_ordem=2.50,
+        valor_percentual_banca=0.0,
+        anti_martingale_ativo=False,
+        alavancagem_pyramid=False,
+        alavancagem_maximo=2.50,
+        # Cinco wins a payout de 85% rendem ~R$10,63. Duas perdas encerram
+        # a sessão antes de a sequência comprometer a banca de R$100.
+        stop_diario=-5.0,
+        meta_diaria=10.0,
+        max_operacoes_dia=5,
+        max_perdas_consecutivas=2,
+        parar_por_perdas=True,
+        parar_por_prejuizo=True,
+        drawdown_maximo_percentual=0.30,
+        circuit_breaker_max_perdas=2,
+        circuit_breaker_cooldown_minutos=120,
+        max_ordens_paralelas=1,
+        cooldown_pos_ordem_por_ativo_candles=3,
+        payout_minimo=0.82,
+        ema920_pullback_ativo=True,
+        ema921_rsi_pullback_ativo=False,
+        ema921_rsi_intravela_ativo=False,
+        entrada_intracandle_por_toque_ativo=False,
+        # Expiração precisa ser fixa: sem este override o executor limita a
+        # operação ao candle M5 atual, apesar do plano ser buscar 15 minutos.
+        expiracao_por_setup={"ema920_pullback": 15},
+        executar_estrategias_nao_validadas=False,
+        sufixo_banco="ema_m5_real",
+        porta_grafico=8786,
+    )
+
+
+def configuracao_ema_laboratorio_practice(base: Configuracao | None = None) -> Configuracao:
+    """Base do laboratório EMA: uma conexão IQ, M5 e M15, banco compartilhado."""
+    return replace(
+        configuracao_ema921_rsi_intravela_m5_practice(base),
+        # O laboratório tem banco próprio e mede todas as estratégias. Não pode
+        # herdar o piso R$30 do antigo teste M1, que pararia uma campanha nova.
+        piso_banca=0.0,
+        # NZDUSD teve desempenho prático inferior aos demais pares. Continua
+        # gerando sinais para medição, mas não recebe novas ordens enquanto a
+        # campanha EMA9/20 M5 não confirmar uma vantagem própria para ele.
+        ativos_somente_sombra=("NZDUSD",),
+        sufixo_banco="ema_laboratorio_practice",
+        porta_grafico=8785,
     )
 
 
@@ -650,6 +1016,9 @@ def configuracao_scalping_m1(base: Configuracao | None = None) -> Configuracao:
         # Nova estratégia de rejeição M1 hierárquica (M15→M5→M1, scoring 9-11/11)
         rejeicao_m1_hierarquico_ativo=True,
         rejeicao_m1_score_minimo=9,
+        # M1: candles têm demasiado ruído para este filtro ser confiável.
+        filtro_candle_estrutura_ativo=False,
+        ema920_pullback_ativo=True,
         # Bloqueio de mercado lateral: EMA20 ≈ EMA50 → não operar
         bloquear_emas_proximas_atr=0.5,
         # Bloqueio de volatilidade: ATR muito baixo (spread domina) ou muito alto
@@ -685,7 +1054,15 @@ def configuracao_scalping_h1(base: Configuracao | None = None) -> Configuracao:
         configuracao_scalping_m15(base),
         timeframe_segundos=3600,
         expiracao_minutos=60,
-        ativos=("EURUSD", "GBPUSD", "USDJPY"),
+        # Mesmos 7 pares do M15, validados por backtest H1 próprio em 2026-08-26
+        # (5000 candles H1/par, M1-parcial 5min, filtro H4 ligado):
+        #   NZDUSD WR=83.1% [75,89]   EURUSD WR=79.5% [72,86]
+        #   USDJPY WR=78.1% [69,85]   EURJPY WR=76.7% [70,83]
+        #   USDCAD WR=76.3% [68,83]   GBPUSD WR=76.1% [69,82]
+        #   AUDUSD WR=75.5% [68,82]
+        # Todos com IC95% inteiro acima do breakeven. Estabilidade temporal ok
+        # (1a metade 78.0%, 2a 77.3%). USDCHF fica fora: só existe em OTC.
+        ativos=("EURUSD", "GBPUSD", "USDJPY", "AUDUSD", "USDCAD", "NZDUSD", "EURJPY"),
         valor_por_ordem=5.0,
         entrada_max_segundos_no_candle=300,
         cooldown_pos_ordem_por_ativo_candles=2,
@@ -699,17 +1076,47 @@ def configuracao_scalping_h1(base: Configuracao | None = None) -> Configuracao:
         # o que disparava falso-positivo o tempo todo. 65min = 60min do candle + folga.
         watchdog_timeout_minutos=65.0,
         sr_rejeicao_ativo=True,
+        # SONDA (ligado em 2026-08-26), mesmo racional do M15. O backtest H1
+        # próprio dá n=109 WR=76.1% IC95%=[67%,83%] — IC inteiro acima do
+        # breakeven 54.1%, amostra maior que a do M15 (n=235 lá, mas em TF 4x
+        # mais rápido). Mesma ressalva: setup de REVERSÃO, sujeito ao viés
+        # residual do M1-parcial. Stake 1.0x, reavaliar em n=100 ao vivo com
+        # `python sonda_setup.py --setup pin_bar_sr --tf h1`.
         pin_bar_sr_ativo=True,
-        engulfing_sr_ativo=True,
+        pullback_confluencia_ativo=True,
+        breakout_reteste_ativo=True,
+        noticia_confirmada_ativo=True,
+        entrada_intracandle_por_toque_ativo=True,
+        engulfing_sr_ativo=False,
         pullback_ativo=False,
         filtro_h4_ativo=True,
         filtro_h1_ativo=False,
+        filtro_candle_entrada_atr=0.35,
+        bloquear_noticia_alto_impacto=True,
+        permitir_noticia_confirmada_a_favor=True,
+        # Entrada intravela por toque: permite reversões até 40min dentro do H1.
+        janela_entrada_por_setup={
+            "sr_rejeicao":          2400,
+            "fibo_sr_retracao":     2400,
+            "pin_bar_sr":           2400,
+            "retracao_intracandle": 2400,
+            "pullback_confluencia": 2400,
+        },
+        # 0 = fim da vela atual (ver Executor._expiracao_dinamica). Mesmo
+        # motivo do M15: com minutos fixos a IQ escolhe o marco mais PRÓXIMO
+        # do alvo, e uma entrada aos 40min de um H1 pedindo 120min expira
+        # horas depois — o oposto do que a entrada intravela quer.
         expiracao_por_setup={
             "sr_rejeicao":          60,
             "pin_bar_sr":          120,
+            "pullback_confluencia":  0,
+            "breakout_reteste":     120,
+            "noticia_confirmada":   60,
             "engulfing_sr":        120,
             "retracao_intracandle": 60,
         },
+        # pin_bar_sr explícito em 1.0: é sonda, não pode escalar stake sem n=100.
+        multiplicador_por_setup={"sr_rejeicao": 1.0, "pin_bar_sr": 1.0},
     )
 
 
