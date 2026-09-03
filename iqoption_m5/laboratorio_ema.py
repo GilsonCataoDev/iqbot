@@ -82,7 +82,7 @@ def _rastros(base: Configuracao) -> list[RastroEma]:
                         f"{rotulo} | {nome}"
                         + (
                             " (sombra H1)"
-                            if timeframe == 900
+                            if timeframe == 900 and setup != "ema920_pullback"
                             else " (sombra de validação)"
                             if setup != "ema920_pullback"
                             else ""
@@ -90,11 +90,10 @@ def _rastros(base: Configuracao) -> list[RastroEma]:
                     ),
                     config=_config_rastro(base, timeframe, setup),
                     intravela=setup == "ema921_rsi_intravela",
-                    # A campanha executável mede somente um setup por ativo:
-                    # EMA9/20 M5 fechado. EMA9/21 e intravela seguem
-                    # registrados em sombra, sem disputar ou duplicar uma
-                    # posição contra o setup principal.
-                    somente_sombra=timeframe == 900 or setup != "ema920_pullback",
+                    # EMA9/20 fechado é o único setup que pode abrir ordem em
+                    # M5 e M15. M15 exige H1 alinhado; EMA9/21 e intravela
+                    # seguem em sombra, sem disputar uma posição principal.
+                    somente_sombra=setup != "ema920_pullback",
                 )
             )
     # Candidato separado: nunca envia ordem enquanto não completar uma amostra
@@ -178,6 +177,7 @@ def _registrar_sombra(
         preco_entrada=decisao.preco,
         payout=float(snapshot.payout) if snapshot.payout is not None else 0.85,
         motivo=motivo,
+        timeframe=rastro.config.timeframe_segundos,
     )
 
 
@@ -325,8 +325,10 @@ def executar_laboratorio_ema() -> None:
 
     print("=" * 68)
     print("LABORATÓRIO EMA — PRACTICE | uma conexão IQ | M5 + M15")
-    print("Ordens: EURUSD, AUDCAD e NZDUSD apenas nos rastros M5.")
-    print("M15: sombra com filtro H1; NZD HIGH e candidato tendência+ADX também são sombra.")
+    ativos_ordem = tuple(ativo for ativo in base.ativos if ativo not in base.ativos_somente_sombra)
+    print(f"Ordens M5/M15: {', '.join(ativos_ordem)} (EMA9/20 fechado).")
+    print(f"Em sombra para comparação: {', '.join(base.ativos_somente_sombra)}.")
+    print("M15: EMA9/20 ativo com filtro H1; demais setups, NZD e candidatos ficam em sombra.")
     print("Rastros: EMA9/20, EMA9/21+RSI, intravela e NZD M5/M15+ADX.")
     print(f"Banco único: {base.banco_sqlite}")
     print("=" * 68)
@@ -370,7 +372,7 @@ def executar_laboratorio_ema() -> None:
             threading.Thread(
                 target=_grafico_ao_vivo, name="ema-lab-grafico-ao-vivo", daemon=True
             ).start()
-        print("Conectado. Monitorando EURUSD, AUDCAD e NZDUSD a cada 1 segundo.")
+        print(f"Conectado. Monitorando {', '.join(base.ativos)} a cada 1 segundo.")
 
         while True:
             if kill_switch_ativo():
@@ -502,7 +504,7 @@ def executar_laboratorio_ema() -> None:
                         )
                         motivo_sombra = None
                         if ativo in base.ativos_somente_sombra:
-                            motivo_sombra = "nzd_ema_pausada"
+                            motivo_sombra = "ativo_candidato_sombra"
                         elif rastro.somente_sombra:
                             if setup == "nzd_trend_pullback_v1":
                                 motivo_sombra = (

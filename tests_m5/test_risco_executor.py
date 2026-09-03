@@ -333,7 +333,7 @@ class TestRiscoEExecutor(unittest.TestCase):
                     "SELECT name FROM sqlite_master WHERE type='index'"
                 ).fetchall()
             }
-        self.assertEqual(versao, 1)
+        self.assertEqual(versao, 4)
         self.assertIn("idx_operacoes_status_data", indices)
         self.assertIn("idx_operacoes_ativo_data", indices)
 

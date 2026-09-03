@@ -18,18 +18,25 @@ def test_laboratorio_tem_rastros_m5_e_m15_e_nzd_em_sombra():
     rastros = _rastros(config)
 
     assert len(rastros) == 8
-    assert config.ativos_somente_sombra == ("NZDUSD",)
+    assert config.ativos == (
+        "EURUSD", "AUDCAD", "NZDUSD", "GBPUSD", "USDJPY", "AUDUSD", "USDCAD", "EURJPY",
+    )
+    assert config.ativos_somente_sombra == (
+        "NZDUSD", "GBPUSD", "USDJPY", "AUDUSD", "USDCAD", "EURJPY",
+    )
     assert {r.config.timeframe_segundos for r in rastros} == {300, 900}
     assert sum(r.intravela for r in rastros) == 2
     nzd = next(r for r in rastros if r.config.nzd_trend_pullback_ativo)
     assert nzd.somente_sombra
     assert nzd.config.timeframe_segundos == 300
     rastros_m15 = [r for r in rastros if r.config.timeframe_segundos == 900]
-    assert all(r.somente_sombra and r.config.filtro_h1_ativo for r in rastros_m15)
+    assert all(r.config.filtro_h1_ativo for r in rastros_m15)
+    assert any(not r.somente_sombra and r.config.ema920_pullback_ativo for r in rastros_m15)
     rastros_executaveis = [r for r in rastros if not r.somente_sombra]
-    assert len(rastros_executaveis) == 1
-    assert rastros_executaveis[0].config.timeframe_segundos == 300
-    assert rastros_executaveis[0].config.ema920_pullback_ativo
+    assert len(rastros_executaveis) == 2
+    assert {r.config.timeframe_segundos for r in rastros_executaveis} == {300, 900}
+    assert all(r.config.ema920_pullback_ativo for r in rastros_executaveis)
+    assert config.bloquear_direcao_paralela
     prime = next(r for r in rastros if r.config.ema920_prime_ativo)
     assert prime.somente_sombra
     assert prime.config.timeframe_segundos == 300
@@ -113,6 +120,22 @@ def test_banco_guarda_mesmo_sinal_por_setup_e_timeframe(tmp_path):
     with registro._sessao() as db:
         total = db.execute("SELECT COUNT(*) FROM decisoes").fetchone()[0]
     assert total == 4
+
+
+def test_sombra_guarda_timeframe_para_comparar_m5_e_m15(tmp_path):
+    registro = RegistroSQLite(tmp_path / "sombras.sqlite3")
+    candle = pd.Timestamp("2026-09-01 12:00:00")
+    for timeframe in (300, 900):
+        registro.registrar_simulacao_bloqueada(
+            "EURUSD", "call", "ema920_pullback", candle, 1.1, 0.85,
+            "validacao", timeframe=timeframe,
+        )
+
+    with registro._sessao() as db:
+        linhas = db.execute(
+            "SELECT timeframe FROM simulacoes ORDER BY timeframe"
+        ).fetchall()
+    assert linhas == [(300,), (900,)]
 
 
 def test_decisoes_grafico_mostra_setup_e_timeframe(tmp_path):

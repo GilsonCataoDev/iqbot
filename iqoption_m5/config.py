@@ -951,13 +951,27 @@ def configuracao_ema_laboratorio_practice(base: Configuracao | None = None) -> C
     """Base do laboratório EMA: uma conexão IQ, M5 e M15, banco compartilhado."""
     return replace(
         configuracao_ema921_rsi_intravela_m5_practice(base),
+        # Amostra normal ampla para comparar ativos no mesmo operacional.
+        # Os candidatos novos ficam em sombra: seus sinais e resultados são
+        # gravados, mas não aumentam a exposição da conta PRACTICE antes da
+        # comparação estatística apontar os dois melhores.
+        ativos=(
+            "EURUSD", "AUDCAD", "NZDUSD",
+            "GBPUSD", "USDJPY", "AUDUSD", "USDCAD", "EURJPY",
+        ),
         # O laboratório tem banco próprio e mede todas as estratégias. Não pode
         # herdar o piso R$30 do antigo teste M1, que pararia uma campanha nova.
         piso_banca=0.0,
-        # NZDUSD teve desempenho prático inferior aos demais pares. Continua
-        # gerando sinais para medição, mas não recebe novas ordens enquanto a
-        # campanha EMA9/20 M5 não confirmar uma vantagem própria para ele.
-        ativos_somente_sombra=("NZDUSD",),
+        # NZDUSD teve desempenho prático inferior. Os demais candidatos
+        # também começam em sombra para permitir uma escolha justa e segura
+        # dos dois melhores pares no fim da campanha.
+        ativos_somente_sombra=(
+            "NZDUSD", "GBPUSD", "USDJPY", "AUDUSD", "USDCAD", "EURJPY",
+        ),
+        # O M5 e M15 compartilham a mesma conta. Reserva global impede duas
+        # ordens do mesmo ativo (ou duas na mesma direção) em timeframes
+        # diferentes ao mesmo tempo.
+        bloquear_direcao_paralela=True,
         sufixo_banco="ema_laboratorio_practice",
         porta_grafico=8785,
     )

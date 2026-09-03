@@ -20,7 +20,7 @@ from .modelos import (
     SnapshotMercado,
 )
 
-VERSAO_SCHEMA = 3
+VERSAO_SCHEMA = 4
 
 
 class RegistroSQLite:
@@ -109,12 +109,13 @@ class RegistroSQLite:
                     ativo TEXT NOT NULL,
                     direcao TEXT NOT NULL,
                     setup TEXT NOT NULL,
+                    timeframe INTEGER NOT NULL DEFAULT 0,
                     candle_hora TEXT NOT NULL,
                     preco_entrada REAL NOT NULL,
                     payout REAL NOT NULL,
                     resultado TEXT,
                     criado_em TEXT NOT NULL,
-                    UNIQUE(ativo, candle_hora, direcao, setup)
+                    UNIQUE(ativo, candle_hora, direcao, timeframe, setup)
                 );
 
                 CREATE TABLE IF NOT EXISTS slippage (
@@ -245,6 +246,42 @@ class RegistroSQLite:
             colunas_simulacoes = {
                 linha[1] for linha in db.execute("PRAGMA table_info(simulacoes)").fetchall()
             }
+            if "timeframe" not in colunas_simulacoes:
+                # A chave antiga misturava M5 e M15 quando ambos geravam o
+                # mesmo sinal. Migra sem perder histórico; o passado fica em
+                # timeframe=0 (origem não recuperável), e a nova campanha
+                # passa a separar os dois horizontes corretamente.
+                motivo_origem = "motivo" if "motivo" in colunas_simulacoes else "'nao_bloqueado'"
+                db.executescript(
+                    f"""
+                    CREATE TABLE simulacoes_nova (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        ativo TEXT NOT NULL,
+                        direcao TEXT NOT NULL,
+                        setup TEXT NOT NULL,
+                        timeframe INTEGER NOT NULL DEFAULT 0,
+                        candle_hora TEXT NOT NULL,
+                        preco_entrada REAL NOT NULL,
+                        payout REAL NOT NULL,
+                        resultado TEXT,
+                        criado_em TEXT NOT NULL,
+                        motivo TEXT NOT NULL DEFAULT 'nao_bloqueado',
+                        UNIQUE(ativo, candle_hora, direcao, timeframe, setup)
+                    );
+                    INSERT INTO simulacoes_nova (
+                        id, ativo, direcao, setup, timeframe, candle_hora,
+                        preco_entrada, payout, resultado, criado_em, motivo
+                    )
+                    SELECT id, ativo, direcao, setup, 0, candle_hora,
+                           preco_entrada, payout, resultado, criado_em, {motivo_origem}
+                    FROM simulacoes;
+                    DROP TABLE simulacoes;
+                    ALTER TABLE simulacoes_nova RENAME TO simulacoes;
+                    CREATE INDEX idx_simulacoes_setup_data
+                        ON simulacoes(setup, candle_hora);
+                    """
+                )
+                colunas_simulacoes.add("timeframe")
             if "motivo" not in colunas_simulacoes:
                 # Shadow logging: por que o sinal NAO virou ordem real.
                 db.execute(
@@ -739,7 +776,7 @@ class RegistroSQLite:
 
     def registrar_simulacao(
         self, ativo: str, direcao: str, setup: str, candle_hora, preco_entrada: float,
-        payout: float, resultado: str | None,
+        payout: float, resultado: str | None, timeframe: int | None = None,
     ) -> None:
         """Guarda o resultado de um sinal que NAO virou ordem real — pra
         medir winrate de pullback/bollinger sem arriscar dinheiro. Tabela
@@ -749,16 +786,19 @@ class RegistroSQLite:
             db.execute(
                 """
                 INSERT OR IGNORE INTO simulacoes
-                (ativo, direcao, setup, candle_hora, preco_entrada, payout, resultado, criado_em)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                (ativo, direcao, setup, timeframe, candle_hora, preco_entrada, payout, resultado, criado_em)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
-                (ativo, direcao, setup, str(candle_hora), preco_entrada, payout, resultado,
-                 datetime.now().isoformat()),
+                (
+                    ativo, direcao, setup,
+                    int(timeframe if timeframe is not None else (self.config.timeframe_segundos if self.config else 0)),
+                    str(candle_hora), preco_entrada, payout, resultado, datetime.now().isoformat(),
+                ),
             )
 
     def registrar_simulacao_bloqueada(
         self, ativo: str, direcao: str, setup: str, candle_hora,
-        preco_entrada: float, payout: float, motivo: str,
+        preco_entrada: float, payout: float, motivo: str, timeframe: int | None = None,
     ) -> None:
         """Shadow logging: registra um sinal que foi BLOQUEADO por algum filtro.
 
@@ -770,17 +810,20 @@ class RegistroSQLite:
             db.execute(
                 """
                 INSERT OR IGNORE INTO simulacoes
-                (ativo, direcao, setup, candle_hora, preco_entrada, payout,
+                (ativo, direcao, setup, timeframe, candle_hora, preco_entrada, payout,
                  resultado, criado_em, motivo)
-                VALUES (?, ?, ?, ?, ?, ?, NULL, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, NULL, ?, ?)
                 """,
-                (ativo, direcao, setup, str(candle_hora), preco_entrada,
-                 payout, datetime.now().isoformat(), motivo),
+                (
+                    ativo, direcao, setup,
+                    int(timeframe if timeframe is not None else (self.config.timeframe_segundos if self.config else 0)),
+                    str(candle_hora), preco_entrada, payout, datetime.now().isoformat(), motivo,
+                ),
             )
 
     def simulacoes_pendentes(self, ativo: str | None = None) -> list[dict]:
         """Sinais em shadow ainda sem desfecho apurado."""
-        sql = ("SELECT id, ativo, direcao, setup, candle_hora, preco_entrada, motivo "
+        sql = ("SELECT id, ativo, direcao, setup, timeframe, candle_hora, preco_entrada, motivo "
                "FROM simulacoes WHERE resultado IS NULL")
         args: tuple = ()
         if ativo:
@@ -789,7 +832,7 @@ class RegistroSQLite:
         sql += " ORDER BY candle_hora"
         with self._lock, self._sessao() as db:
             linhas = db.execute(sql, args).fetchall()
-        campos = ["id", "ativo", "direcao", "setup", "candle_hora", "preco_entrada", "motivo"]
+        campos = ["id", "ativo", "direcao", "setup", "timeframe", "candle_hora", "preco_entrada", "motivo"]
         return [dict(zip(campos, l)) for l in linhas]
 
     def resolver_simulacao(self, id_sim: int, resultado: str) -> None:
