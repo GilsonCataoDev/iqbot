@@ -1137,6 +1137,37 @@ class RegistroSQLite:
                 ),
             )
 
+    def precisao_ia(self, janela_segundos: int = 600) -> dict:
+        """Win-rate por veredicto Groq cruzando opinioes_groq com operacoes.
+
+        Busca operações finalizadas no mesmo ativo dentro de `janela_segundos`
+        após a opinião ser emitida. Retorna dict {veredicto: {n, wins, winrate}}.
+        """
+        with self._lock, self._sessao() as db:
+            rows = db.execute(
+                """
+                SELECT og.veredicto,
+                       COUNT(*) AS n,
+                       SUM(CASE WHEN op.resultado_bruto = 'win' THEN 1 ELSE 0 END) AS wins
+                FROM opinioes_groq og
+                JOIN operacoes op ON og.ativo = op.ativo
+                    AND op.enviada_em >= og.criado_em
+                    AND op.enviada_em < datetime(og.criado_em, '+' || :jan || ' seconds')
+                    AND op.resultado_bruto IN ('win', 'loss')
+                GROUP BY og.veredicto
+                """,
+                {"jan": janela_segundos},
+            ).fetchall()
+        resultado: dict = {}
+        for row in rows:
+            n, wins = row["n"], row["wins"]
+            resultado[row["veredicto"]] = {
+                "n": n,
+                "wins": wins,
+                "winrate": round(wins / n * 100, 1) if n else 0.0,
+            }
+        return resultado
+
     def stats_globais(self) -> dict:
         """Entradas e winrate do dia atual, separados por OTC e mercado normal.
 

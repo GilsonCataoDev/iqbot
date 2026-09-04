@@ -380,10 +380,12 @@ class GraficoM5:
             stats = registro.stats_globais()
             entradas = registro.entradas_hoje_detalhadas()
             atraso = registro.analise_atraso_por_setup()
+            precisao_ia = registro.precisao_ia()
         except Exception as erro:
             print(f"[grafico] semear_historico falhou: {erro}")
             return
-        dados = {"statsGlobais": stats, "entradasDetalhadas": entradas, "analiseAtraso": atraso}
+        dados = {"statsGlobais": stats, "entradasDetalhadas": entradas,
+                 "analiseAtraso": atraso, "precisaoIA": precisao_ia}
         self._json_atomico(self.pasta_dados / "historico_hoje.json", dados)
 
         # Snapshot datado de hoje (pode ser parcial — atualizado a cada startup)

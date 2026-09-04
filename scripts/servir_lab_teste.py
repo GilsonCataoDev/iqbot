@@ -249,6 +249,11 @@ def _ativo_json(preco_base: float, tf: int, tendencia: str, tem_sinal: bool,
                 },
             },
         },
+        "precisaoIA": {
+            "ACEITAR":  {"n": 14, "wins": 10, "winrate": 71.4},
+            "REJEITAR": {"n":  8, "wins":  2, "winrate": 25.0},
+            "INCERTO":  {"n":  6, "wins":  3, "winrate": 50.0},
+        },
         "desempenhoSimuladoPorSetup": {
             "ema920_pullback": {
                 300: {
@@ -334,6 +339,25 @@ _snapshot_ontem = {
 }
 (PASTA_FONTE / f"historico_{_ontem}.json").write_text(
     json.dumps(_snapshot_ontem, ensure_ascii=False, default=str), encoding="utf-8")
+
+# historico_hoje.json — fonte de precisaoIA e entradas para carregarHistoricoHoje()
+_hoje = _datetime.date.today().isoformat()
+_historico_hoje = {
+    "data": _hoje,
+    "entradasDetalhadas": [],
+    "statsGlobais": {
+        "normal": {"entradas": 9, "wins": 6, "lucro": 4.50, "finalizadas": 9},
+        "otc": {"entradas": 2, "wins": 2, "lucro": 1.70, "finalizadas": 2},
+    },
+    "analiseAtraso": {},
+    "precisaoIA": {
+        "ACEITAR":  {"n": 14, "wins": 10, "winrate": 71.4},
+        "REJEITAR": {"n":  8, "wins":  2, "winrate": 25.0},
+        "INCERTO":  {"n":  6, "wins":  3, "winrate": 50.0},
+    },
+}
+(PASTA_FONTE / "historico_hoje.json").write_text(
+    json.dumps(_historico_hoje, ensure_ascii=False, default=str), encoding="utf-8")
 
 print(f"Arquivos gerados em {PASTA_FONTE}")
 
