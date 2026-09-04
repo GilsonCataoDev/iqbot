@@ -182,16 +182,48 @@ def _ativo_json(preco_base: float, tf: int, tendencia: str, tem_sinal: bool,
             {"preco": round(preco_base - 0.004, 5), "tipo": "suporte"},
         ],
         "desempenhoPorSetup": {
-            "pullback": {
-                "total": wins + losses,
-                "winrate": round(wins / (wins + losses) * 100, 1) if wins + losses > 0 else None,
-                "lucro": round(lucro, 2),
+            "ema920_pullback": {
+                300: {
+                    "total": wins + losses, "vitorias": wins,
+                    "winrate": round(wins / (wins + losses) * 100, 1) if wins + losses > 0 else None,
+                    "lucro": round(lucro, 2),
+                    "ic_95": [44.9, 82.1] if wins + losses >= 5 else None,
+                    "amostra_suficiente": (wins + losses) >= 30,
+                    "maturidade": "INSUFICIENTE" if (wins + losses) < 30 else "OBSERVAR",
+                    "ev": round(lucro / (wins + losses), 3) if wins + losses > 0 else None,
+                },
+                900: {
+                    "total": 6, "vitorias": 3,
+                    "winrate": 50.0, "lucro": -0.9,
+                    "ic_95": [15.3, 84.7], "amostra_suficiente": False,
+                    "maturidade": "INSUFICIENTE", "ev": -0.150,
+                },
             },
-            "pullback_confluencia": {
-                "total": 8, "winrate": 50.0, "lucro": -0.4,
+            "ema921_rsi": {
+                300: {
+                    "total": 35, "vitorias": 22,
+                    "winrate": 62.9, "lucro": 3.25,
+                    "ic_95": [45.1, 77.7], "amostra_suficiente": True,
+                    "maturidade": "OBSERVAR", "ev": 0.093,
+                },
             },
-            "sr_rejeicao": {
-                "total": 5, "winrate": 60.0, "lucro": 1.25,
+        },
+        "desempenhoSimuladoPorSetup": {
+            "ema920_pullback": {
+                300: {
+                    "total": 28, "vitorias": 13,
+                    "winrate": 46.4, "lucro": -2.1,
+                    "ic_95": [27.9, 65.7], "amostra_suficiente": False,
+                    "maturidade": "INSUFICIENTE", "ev": -0.075,
+                },
+            },
+            "ema921_rsi": {
+                300: {
+                    "total": 42, "vitorias": 19,
+                    "winrate": 45.2, "lucro": -3.8,
+                    "ic_95": [30.2, 61.0], "amostra_suficiente": True,
+                    "maturidade": "OBSERVAR", "ev": -0.090,
+                },
             },
         },
     }

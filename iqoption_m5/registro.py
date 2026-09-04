@@ -23,6 +23,26 @@ from .modelos import (
 VERSAO_SCHEMA = 4
 
 
+def _wilson_ci(vitorias: int, n: int, z: float = 1.96) -> tuple[float, float] | None:
+    if n <= 0:
+        return None
+    p = vitorias / n
+    denom = 1.0 + z * z / n
+    center = (p + z * z / (2 * n)) / denom
+    margin = z * (p * (1 - p) / n + z * z / (4 * n * n)) ** 0.5 / denom
+    return (round((center - margin) * 100, 1), round((center + margin) * 100, 1))
+
+
+def _maturidade(n: int) -> str:
+    if n < 30:
+        return "INSUFICIENTE"
+    if n < 100:
+        return "OBSERVAR"
+    if n < 300:
+        return "CANDIDATA"
+    return "APROVADA"
+
+
 class RegistroSQLite:
     """Auditoria local: decisões bloqueadas e operações ficam no mesmo banco."""
 
@@ -871,54 +891,77 @@ class RegistroSQLite:
         return agg
 
     def desempenho_simulado_por_setup(self, limite: int = 500) -> dict[str, dict]:
-        """Winrate por setup dos sinais SIMULADOS (sem dinheiro real) —
-        pullback e bollinger, pra comparar com a reversao_candle real."""
+        """Winrate por setup/timeframe dos sinais SIMULADOS (sem dinheiro real).
+
+        Retorna ``{setup: {timeframe_segundos: {total, vitorias, winrate, lucro,
+        ic_95, maturidade, amostra_suficiente, ev}}}``.
+        """
         with self._lock, self._sessao() as db:
             linhas = db.execute(
                 """
-                SELECT setup, resultado, payout FROM simulacoes
+                SELECT setup, COALESCE(timeframe, 0), resultado, payout
+                FROM simulacoes
                 WHERE resultado IS NOT NULL
                 ORDER BY criado_em DESC LIMIT ?
                 """,
                 (limite,),
             ).fetchall()
         agregado: dict[str, dict] = {}
-        for setup, resultado, payout in linhas:
-            item = agregado.setdefault(setup, {"total": 0, "vitorias": 0, "lucro": 0.0})
+        for setup, timeframe, resultado, payout in linhas:
+            tf_map = agregado.setdefault(setup, {})
+            item = tf_map.setdefault(int(timeframe), {"total": 0, "vitorias": 0, "lucro": 0.0})
             item["total"] += 1
             if resultado == "win":
                 item["vitorias"] += 1
                 item["lucro"] += float(payout)
             elif resultado == "loss":
                 item["lucro"] -= 1.0
-        for item in agregado.values():
-            item["winrate"] = round(100 * item["vitorias"] / item["total"], 1) if item["total"] else None
-            item["lucro"] = round(item["lucro"], 2)
+        for tf_map in agregado.values():
+            for item in tf_map.values():
+                n, w = item["total"], item["vitorias"]
+                item["winrate"] = round(100 * w / n, 1) if n else None
+                item["lucro"] = round(item["lucro"], 2)
+                ic = _wilson_ci(w, n)
+                item["ic_95"] = list(ic) if ic else None
+                item["amostra_suficiente"] = n >= 30
+                item["maturidade"] = _maturidade(n)
+                item["ev"] = round(item["lucro"] / n, 3) if n else None
         return agregado
 
     def desempenho_por_setup(self, limite: int = 500) -> dict[str, dict]:
-        """Winrate agrupado por estrategia (setup), todos os ativos juntos —
-        pra comparar reversao_candle (validada) contra pullback/bollinger
-        (nao validadas) com dinheiro real."""
+        """Winrate por setup/timeframe das operações PRACTICE finalizadas.
+
+        Retorna ``{setup: {timeframe_segundos: {total, vitorias, winrate, lucro,
+        ic_95, maturidade, amostra_suficiente, ev}}}``.
+        """
         with self._lock, self._sessao() as db:
             linhas = db.execute(
                 """
-                SELECT setup, lucro FROM operacoes
-                WHERE status='finalizada' AND lucro IS NOT NULL AND setup != 'correcao_manual'
+                SELECT setup, COALESCE(timeframe, 0), lucro FROM operacoes
+                WHERE status='finalizada' AND lucro IS NOT NULL
+                  AND setup != 'correcao_manual'
                 ORDER BY enviada_em DESC LIMIT ?
                 """,
                 (limite,),
             ).fetchall()
         agregado: dict[str, dict] = {}
-        for setup, lucro in linhas:
-            item = agregado.setdefault(setup, {"total": 0, "vitorias": 0, "lucro": 0.0})
+        for setup, timeframe, lucro in linhas:
+            tf_map = agregado.setdefault(setup, {})
+            item = tf_map.setdefault(int(timeframe), {"total": 0, "vitorias": 0, "lucro": 0.0})
             item["total"] += 1
             item["lucro"] += float(lucro)
             if lucro > 0:
                 item["vitorias"] += 1
-        for item in agregado.values():
-            item["winrate"] = round(100 * item["vitorias"] / item["total"], 1) if item["total"] else None
-            item["lucro"] = round(item["lucro"], 2)
+        for tf_map in agregado.values():
+            for item in tf_map.values():
+                n, w = item["total"], item["vitorias"]
+                item["winrate"] = round(100 * w / n, 1) if n else None
+                item["lucro"] = round(item["lucro"], 2)
+                ic = _wilson_ci(w, n)
+                item["ic_95"] = list(ic) if ic else None
+                item["amostra_suficiente"] = n >= 30
+                item["maturidade"] = _maturidade(n)
+                item["ev"] = round(item["lucro"] / n, 3) if n else None
         return agregado
 
     def resumo_movimentos_unicos(self) -> dict:

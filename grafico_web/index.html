@@ -1456,21 +1456,55 @@ function renderizarPainel(dados) {
       `</div>`;
   }
 
-  // Por setup (card sempre visível)
+  // Por setup (card sempre visível) — PRACTICE vs SOMBRA, por timeframe
   const porSetup = dados.desempenhoPorSetup || {};
-  const NOMES = { pullback:'Pullback', pullback_confluencia:'Pullback+Fib', sr_rejeicao:'SR Rejeição', pin_bar_sr:'Pin Bar SR', engulfing_sr:'Engulfing SR' };
-  const linhasSetup = Object.keys(porSetup).map(k => {
-    const s = porSetup[k];
+  const porSetupSombra = dados.desempenhoSimuladoPorSetup || {};
+  const NOMES_SETUP = {
+    pullback:'Pullback', pullback_confluencia:'Pullback+Fib',
+    sr_rejeicao:'SR Rejeição', pin_bar_sr:'Pin Bar SR', engulfing_sr:'Engulfing SR',
+    ema920_pullback:'EMA 9/20', ema921_rsi:'EMA 9/21 RSI',
+    ema921_rsi_intravela:'EMA 9/21 intra', reversao_bollinger_rsi:'Bollinger RSI',
+    fibo_sr:'Fibo S/R',
+  };
+  const MAT_COR = {
+    INSUFICIENTE:'var(--muted)', OBSERVAR:'var(--yellow)',
+    CANDIDATA:'var(--accent)', APROVADA:'var(--green)',
+  };
+  function _tfLabel(tf) {
+    const m = Math.round(Number(tf) / 60);
+    return m >= 1 ? `M${m}` : `tf${tf}`;
+  }
+  function _linhaSetup(nome, tf, s, modo) {
     const wr = s.winrate ?? 0;
     const cor = s.winrate == null ? 'var(--muted)' : (wr>=60?'var(--green)':(wr>=45?'var(--yellow)':'var(--red)'));
     const corPl = s.lucro >= 0 ? 'var(--green)' : 'var(--red)';
+    const mat = s.maturidade || 'INSUFICIENTE';
+    const matCor = MAT_COR[mat] || 'var(--muted)';
+    const insuf = !s.amostra_suficiente ? ' ⚠' : '';
+    const ic = s.ic_95 ? `IC95% [${s.ic_95[0]}–${s.ic_95[1]}%]` : '';
+    const ev = s.ev != null ? ` · EV ${s.ev >= 0 ? '+' : ''}${s.ev.toFixed(3)}u` : '';
+    const sombraBadge = modo === 'sombra'
+      ? `<span style="color:var(--yellow);font-size:8px;margin-left:3px">SOMBRA</span>` : '';
     return `<div class="setup-row">` +
-      `<span class="setup-row-label">${escapar(NOMES[k]||k)}<br><span style="color:var(--muted);font-size:9px">${s.total}op</span></span>` +
+      `<span class="setup-row-label">${escapar(nome)} ${_tfLabel(tf)}${sombraBadge}<br>` +
+      `<span style="color:${matCor};font-size:9px">${mat}${insuf} · ${s.total}op</span></span>` +
       `<div class="setup-row-bar-wrap"><div class="setup-row-bar" style="width:${wr}%;background:${cor}"></div></div>` +
       `<span class="setup-row-wr" style="color:${cor}">${s.winrate!=null?wr+'%':'?'}</span>` +
       `<span class="setup-row-pl" style="color:${corPl}">${s.lucro>=0?'+':''}${s.lucro.toFixed(1)}</span>` +
-      `</div>`;
-  }).join('');
+      `</div>` +
+      (ic ? `<div style="color:var(--muted);font-size:9px;padding:0 4px 4px 8px">${ic}${ev}</div>` : '');
+  }
+  const todasSetups = [...new Set([...Object.keys(porSetup), ...Object.keys(porSetupSombra)])];
+  const linhasSetup = todasSetups.flatMap(k => {
+    const nome = NOMES_SETUP[k] || k;
+    const pratica = porSetup[k] || {};
+    const sombra = porSetupSombra[k] || {};
+    const tfs = [...new Set([...Object.keys(pratica), ...Object.keys(sombra)])].map(Number).sort();
+    return tfs.flatMap(tf => [
+      pratica[tf] ? _linhaSetup(nome, tf, pratica[tf], 'pratica') : '',
+      sombra[tf]  ? _linhaSetup(nome, tf, sombra[tf],  'sombra')  : '',
+    ]);
+  }).filter(Boolean).join('');
   document.getElementById('setup-corpo').innerHTML = linhasSetup || '<p style="color:var(--muted)">Sem dados.</p>';
 
   // Funil
