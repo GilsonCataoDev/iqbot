@@ -550,6 +550,72 @@ if (modoLab) {
   document.getElementById('cartao-dados').style.display = '';
   mudarVisaoLab(visaoLab);
 }
+// ── Dossiê de entrada ────────────────────────────────────────────────────
+function renderEntradaDetalhada(e) {
+  const dCls = e.direcao==='call'?'entrada-dir-call':'entrada-dir-put';
+  const dLbl = e.direcao==='call'?'▲':'▼';
+  let sCls, sStr;
+  if (e.status==='aberta')                    { sCls='entrada-status-aberta';  sStr='⏳'; }
+  else if (e.lucro!=null && e.lucro>0)        { sCls='entrada-status-ganho';   sStr=`✓+${e.lucro.toFixed(2)}`; }
+  else if (e.lucro!=null && e.lucro<0)        { sCls='entrada-status-perda';   sStr=`✗${e.lucro.toFixed(2)}`; }
+  else if (e.lucro===0)                       { sCls='entrada-status-outro';   sStr='='; }
+  else                                        { sCls='entrada-status-outro';   sStr=escapar(e.status); }
+  const tf = e.timeframe ? `M${Math.max(1, Math.round(e.timeframe/60))}` : '?';
+  const exp = e.expiracao_minutos ? `${e.expiracao_minutos}min` : '?';
+  const criterios = (e.criterios||[]).map(c=>`<span class="entrada-criterio">${escapar(c)}</span>`).join('') || 'Sem critérios auditados.';
+  const comp = e.comparaveis || {};
+  const leitura = e.leituraM5 || {};
+  const leituraBadge = leitura.modo === 'sombra'
+    ? `<span class="${leitura.qualificada ? 'entrada-qualificada' : 'entrada-estudo'}">${leitura.qualificada ? 'M5 QUAL.' : 'M5 ESTUDO'}</span>`
+    : '';
+  const leituraNota = leitura.observacao ? `<div>${escapar(leitura.observacao)}</div>` : '';
+  const similares = comp.amostra
+    ? `Casos parecidos: ${comp.wins}W/${comp.losses}L · ${comp.winrate}% (${comp.amostra} casos)`
+    : 'Casos parecidos: ainda sem amostra auditada suficiente.';
+  const seq = e.sequencia || {};
+  let seqHtml = '';
+  if (seq.enviada_em) {
+    const atrasoStr = seq.atraso_ms ? `<span class="seq-arrow seq-atraso">+${seq.atraso_ms}ms</span>` : '<span class="seq-arrow">→</span>';
+    const resultLabel = e.lucro != null && e.lucro > 0 ? '✓WIN' : e.lucro != null && e.lucro < 0 ? '✗LOSS' : e.status === 'aberta' ? '⏳' : '?';
+    seqHtml = `<div class="seq-bar">` +
+      (seq.decisao_em ? `<span class="seq-step">📋 ${escapar(seq.decisao_em)}</span><span class="seq-arrow">→</span>` : '') +
+      atrasoStr +
+      `<span class="seq-step">📤 ${escapar(seq.enviada_em)}</span>` +
+      `<span class="seq-arrow">→</span>` +
+      (seq.vencimento_em ? `<span class="seq-step">⏱ ${escapar(seq.vencimento_em)}</span>` : '') +
+      `<span class="seq-arrow">→</span>` +
+      `<span class="seq-step">${resultLabel}</span>` +
+      `</div>`;
+  }
+  const ind = e.indicadores || {};
+  const indChips = [
+    ind.ema9 != null      ? `EMA9 ${Number(ind.ema9).toFixed(4)}`            : null,
+    ind.ema_longa != null ? `EMAl ${Number(ind.ema_longa).toFixed(4)}`       : null,
+    ind.rsi != null       ? `RSI ${Number(ind.rsi).toFixed(1)}`              : null,
+    ind.atr != null       ? `ATR ${Number(ind.atr).toFixed(5)}`              : null,
+    ind.corpo_pct != null ? `Corpo ${ind.corpo_pct}%`                        : null,
+    ind.tendencia         ? `Tend. ${escapar(ind.tendencia)}`                : null,
+    ind.candle_tipo       ? `${escapar(ind.candle_tipo)}`                    : null,
+  ].filter(Boolean).map(s=>`<span class="ind-chip">${s}</span>`).join('');
+  const indHtml = indChips ? `<div class="ind-bloco">${indChips}</div>` : '';
+  const chave = chaveEntrada(e);
+  const aberto = entradasAbertas.has(chave) ? ' open' : '';
+  return `<div class="entrada-item"><div class="entrada-cabecalho">` +
+    `<span class="entrada-hora">${escapar(e.hora)}</span>` +
+    `<span class="entrada-ativo">${escapar(e.ativo)}</span>` +
+    `<span class="${dCls}">${dLbl}</span>` +
+    `<span class="entrada-setup">${escapar(e.setup)}</span>` +
+    leituraBadge +
+    `<span class="${sCls}">${sStr}</span></div>` +
+    `<details class="entrada-auditoria" data-chave="${escapar(chave)}"${aberto}><summary>ver leitura</summary>` +
+    `<div>${tf} · exp. ${exp}${e.preco_entrada!=null ? ` · @ ${Number(e.preco_entrada).toFixed(5)}` : ''}</div>` +
+    seqHtml +
+    `<div class="entrada-diagnostico">${escapar(e.diagnostico||'')}</div>` +
+    leituraNota +
+    indHtml +
+    `<div>${escapar(similares)}</div>` +
+    `<div>${criterios}</div></details></div>`;
+}
 // ── Navegação de data nas entradas ───────────────────────────────────────
 function _dataISO(d) {
   return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`;
@@ -1440,74 +1506,6 @@ function renderizarPainel(dados) {
       chips.push(`<span class="pl-chip">Mov. únicos ${mov.vitorias}/${mov.finalizados} · ${wrMov}${extra}</span>`);
     }
     plChips.innerHTML = chips.join('');
-  }
-
-  function renderEntradaDetalhada(e) {
-    const dCls = e.direcao==='call'?'entrada-dir-call':'entrada-dir-put';
-    const dLbl = e.direcao==='call'?'▲':'▼';
-    let sCls, sStr;
-    if (e.status==='aberta')                    { sCls='entrada-status-aberta';  sStr='⏳'; }
-    else if (e.lucro!=null && e.lucro>0)        { sCls='entrada-status-ganho';   sStr=`✓+${e.lucro.toFixed(2)}`; }
-    else if (e.lucro!=null && e.lucro<0)        { sCls='entrada-status-perda';   sStr=`✗${e.lucro.toFixed(2)}`; }
-    else if (e.lucro===0)                       { sCls='entrada-status-outro';   sStr='='; }
-    else                                        { sCls='entrada-status-outro';   sStr=escapar(e.status); }
-    const tf = e.timeframe ? `M${Math.max(1, Math.round(e.timeframe/60))}` : '?';
-    const exp = e.expiracao_minutos ? `${e.expiracao_minutos}min` : '?';
-    const criterios = (e.criterios||[]).map(c=>`<span class="entrada-criterio">${escapar(c)}</span>`).join('') || 'Sem critérios auditados.';
-    const comp = e.comparaveis || {};
-    const leitura = e.leituraM5 || {};
-    const leituraBadge = leitura.modo === 'sombra'
-      ? `<span class="${leitura.qualificada ? 'entrada-qualificada' : 'entrada-estudo'}">${leitura.qualificada ? 'M5 QUAL.' : 'M5 ESTUDO'}</span>`
-      : '';
-    const leituraNota = leitura.observacao ? `<div>${escapar(leitura.observacao)}</div>` : '';
-    const similares = comp.amostra
-      ? `Casos parecidos: ${comp.wins}W/${comp.losses}L · ${comp.winrate}% (${comp.amostra} casos)`
-      : 'Casos parecidos: ainda sem amostra auditada suficiente.';
-    // Timeline de sequência
-    const seq = e.sequencia || {};
-    let seqHtml = '';
-    if (seq.enviada_em) {
-      const atrasoStr = seq.atraso_ms ? `<span class="seq-arrow seq-atraso">+${seq.atraso_ms}ms</span>` : '<span class="seq-arrow">→</span>';
-      const resultLabel = e.lucro != null && e.lucro > 0 ? '✓WIN' : e.lucro != null && e.lucro < 0 ? '✗LOSS' : e.status === 'aberta' ? '⏳' : '?';
-      seqHtml = `<div class="seq-bar">` +
-        (seq.decisao_em ? `<span class="seq-step">📋 ${escapar(seq.decisao_em)}</span><span class="seq-arrow">→</span>` : '') +
-        atrasoStr +
-        `<span class="seq-step">📤 ${escapar(seq.enviada_em)}</span>` +
-        `<span class="seq-arrow">→</span>` +
-        (seq.vencimento_em ? `<span class="seq-step">⏱ ${escapar(seq.vencimento_em)}</span>` : '') +
-        `<span class="seq-arrow">→</span>` +
-        `<span class="seq-step">${resultLabel}</span>` +
-        `</div>`;
-    }
-    // Chips de indicadores
-    const ind = e.indicadores || {};
-    const indChips = [
-      ind.ema9 != null      ? `EMA9 ${Number(ind.ema9).toFixed(4)}`            : null,
-      ind.ema_longa != null ? `EMAl ${Number(ind.ema_longa).toFixed(4)}`       : null,
-      ind.rsi != null       ? `RSI ${Number(ind.rsi).toFixed(1)}`              : null,
-      ind.atr != null       ? `ATR ${Number(ind.atr).toFixed(5)}`              : null,
-      ind.corpo_pct != null ? `Corpo ${ind.corpo_pct}%`                        : null,
-      ind.tendencia         ? `Tend. ${escapar(ind.tendencia)}`                : null,
-      ind.candle_tipo       ? `${escapar(ind.candle_tipo)}`                    : null,
-    ].filter(Boolean).map(s=>`<span class="ind-chip">${s}</span>`).join('');
-    const indHtml = indChips ? `<div class="ind-bloco">${indChips}</div>` : '';
-    const chave = chaveEntrada(e);
-    const aberto = entradasAbertas.has(chave) ? ' open' : '';
-    return `<div class="entrada-item"><div class="entrada-cabecalho">` +
-      `<span class="entrada-hora">${escapar(e.hora)}</span>` +
-      `<span class="entrada-ativo">${escapar(e.ativo)}</span>` +
-      `<span class="${dCls}">${dLbl}</span>` +
-      `<span class="entrada-setup">${escapar(e.setup)}</span>` +
-      leituraBadge +
-      `<span class="${sCls}">${sStr}</span></div>` +
-      `<details class="entrada-auditoria" data-chave="${escapar(chave)}"${aberto}><summary>ver leitura</summary>` +
-      `<div>${tf} · exp. ${exp}${e.preco_entrada!=null ? ` · @ ${Number(e.preco_entrada).toFixed(5)}` : ''}</div>` +
-      seqHtml +
-      `<div class="entrada-diagnostico">${escapar(e.diagnostico||'')}</div>` +
-      leituraNota +
-      indHtml +
-      `<div>${escapar(similares)}</div>` +
-      `<div>${criterios}</div></details></div>`;
   }
 
   // Entradas detalhadas
