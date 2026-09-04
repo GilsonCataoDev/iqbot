@@ -103,12 +103,19 @@ def _ativo_json(preco_base: float, tf: int, tendencia: str, tem_sinal: bool,
     for i, t in enumerate(horas):
         ganhou = i < wins
         exp_min = tf // 60 * 5
+        atraso_ms = 320 + i * 50
+        # Timestamps mock em BRT (HH:MM:SS)
+        decisao_ts = time.localtime(t - atraso_ms // 1000 - 1)
+        enviada_ts = time.localtime(t)
+        vencimento_ts = time.localtime(t + exp_min * 60)
+        ema9_v  = round(preco_base + 0.0002 * math.sin(i * 0.5), 5)
+        ema21_v = round(preco_base - 0.0001 * math.sin(i * 0.3), 5)
         entradas_detalhadas.append({
-            "hora": f"{time.strftime('%H:%M', time.localtime(t))} BRT",
+            "hora": time.strftime("%H:%M", enviada_ts),
             "ativo": "EURUSD",
             "direcao": "call" if ganhou else "put",
-            "setup": "EMA 9/21 RSI",
-            "preco_entrada": preco_base + 0.0001 * i,
+            "setup": "ema921_rsi",
+            "preco_entrada": round(preco_base + 0.0001 * i, 5),
             "expiracao_minutos": exp_min,
             "status": "fechada",
             "lucro": 0.85 if ganhou else -1.0,
@@ -122,6 +129,21 @@ def _ativo_json(preco_base: float, tf: int, tendencia: str, tem_sinal: bool,
                              "losses": losses, "winrate": round(wins / (wins + losses) * 100, 1)},
             "leituraM5": {"modo": "sombra", "qualificada": ganhou,
                            "observacao": "Entrada no retorno da EMA 9 após cruzamento confirmado."},
+            "sequencia": {
+                "decisao_em": time.strftime("%H:%M:%S", decisao_ts),
+                "enviada_em": time.strftime("%H:%M:%S", enviada_ts),
+                "vencimento_em": time.strftime("%H:%M:%S", vencimento_ts),
+                "atraso_ms": atraso_ms,
+            },
+            "indicadores": {
+                "ema9": ema9_v,
+                "ema_longa": ema21_v,
+                "rsi": round(55 + 15 * math.sin(i * 0.7), 1),
+                "atr": round(0.00045 + 0.00005 * (i % 3), 5),
+                "corpo_pct": 60 + (i % 4) * 5,
+                "tendencia": "alta" if ganhou else "baixa",
+                "candle_tipo": "engulf" if i % 3 == 0 else "pin_bar" if i % 3 == 1 else "marubozu",
+            },
         })
 
     alerta = {

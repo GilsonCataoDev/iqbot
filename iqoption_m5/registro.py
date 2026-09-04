@@ -1193,7 +1193,7 @@ class RegistroSQLite:
                 ts = _dt.fromisoformat(reg_em).timestamp()
             except Exception:
                 continue
-            dec_idx.setdefault((ativo, direcao, setup, int(timeframe or 0)), []).append((ts, det_json))
+            dec_idx.setdefault((ativo, direcao, setup, int(timeframe or 0)), []).append((ts, reg_em, det_json))
 
         historico_idx: dict[tuple, list[dict]] = {}
         for ordem, ativo, direcao, setup, timeframe, lucro_hist, detalhes_json in historico_auditavel:
@@ -1218,14 +1218,16 @@ class RegistroSQLite:
 
             # Busca decisão mais próxima (≤10 s)
             detalhes: dict = {}
+            decisao_reg_em: str | None = None
             if ts_op is not None:
                 candidatos = dec_idx.get((ativo, direcao, setup, int(timeframe or 0)), [])
                 melhor = min(
                     candidatos, key=lambda x: abs(x[0] - ts_op), default=None
                 )
                 if melhor and abs(melhor[0] - ts_op) <= 10:
+                    decisao_reg_em = melhor[1]
                     try:
-                        detalhes = _json.loads(melhor[1]) if melhor[1] else {}
+                        detalhes = _json.loads(melhor[2]) if melhor[2] else {}
                     except Exception:
                         detalhes = {}
 
@@ -1287,6 +1289,39 @@ class RegistroSQLite:
             else:
                 diagnostico = "RESULTADO PENDENTE — a IQ ainda não devolveu um desfecho confiável."
 
+            # ── Sequência de timestamps (UTC → BRT = UTC-3) ──────────────────
+            from datetime import timedelta as _td
+            _BRT = _td(hours=-3)
+            try:
+                dt_env = _dt.fromisoformat(enviada_em)
+                enviada_brt = (dt_env + _BRT).strftime("%H:%M:%S")
+                vencimento_brt = (dt_env + _BRT + _td(minutes=int(expiracao or 0))).strftime("%H:%M:%S")
+            except Exception:
+                enviada_brt = vencimento_brt = None
+            try:
+                decisao_brt = (_dt.fromisoformat(decisao_reg_em) + _BRT).strftime("%H:%M:%S") if decisao_reg_em else None
+            except Exception:
+                decisao_brt = None
+
+            sequencia = {
+                "decisao_em": decisao_brt,
+                "enviada_em": enviada_brt,
+                "vencimento_em": vencimento_brt,
+                "atraso_ms": int(atraso_envio_ms or 0),
+            }
+
+            # ── Snapshot de indicadores ───────────────────────────────────────
+            corpo_ratio = detalhes.get("corpo_ratio")
+            indicadores = {
+                "ema9": detalhes.get("ema9"),
+                "ema_longa": detalhes.get("ema20") or detalhes.get("ema21"),
+                "rsi": detalhes.get("rsi14"),
+                "atr": detalhes.get("atr"),
+                "corpo_pct": round(float(corpo_ratio) * 100) if corpo_ratio is not None else None,
+                "tendencia": detalhes.get("tendencia_macro"),
+                "candle_tipo": detalhes.get("tipo_candle") or detalhes.get("tipo"),
+            }
+
             resultado.append({
                 "hora": enviada_em[11:16],          # "HH:MM"
                 "ativo": ativo,
@@ -1302,6 +1337,8 @@ class RegistroSQLite:
                 "diagnostico": diagnostico,
                 "comparaveis": comparaveis,
                 "leituraM5": leitura_m5,
+                "sequencia": sequencia,
+                "indicadores": indicadores,
             })
 
         return resultado

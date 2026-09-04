@@ -275,6 +275,12 @@
   .entrada-auditoria summary { cursor: pointer; color: var(--accent); }
   .entrada-diagnostico { margin: 5px 0 3px; color: #d9e2f3; }
   .entrada-criterio { display: inline-block; margin: 2px 3px 0 0; padding: 1px 4px; border: 1px solid #33415d; border-radius: 4px; }
+  .seq-bar { display: flex; flex-wrap: wrap; align-items: center; gap: 3px; margin: 5px 0; }
+  .seq-step { padding: 1px 5px; border-radius: 4px; background: #1e2d45; border: 1px solid #33415d; font-variant-numeric: tabular-nums; }
+  .seq-arrow { color: var(--muted); font-size: 9px; }
+  .seq-atraso { color: var(--yellow); }
+  .ind-bloco { display: flex; flex-wrap: wrap; gap: 3px; margin: 4px 0; }
+  .ind-chip { padding: 1px 5px; border-radius: 4px; background: #141d2b; border: 1px solid #2a3a55; font-size: 9px; color: #8ea8cc; }
   .entrada-hora { color: var(--muted); font-variant-numeric: tabular-nums; min-width: 34px; font-size: 10px; }
   .entrada-ativo { font-weight: 600; font-size: 11px; }
   .entrada-dir-call { color: var(--green); font-weight: 700; font-size: 10px; }
@@ -1393,6 +1399,34 @@ function renderizarPainel(dados) {
     const similares = comp.amostra
       ? `Casos parecidos: ${comp.wins}W/${comp.losses}L · ${comp.winrate}% (${comp.amostra} casos)`
       : 'Casos parecidos: ainda sem amostra auditada suficiente.';
+    // Timeline de sequência
+    const seq = e.sequencia || {};
+    let seqHtml = '';
+    if (seq.enviada_em) {
+      const atrasoStr = seq.atraso_ms ? `<span class="seq-arrow seq-atraso">+${seq.atraso_ms}ms</span>` : '<span class="seq-arrow">→</span>';
+      const resultLabel = e.lucro != null && e.lucro > 0 ? '✓WIN' : e.lucro != null && e.lucro < 0 ? '✗LOSS' : e.status === 'aberta' ? '⏳' : '?';
+      seqHtml = `<div class="seq-bar">` +
+        (seq.decisao_em ? `<span class="seq-step">📋 ${escapar(seq.decisao_em)}</span><span class="seq-arrow">→</span>` : '') +
+        atrasoStr +
+        `<span class="seq-step">📤 ${escapar(seq.enviada_em)}</span>` +
+        `<span class="seq-arrow">→</span>` +
+        (seq.vencimento_em ? `<span class="seq-step">⏱ ${escapar(seq.vencimento_em)}</span>` : '') +
+        `<span class="seq-arrow">→</span>` +
+        `<span class="seq-step">${resultLabel}</span>` +
+        `</div>`;
+    }
+    // Chips de indicadores
+    const ind = e.indicadores || {};
+    const indChips = [
+      ind.ema9 != null      ? `EMA9 ${Number(ind.ema9).toFixed(4)}`            : null,
+      ind.ema_longa != null ? `EMAl ${Number(ind.ema_longa).toFixed(4)}`       : null,
+      ind.rsi != null       ? `RSI ${Number(ind.rsi).toFixed(1)}`              : null,
+      ind.atr != null       ? `ATR ${Number(ind.atr).toFixed(5)}`              : null,
+      ind.corpo_pct != null ? `Corpo ${ind.corpo_pct}%`                        : null,
+      ind.tendencia         ? `Tend. ${escapar(ind.tendencia)}`                : null,
+      ind.candle_tipo       ? `${escapar(ind.candle_tipo)}`                    : null,
+    ].filter(Boolean).map(s=>`<span class="ind-chip">${s}</span>`).join('');
+    const indHtml = indChips ? `<div class="ind-bloco">${indChips}</div>` : '';
     const chave = chaveEntrada(e);
     const aberto = entradasAbertas.has(chave) ? ' open' : '';
     return `<div class="entrada-item"><div class="entrada-cabecalho">` +
@@ -1404,8 +1438,10 @@ function renderizarPainel(dados) {
       `<span class="${sCls}">${sStr}</span></div>` +
       `<details class="entrada-auditoria" data-chave="${escapar(chave)}"${aberto}><summary>ver leitura</summary>` +
       `<div>${tf} · exp. ${exp}${e.preco_entrada!=null ? ` · @ ${Number(e.preco_entrada).toFixed(5)}` : ''}</div>` +
+      seqHtml +
       `<div class="entrada-diagnostico">${escapar(e.diagnostico||'')}</div>` +
       leituraNota +
+      indHtml +
       `<div>${escapar(similares)}</div>` +
       `<div>${criterios}</div></details></div>`;
   }
