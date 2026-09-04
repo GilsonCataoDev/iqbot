@@ -45,6 +45,46 @@ def _handle_opiniao_groq(handler) -> None:
         handler.send_error(500, str(e))
 
 
+def _handle_exportar(handler) -> None:
+    """GET /exportar?data=YYYY-MM-DD — CSV das entradas do dia."""
+    from urllib.parse import urlparse, parse_qs
+    from datetime import date as _date
+    try:
+        params = parse_qs(urlparse(handler.path).query)
+        data = params.get("data", [None])[0] or _date.today().isoformat()
+        if _handler_registro is None:
+            handler.send_error(503, "Registro nao disponivel")
+            return
+        entradas = _handler_registro.entradas_hoje_detalhadas(data=data)
+        linhas = ["hora_brt,ativo,setup,direcao,resultado,lucro,veredicto_ia,motivo_ia"]
+        for e in entradas:
+            lucro = "" if e.get("lucro") is None else f"{e['lucro']:.2f}"
+            st = e.get("status", "")
+            if st == "finalizada":
+                st = "win" if (e.get("lucro") or 0) > 0 else "loss"
+            motivo = (e.get("motivoIA") or "").replace('"', "'")
+            linhas.append(",".join([
+                e.get("hora", ""),
+                e.get("ativo", ""),
+                f'"{e.get("setup", "")}"',
+                e.get("direcao", ""),
+                st,
+                lucro,
+                e.get("veredictoIA") or "",
+                f'"{motivo}"',
+            ]))
+        corpo = "\n".join(linhas).encode("utf-8")
+        data_safe = data.replace("-", "")
+        handler.send_response(200)
+        handler.send_header("Content-Type", "text/csv; charset=utf-8")
+        handler.send_header("Content-Disposition", f'attachment; filename="entradas_{data_safe}.csv"')
+        handler.send_header("Access-Control-Allow-Origin", "*")
+        handler.end_headers()
+        handler.wfile.write(corpo)
+    except Exception as e:
+        handler.send_error(500, str(e))
+
+
 class _ServidorReutilizavel(socketserver.ThreadingTCPServer):
     allow_reuse_address = True
     daemon_threads = True
@@ -64,6 +104,12 @@ class _ServidorReutilizavel(socketserver.ThreadingTCPServer):
 class _HandlerSilencioso(http.server.SimpleHTTPRequestHandler):
     def log_message(self, format, *args):
         pass
+
+    def do_GET(self):
+        if self.path.startswith("/exportar"):
+            _handle_exportar(self)
+        else:
+            super().do_GET()
 
     def do_POST(self):
         if self.path.startswith("/toggle"):
@@ -381,11 +427,13 @@ class GraficoM5:
             entradas = registro.entradas_hoje_detalhadas()
             atraso = registro.analise_atraso_por_setup()
             precisao_ia = registro.precisao_ia()
+            desemp_hora = registro.desempenho_por_hora()
         except Exception as erro:
             print(f"[grafico] semear_historico falhou: {erro}")
             return
         dados = {"statsGlobais": stats, "entradasDetalhadas": entradas,
-                 "analiseAtraso": atraso, "precisaoIA": precisao_ia}
+                 "analiseAtraso": atraso, "precisaoIA": precisao_ia,
+                 "desempenhoPorHora": desemp_hora}
         self._json_atomico(self.pasta_dados / "historico_hoje.json", dados)
 
         # Snapshot datado de hoje (pode ser parcial — atualizado a cada startup)

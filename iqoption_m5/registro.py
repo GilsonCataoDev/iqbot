@@ -1301,6 +1301,24 @@ class RegistroSQLite:
                 LIMIT 3000
                 """
             ).fetchall()
+            ops_opiniao = db.execute(
+                """
+                SELECT ativo, veredicto, motivo, criado_em
+                FROM opinioes_groq
+                WHERE date(criado_em) = ?
+                ORDER BY criado_em ASC
+                """,
+                (hoje,),
+            ).fetchall()
+
+        # Índice de opiniões Groq: ativo → [(ts, veredicto, motivo)]
+        opiniao_idx: dict[str, list] = {}
+        for ativo_op, veredicto_op, motivo_op, criado_em_op in ops_opiniao:
+            try:
+                ts_op_gr = _dt.fromisoformat(criado_em_op).timestamp()
+            except Exception:
+                continue
+            opiniao_idx.setdefault(ativo_op, []).append((ts_op_gr, veredicto_op, motivo_op))
 
         # Inclui setup/timeframe na chave. Sem isso, duas estratégias que
         # coincidam no mesmo minuto poderiam explicar a ordem errada.
@@ -1333,6 +1351,15 @@ class RegistroSQLite:
                 ts_op = _dt.fromisoformat(enviada_em).timestamp()
             except Exception:
                 ts_op = None
+
+            # Opinião IA mais recente para este ativo dentro de 10 min antes da entrada
+            veredicto_ia = motivo_ia = None
+            if ts_op is not None:
+                cands_gr = [c for c in opiniao_idx.get(ativo, [])
+                            if ts_op - 600 <= c[0] <= ts_op + 5]
+                if cands_gr:
+                    melhor_gr = max(cands_gr, key=lambda x: x[0])
+                    veredicto_ia, motivo_ia = melhor_gr[1], melhor_gr[2]
 
             # Busca decisão mais próxima (≤10 s)
             detalhes: dict = {}
@@ -1457,9 +1484,34 @@ class RegistroSQLite:
                 "leituraM5": leitura_m5,
                 "sequencia": sequencia,
                 "indicadores": indicadores,
+                "veredictoIA": veredicto_ia,
+                "motivoIA": motivo_ia,
             })
 
         return resultado
+
+    def desempenho_por_hora(self) -> dict:
+        """Win-rate por hora BRT (UTC-3) de toda a amostra histórica."""
+        with self._lock, self._sessao() as db:
+            rows = db.execute(
+                """
+                SELECT strftime('%H', datetime(enviada_em, '-3 hours')) AS hora,
+                       COUNT(*) AS n,
+                       SUM(CASE WHEN resultado_bruto = 'win' THEN 1 ELSE 0 END) AS wins
+                FROM operacoes
+                WHERE resultado_bruto IN ('win', 'loss')
+                GROUP BY hora
+                ORDER BY hora
+                """
+            ).fetchall()
+        return {
+            row["hora"]: {
+                "n": row["n"],
+                "wins": row["wins"],
+                "winrate": round(row["wins"] / row["n"] * 100, 1) if row["n"] else 0.0,
+            }
+            for row in rows
+        }
 
     def status_decisoes_grafico(self, ativo: str) -> dict[tuple[str, str], str]:
         with self._lock, self._sessao() as db:

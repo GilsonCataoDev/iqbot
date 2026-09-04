@@ -355,6 +355,18 @@ _historico_hoje = {
         "REJEITAR": {"n":  8, "wins":  2, "winrate": 25.0},
         "INCERTO":  {"n":  6, "wins":  3, "winrate": 50.0},
     },
+    "desempenhoPorHora": {
+        "09": {"n": 12, "wins": 8,  "winrate": 66.7},
+        "10": {"n": 18, "wins": 12, "winrate": 66.7},
+        "11": {"n": 15, "wins": 9,  "winrate": 60.0},
+        "12": {"n": 8,  "wins": 3,  "winrate": 37.5},
+        "13": {"n": 10, "wins": 4,  "winrate": 40.0},
+        "14": {"n": 20, "wins": 14, "winrate": 70.0},
+        "15": {"n": 22, "wins": 15, "winrate": 68.2},
+        "16": {"n": 14, "wins": 7,  "winrate": 50.0},
+        "17": {"n": 9,  "wins": 5,  "winrate": 55.6},
+        "18": {"n": 6,  "wins": 2,  "winrate": 33.3},
+    },
 }
 (PASTA_FONTE / "historico_hoje.json").write_text(
     json.dumps(_historico_hoje, ensure_ascii=False, default=str), encoding="utf-8")
@@ -365,6 +377,22 @@ print(f"Arquivos gerados em {PASTA_FONTE}")
 class Handler(http.server.SimpleHTTPRequestHandler):
     def __init__(self, *a, **kw):
         super().__init__(*a, directory=str(RAIZ), **kw)
+    def do_GET(self):
+        if self.path.startswith("/exportar"):
+            data = (self.path.split("data=")[1].split("&")[0] if "data=" in self.path
+                    else _datetime.date.today().isoformat())
+            linhas = ["hora_brt,ativo,setup,direcao,resultado,lucro,veredicto_ia,motivo_ia",
+                      "10:05,EURUSD,\"EMA 9/21 RSI\",call,win,0.85,ACEITAR,\"Alinhado com tendência\"",
+                      "11:20,EURUSD,\"EMA 9/21 RSI\",put,loss,-1.00,REJEITAR,\"RSI extremo\""]
+            corpo = "\n".join(linhas).encode("utf-8")
+            self.send_response(200)
+            self.send_header("Content-Type", "text/csv; charset=utf-8")
+            self.send_header("Content-Disposition", f'attachment; filename="entradas_{data.replace("-","")}.csv"')
+            self.send_header("Access-Control-Allow-Origin", "*")
+            self.end_headers()
+            self.wfile.write(corpo)
+        else:
+            super().do_GET()
     def do_POST(self):
         length = int(self.headers.get("Content-Length", 0))
         body = self.rfile.read(length)

@@ -367,6 +367,15 @@
   }
 
   /* ── Filtros de entradas (P5-A) ── */
+  .ia-badge { display:inline-block; padding:0 5px; border-radius:9px; font-size:8px; font-weight:700; vertical-align:middle; margin-left:3px; }
+  .ia-badge.aceitar { background:rgba(22,101,52,.25); color:var(--green); border:1px solid var(--green); }
+  .ia-badge.rejeitar { background:rgba(127,29,29,.25); color:var(--red);   border:1px solid var(--red); }
+  .ia-badge.incerto  { background:rgba(92,80,15,.25);  color:var(--yellow);border:1px solid var(--yellow); }
+  .hora-barra { display:flex; align-items:flex-end; gap:2px; height:36px; margin:6px 0 3px; }
+  .hora-col { display:flex; flex-direction:column; align-items:center; flex:1; }
+  .hora-bar { width:100%; border-radius:2px 2px 0 0; min-height:2px; }
+  .hora-lbl { font-size:7px; color:var(--muted); margin-top:1px; }
+  .hora-pct { font-size:7px; color:var(--muted); }
   .filtros-entradas { display: flex; flex-wrap: wrap; gap: 3px; margin-bottom: 6px; }
   .filtro-chip { padding: 1px 6px; border-radius: 10px; font-size: 9px; cursor: pointer;
     background: #1a2235; border: 1px solid var(--border); color: var(--muted); transition: background .15s; }
@@ -483,7 +492,7 @@
 
     <!-- Entradas detalhadas -->
     <div class="cartao" id="cartao-entradas">
-      <h3>Detalhes <span id="entradas-resumo" style="font-weight:400;color:var(--muted);font-size:10px;text-transform:none;letter-spacing:0"></span></h3>
+      <h3>Detalhes <span id="entradas-resumo" style="font-weight:400;color:var(--muted);font-size:10px;text-transform:none;letter-spacing:0"></span><a id="link-exportar-csv" href="#" style="float:right;font-size:9px;color:var(--accent);text-decoration:none;font-weight:400" title="Baixar CSV do dia">↓ CSV</a></h3>
       <div class="filtros-entradas" id="filtros-entradas">
         <span class="filtro-chip ativo" onclick="setFiltro('resultado','todos',this)">Todos</span>
         <span class="filtro-chip" onclick="setFiltro('resultado','win',this)">✓ Win</span>
@@ -525,6 +534,12 @@
           <div id="motivo-corpo"><p>Sem sinal no último candle.</p></div>
         </div>
       </div>
+    </div>
+
+    <!-- P7-D: Performance por hora -->
+    <div class="cartao" id="cartao-hora">
+      <h3>Por hora (BRT)</h3>
+      <div id="hora-corpo"><p style="color:var(--muted)">Sem dados.</p></div>
     </div>
 
     <!-- P6-A: Precisão da IA -->
@@ -570,7 +585,7 @@ let visaoLab = localStorage.getItem('emaLabVisao') || 'agora';
 const CARTOES_LAB = {
   agora:['cartao-pl','cartao-sinal','cartao-plano-forex','cartao-rapido'],
   entradas:['cartao-pl','cartao-entradas'],
-  estudos:['cartao-setup','cartao-extra','cartao-ia-precisao'],
+  estudos:['cartao-setup','cartao-extra','cartao-ia-precisao','cartao-hora'],
   dados:['cartao-dados'],
 };
 function mudarVisaoLab(nome) {
@@ -641,12 +656,16 @@ function renderEntradaDetalhada(e) {
   const indHtml = indChips ? `<div class="ind-bloco">${indChips}</div>` : '';
   const chave = chaveEntrada(e);
   const aberto = entradasAbertas.has(chave) ? ' open' : '';
+  const iaCls = e.veredictoIA ? e.veredictoIA.toLowerCase() : '';
+  const iaBadge = e.veredictoIA
+    ? `<span class="ia-badge ${iaCls}" title="${escapar(e.motivoIA||'')}">IA:${e.veredictoIA.slice(0,3)}</span>`
+    : '';
   return `<div class="entrada-item"><div class="entrada-cabecalho">` +
     `<span class="entrada-hora">${escapar(e.hora)}</span>` +
     `<span class="entrada-ativo">${escapar(e.ativo)}</span>` +
     `<span class="${dCls}">${dLbl}</span>` +
     `<span class="entrada-setup">${escapar(e.setup)}</span>` +
-    leituraBadge +
+    leituraBadge + iaBadge +
     `<span class="${sCls}">${sStr}</span></div>` +
     `<details class="entrada-auditoria" data-chave="${escapar(chave)}"${aberto}><summary>ver leitura</summary>` +
     `<div>${tf} · exp. ${exp}${e.preco_entrada!=null ? ` · @ ${Number(e.preco_entrada).toFixed(5)}` : ''}</div>` +
@@ -1814,6 +1833,29 @@ function renderizarPainel(dados) {
     : '<p style="color:var(--muted)">Sem sinal no último candle fechado.</p>';
 }
 
+function renderizarDesempenhoPorHora(desemp) {
+  const el = document.getElementById('hora-corpo');
+  if (!el) return;
+  const horas = Object.keys(desemp || {}).sort();
+  if (!horas.length) { el.innerHTML = '<p style="color:var(--muted)">Sem dados históricos ainda.</p>'; return; }
+  const max = Math.max(...horas.map(h => desemp[h].n));
+  const barras = horas.map(h => {
+    const d = desemp[h];
+    const alt = max ? Math.round(d.n / max * 32) : 4;
+    const cor = d.winrate >= 60 ? 'var(--green)' : d.winrate < 40 ? 'var(--red)' : 'var(--yellow)';
+    return `<div class="hora-col">` +
+      `<div class="hora-pct" style="color:${cor}">${d.winrate}%</div>` +
+      `<div class="hora-bar" style="height:${alt}px;background:${cor};opacity:.7" title="${h}h: ${d.wins}/${d.n} (${d.winrate}%)"></div>` +
+      `<div class="hora-lbl">${h}h</div>` +
+      `</div>`;
+  }).join('');
+  const total = horas.reduce((s, h) => s + desemp[h].n, 0);
+  const wins  = horas.reduce((s, h) => s + desemp[h].wins, 0);
+  el.innerHTML =
+    `<p style="color:var(--muted);font-size:9px;margin-bottom:4px">${wins}W/${total} total · média ${total ? Math.round(wins/total*100) : 0}%</p>` +
+    `<div class="hora-barra">${barras}</div>`;
+}
+
 function renderizarPrecisaoIA(precisaoIA) {
   const el = document.getElementById('ia-precisao-corpo');
   if (!el) return;
@@ -1850,6 +1892,13 @@ async function carregarHistoricoHoje() {
   try {
     const hist = await buscarJson(`${fonte}/historico_hoje.json?_=` + Date.now());
     renderizarPrecisaoIA(hist.precisaoIA || {});
+    renderizarDesempenhoPorHora(hist.desempenhoPorHora || {});
+    // Atualiza link CSV com a data navegada
+    const csvLink = document.getElementById('link-exportar-csv');
+    if (csvLink) {
+      const dataCSV = _dataEntradas || new Date().toISOString().slice(0, 10);
+      csvLink.href = `/exportar?data=${dataCSV}`;
+    }
     // Atualiza painel de entradas diretamente do historico_hoje.json (atualizado a cada 15s pelo bot)
     if (hist.entradasDetalhadas && hist.entradasDetalhadas.length) {
       const cartaoEntradas = document.getElementById('cartao-entradas');
