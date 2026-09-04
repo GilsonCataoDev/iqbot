@@ -194,6 +194,19 @@ class RegistroSQLite:
                     PRIMARY KEY (ativo, timeframe, ts_unix)
                 );
 
+                CREATE TABLE IF NOT EXISTS opinioes_groq (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    ativo TEXT NOT NULL,
+                    setup TEXT,
+                    direcao TEXT,
+                    timeframe INTEGER,
+                    veredicto TEXT NOT NULL,
+                    motivo TEXT,
+                    modelo TEXT,
+                    latencia_ms INTEGER,
+                    criado_em TEXT NOT NULL
+                );
+
                 CREATE INDEX IF NOT EXISTS idx_operacoes_status_data
                     ON operacoes(status, enviada_em);
                 CREATE INDEX IF NOT EXISTS idx_operacoes_ativo_data
@@ -202,6 +215,8 @@ class RegistroSQLite:
                     ON decisoes(ativo, candle_hora);
                 CREATE INDEX IF NOT EXISTS idx_simulacoes_setup_data
                     ON simulacoes(setup, candle_hora);
+                CREATE INDEX IF NOT EXISTS idx_opinioes_groq_data
+                    ON opinioes_groq(criado_em);
                 """
             )
             colunas_operacoes = {
@@ -1101,6 +1116,26 @@ class RegistroSQLite:
                     (limite,),
                 ).fetchone()
         return float(linha[0]) if linha and linha[0] is not None else None
+
+    def registrar_opiniao_groq(self, dados: dict) -> None:
+        """Persiste a segunda opinião retornada pelo Groq para auditoria futura."""
+        with self._lock, self._sessao() as db:
+            db.execute(
+                """INSERT INTO opinioes_groq
+                   (ativo, setup, direcao, timeframe, veredicto, motivo, modelo, latencia_ms, criado_em)
+                   VALUES (?,?,?,?,?,?,?,?,?)""",
+                (
+                    dados.get("ativo", ""),
+                    dados.get("setup"),
+                    dados.get("direcao"),
+                    dados.get("timeframe"),
+                    dados.get("veredicto", "INCERTO"),
+                    dados.get("motivo"),
+                    dados.get("modelo"),
+                    dados.get("latencia_ms"),
+                    datetime.utcnow().isoformat(),
+                ),
+            )
 
     def stats_globais(self) -> dict:
         """Entradas e winrate do dia atual, separados por OTC e mercado normal.

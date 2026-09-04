@@ -366,6 +366,27 @@
     text-transform: none; font-weight: 700;
   }
 
+  /* ── Filtros de entradas (P5-A) ── */
+  .filtros-entradas { display: flex; flex-wrap: wrap; gap: 3px; margin-bottom: 6px; }
+  .filtro-chip { padding: 1px 6px; border-radius: 10px; font-size: 9px; cursor: pointer;
+    background: #1a2235; border: 1px solid var(--border); color: var(--muted); transition: background .15s; }
+  .filtro-chip.ativo { background: var(--accent); border-color: var(--accent); color: #fff; }
+  .filtro-sep { width: 100%; height: 0; }
+
+  /* ── Segunda opinião IA (P5-B) ── */
+  #ia-opiniao { margin-top: 8px; padding: 5px 7px; border-radius: 5px; font-size: 10px;
+    border: 1px solid var(--border); background: #111827; display: none; }
+  #ia-opiniao.aceitar { border-color: var(--green); background: rgba(22,101,52,.12); }
+  #ia-opiniao.rejeitar { border-color: var(--red);   background: rgba(127,29,29,.12); }
+  #ia-opiniao.incerto  { border-color: var(--yellow); background: rgba(92,80,15,.12); }
+  .ia-veredicto { font-weight: 700; font-size: 11px; }
+  .ia-motivo { color: var(--muted); margin-top: 2px; }
+  .ia-meta   { color: var(--border); font-size: 8px; margin-top: 3px; }
+  #btn-consultar-ia { margin-top: 7px; padding: 3px 9px; font-size: 9px; cursor: pointer;
+    background: #1a2235; border: 1px solid var(--accent); color: var(--accent);
+    border-radius: 4px; width: 100%; }
+  #btn-consultar-ia:disabled { opacity: .45; cursor: default; }
+
   /* ── Responsive ── */
   @media (max-width: 700px) {
     html, body { overflow: auto; height: auto; }
@@ -433,6 +454,8 @@
         <div class="sinal-setup" id="sinal-setup"></div>
         <div class="sinal-preco" id="sinal-preco"></div>
         <div class="sinal-fatores" id="sinal-fat"></div>
+        <button id="btn-consultar-ia" onclick="consultarIA()" style="display:none">🤖 Consultar IA</button>
+        <div id="ia-opiniao"></div>
       </div>
     </div>
 
@@ -461,6 +484,18 @@
     <!-- Entradas detalhadas -->
     <div class="cartao" id="cartao-entradas">
       <h3>Detalhes <span id="entradas-resumo" style="font-weight:400;color:var(--muted);font-size:10px;text-transform:none;letter-spacing:0"></span></h3>
+      <div class="filtros-entradas" id="filtros-entradas">
+        <span class="filtro-chip ativo" onclick="setFiltro('resultado','todos',this)">Todos</span>
+        <span class="filtro-chip" onclick="setFiltro('resultado','win',this)">✓ Win</span>
+        <span class="filtro-chip" onclick="setFiltro('resultado','loss',this)">✗ Loss</span>
+        <span class="filtro-chip" onclick="setFiltro('resultado','aberta',this)">⏳ Aberta</span>
+        <div class="filtro-sep"></div>
+        <span class="filtro-chip ativo" onclick="setFiltro('direcao','todos',this)">↕ Dir.</span>
+        <span class="filtro-chip" onclick="setFiltro('direcao','call',this)">▲ Call</span>
+        <span class="filtro-chip" onclick="setFiltro('direcao','put',this)">▼ Put</span>
+        <div class="filtro-sep"></div>
+        <span class="filtro-chip ativo" id="filtro-setup-todos" onclick="setFiltro('setup','todos',this)">Setup: todos</span>
+      </div>
       <div class="nav-data" id="nav-data-entradas">
         <button id="btn-data-ant" onclick="navegarData(-1)">←</button>
         <span id="label-data-entradas">HOJE</span>
@@ -623,10 +658,14 @@ function _dataISO(d) {
 function _renderizarListaEntradas(lista) {
   const el = document.getElementById('entradas-lista');
   if (!el) return;
-  if (!lista || !lista.length) {
-    el.innerHTML = '<p>Sem entradas neste dia.</p>';
+  _atualizarFiltrosSetup(lista || []);
+  const filtrada = _aplicarFiltros(lista || []);
+  if (!filtrada.length) {
+    el.innerHTML = lista && lista.length
+      ? '<p style="color:var(--muted)">Nenhuma entrada com os filtros aplicados.</p>'
+      : '<p>Sem entradas neste dia.</p>';
   } else {
-    el.innerHTML = [...lista].reverse().map(renderEntradaDetalhada).join('');
+    el.innerHTML = [...filtrada].reverse().map(renderEntradaDetalhada).join('');
   }
 }
 function navegarData(delta) {
@@ -674,6 +713,96 @@ let ultimoAtualizadoEm = null; // timestamp servidor do ultimo update
 const entradasAbertas = new Set();
 let _dataEntradas = null;   // null = hoje (ao vivo); "YYYY-MM-DD" = histórico
 let _entradasHoje = [];     // cache do último ciclo para o dia atual
+
+// ── P5-A: Filtros de entradas ──
+let _filtroResultado = 'todos';
+let _filtroDir       = 'todos';
+let _filtroSetup     = 'todos';
+let _setupsDisponiveis = [];   // atualizado pelo ciclo
+
+function _aplicarFiltros(lista) {
+  return lista.filter(e => {
+    if (_filtroResultado !== 'todos') {
+      if (_filtroResultado === 'win'   && !(e.lucro > 0))        return false;
+      if (_filtroResultado === 'loss'  && !(e.lucro < 0))        return false;
+      if (_filtroResultado === 'aberta' && e.status !== 'aberta') return false;
+    }
+    if (_filtroDir !== 'todos' && e.direcao !== _filtroDir) return false;
+    if (_filtroSetup !== 'todos' && e.setup !== _filtroSetup) return false;
+    return true;
+  });
+}
+
+function setFiltro(tipo, valor, chip) {
+  if (tipo === 'resultado') _filtroResultado = valor;
+  else if (tipo === 'direcao') _filtroDir = valor;
+  else if (tipo === 'setup') _filtroSetup = valor;
+  // destaca o chip ativo dentro do grupo (procura irmãos com mesmo onclick prefix)
+  const grupo = tipo;
+  const todos = document.querySelectorAll(`#filtros-entradas .filtro-chip`);
+  todos.forEach(c => {
+    if (c.getAttribute('onclick') && c.getAttribute('onclick').includes(`'${grupo}'`)) {
+      c.classList.remove('ativo');
+    }
+  });
+  chip.classList.add('ativo');
+  const lista = _dataEntradas ? null : _entradasHoje;
+  if (lista) _renderizarListaEntradas(lista);
+}
+
+function _atualizarFiltrosSetup(entradas) {
+  const setups = [...new Set(entradas.map(e => e.setup).filter(Boolean))];
+  if (JSON.stringify(setups) === JSON.stringify(_setupsDisponiveis)) return;
+  _setupsDisponiveis = setups;
+  const cont = document.getElementById('filtros-entradas');
+  if (!cont) return;
+  // remove chips de setup antigos (tudo depois do separador de setup)
+  const todos = [...cont.querySelectorAll('.filtro-chip')];
+  todos.forEach(c => {
+    if (c.id === 'filtro-setup-todos' || c.dataset.setupChip) c.remove();
+  });
+  setups.forEach(s => {
+    const c = document.createElement('span');
+    c.className = 'filtro-chip';
+    c.dataset.setupChip = '1';
+    c.textContent = s;
+    c.onclick = () => setFiltro('setup', s, c);
+    cont.appendChild(c);
+  });
+}
+
+// ── P5-B: Consultar IA ──
+let _alertaAtual = null;   // alerta JSON do ciclo atual
+
+async function consultarIA() {
+  const btn = document.getElementById('btn-consultar-ia');
+  const el  = document.getElementById('ia-opiniao');
+  if (!btn || !el || !_alertaAtual) return;
+  btn.disabled = true;
+  btn.textContent = '⏳ Consultando...';
+  el.className = ''; el.style.display = 'block';
+  el.innerHTML = '<span style="color:var(--muted)">Aguardando resposta da IA...</span>';
+  try {
+    const resp = await fetch('/opiniao_groq', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify(_alertaAtual),
+    });
+    const d = await resp.json();
+    const cls = d.veredicto === 'ACEITAR' ? 'aceitar' : d.veredicto === 'REJEITAR' ? 'rejeitar' : 'incerto';
+    const cor = cls === 'aceitar' ? 'var(--green)' : cls === 'rejeitar' ? 'var(--red)' : 'var(--yellow)';
+    el.className = cls;
+    el.innerHTML =
+      `<div class="ia-veredicto" style="color:${cor}">${escapar(d.veredicto)}</div>` +
+      `<div class="ia-motivo">${escapar(d.motivo || '')}</div>` +
+      (d.modelo ? `<div class="ia-meta">${escapar(d.modelo)} · ${d.latencia_ms}ms</div>` : '');
+  } catch(err) {
+    el.className = 'incerto';
+    el.innerHTML = '<div class="ia-motivo" style="color:var(--red)">Falha na comunicação com a IA.</div>';
+  }
+  btn.disabled = false;
+  btn.textContent = '🤖 Consultar IA';
+}
 
 // ── Web Audio ──
 let audioCtx = null;
@@ -1330,6 +1459,11 @@ function renderizarSinalBadge(dados) {
     card.className = 'cartao'; card.classList.remove('pulsando');
     vazio.style.display = ''; corpo.style.display = 'none';
     nota.textContent = 'aguardando';
+    _alertaAtual = null;
+    const _btnIA0 = document.getElementById('btn-consultar-ia');
+    const _opEl0  = document.getElementById('ia-opiniao');
+    if (_btnIA0) _btnIA0.style.display = 'none';
+    if (_opEl0)  { _opEl0.style.display = 'none'; _opEl0.className = ''; _opEl0.innerHTML = ''; }
     return;
   }
 
@@ -1372,6 +1506,14 @@ function renderizarSinalBadge(dados) {
   document.getElementById('sinal-setup').textContent = setup;
   document.getElementById('sinal-preco').textContent = `@ ${preco}${rsi}`;
   document.getElementById('sinal-fat').innerHTML = fat;
+
+  // wiring P5-B: expõe alerta atual para consultarIA()
+  const _btnIA = document.getElementById('btn-consultar-ia');
+  const _opEl  = document.getElementById('ia-opiniao');
+  const _alertaAnteriorId = _alertaAtual ? (_alertaAtual.id || _alertaAtual.time) : null;
+  _alertaAtual = al || null;
+  if (_btnIA) _btnIA.style.display = al ? '' : 'none';
+  if (_opEl && novaSinal) { _opEl.style.display = 'none'; _opEl.className = ''; _opEl.innerHTML = ''; }
 
   // toast para sinal novo
   if (novaSinal) {

@@ -18,6 +18,33 @@ from .config import Configuracao
 from .modelos import Decisao, SnapshotMercado
 
 
+_handler_registro = None  # injetado por semear_historico
+
+
+def _handle_opiniao_groq(handler) -> None:
+    """Processa POST /opiniao_groq: consulta Groq e persiste a resposta."""
+    try:
+        from . import ia as _ia
+        tamanho = int(handler.headers.get("Content-Length", 0))
+        alerta_dados = json.loads(handler.rfile.read(tamanho)) if tamanho else {}
+        resultado = _ia.segunda_opiniao_alerta(alerta_dados)
+        if resultado is None:
+            resultado = {"veredicto": "INCERTO", "motivo": "IA indisponível ou desativada.", "modelo": "", "latencia_ms": 0}
+        if _handler_registro is not None:
+            try:
+                _handler_registro.registrar_opiniao_groq({**resultado, **{k: alerta_dados.get(k) for k in ("ativo", "setup", "direcao", "timeframe")}})
+            except Exception:
+                pass
+        corpo = json.dumps(resultado, ensure_ascii=False).encode("utf-8")
+        handler.send_response(200)
+        handler.send_header("Content-Type", "application/json")
+        handler.send_header("Access-Control-Allow-Origin", "*")
+        handler.end_headers()
+        handler.wfile.write(corpo)
+    except Exception as e:
+        handler.send_error(500, str(e))
+
+
 class _ServidorReutilizavel(socketserver.ThreadingTCPServer):
     allow_reuse_address = True
     daemon_threads = True
@@ -53,6 +80,8 @@ class _HandlerSilencioso(http.server.SimpleHTTPRequestHandler):
                 self.wfile.write(b'{"ok":true}')
             except Exception:
                 self.send_error(500)
+        elif self.path.startswith("/opiniao_groq"):
+            _handle_opiniao_groq(self)
         else:
             self.send_error(404)
 
@@ -334,6 +363,8 @@ class GraficoM5:
             self._json_atomico(self.pasta_dados / f"{ativo}.json", dados)
 
     def semear_historico(self, registro) -> None:
+        global _handler_registro
+        _handler_registro = registro
         """Escreve historico_hoje.json com statsGlobais e entradasDetalhadas do SQLite.
 
         Também arquiva um snapshot datado (historico_YYYY-MM-DD.json) para o dia

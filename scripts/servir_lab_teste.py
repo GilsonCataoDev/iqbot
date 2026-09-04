@@ -342,11 +342,26 @@ class Handler(http.server.SimpleHTTPRequestHandler):
     def __init__(self, *a, **kw):
         super().__init__(*a, directory=str(RAIZ), **kw)
     def do_POST(self):
-        # absorve POST /toggle sem erro
         length = int(self.headers.get("Content-Length", 0))
-        self.rfile.read(length)
-        self.send_response(204)
-        self.end_headers()
+        body = self.rfile.read(length)
+        if self.path.startswith("/opiniao_groq"):
+            import random
+            veredictos = [
+                ("ACEITAR", "Sinal alinhado com tendência e RSI neutro."),
+                ("REJEITAR", "RSI próximo a zona extrema — risco elevado."),
+                ("INCERTO",  "Dados insuficientes para conclusão."),
+            ]
+            v, m = random.choice(veredictos)
+            resp = json.dumps({"veredicto": v, "motivo": m,
+                               "modelo": "mock-teste", "latencia_ms": 42}).encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Access-Control-Allow-Origin", "*")
+            self.end_headers()
+            self.wfile.write(resp)
+        else:
+            self.send_response(204)
+            self.end_headers()
     def log_message(self, fmt, *args):
         pass
 

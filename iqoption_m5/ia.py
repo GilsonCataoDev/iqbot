@@ -172,6 +172,95 @@ def _parsear_resposta(conteudo: str) -> ParecerIA | None:
         return ParecerIA(texto=conteudo[:200], confianca="baixa", direcao_sugerida=None)
 
 
+MODELO_SEGUNDA_OPINIAO = "llama-3.3-70b-versatile"
+
+
+def _montar_prompt_segunda_opiniao(alerta: dict) -> str:
+    fatores = " | ".join(alerta.get("fatores") or [])
+    return (
+        "Revisor de sinais de opções binárias M5. Responda APENAS o JSON solicitado.\n\n"
+        f"Sinal:\n"
+        f"  setup={alerta.get('setup','?')} direcao={alerta.get('direcao','?')} "
+        f"estado={alerta.get('radarEstado','?')}\n"
+        f"  preco={alerta.get('preco','?')} alvo={alerta.get('alvoProvavel','?')} "
+        f"rsi={alerta.get('rsi','?')}\n"
+        f"  fatores={fatores}\n"
+        f"  mensagem={alerta.get('mensagem','')}\n\n"
+        "ACEITAR → sinal alinhado, sem conflito evidente.\n"
+        "REJEITAR → conflito claro (RSI extremo, alvo bloqueado, notícia <20min, entrada esticada).\n"
+        "INCERTO  → dados ambíguos ou insuficientes.\n\n"
+        '{"veredicto": "ACEITAR|REJEITAR|INCERTO", "motivo": "uma frase"}'
+    )
+
+
+def segunda_opiniao_alerta(alerta_dados: dict) -> dict | None:
+    """Consulta Groq sobre um sinal calculado. Retorna dict ou None se falhar/indisponível."""
+    if not MODELO_SEGUNDA_OPINIAO:
+        return None
+    with _lock_bloqueio:
+        if time.time() < _bloqueado_ate:
+            return None
+    if not _sem_ia.acquire(blocking=False):
+        return None
+    try:
+        try:
+            chave = _chave()
+        except RuntimeError:
+            return None
+        prompt = _montar_prompt_segunda_opiniao(alerta_dados)
+        headers = {**_HEADERS_BASE, "Authorization": f"Bearer {chave}"}
+        body = {
+            "model": MODELO_SEGUNDA_OPINIAO,
+            "messages": [
+                {"role": "system", "content": "Revisor de sinais. Responda SOMENTE com JSON válido, sem texto extra."},
+                {"role": "user", "content": prompt},
+            ],
+            "temperature": 0.1,
+            "max_tokens": 200,
+        }
+        t0 = time.time()
+        try:
+            resp = _req.post(URL_GROQ, json=body, headers=headers, timeout=TIMEOUT_SEGUNDOS)
+        except _req.RequestException as e:
+            print(f"    [IA] erro de conexão (segunda opinião): {e}")
+            return None
+        latencia_ms = int((time.time() - t0) * 1000)
+        if resp.status_code == 429:
+            global _bloqueado_ate
+            with _lock_bloqueio:
+                pausa = 300 if "tokens per day" in resp.text else 30
+                _bloqueado_ate = time.time() + pausa
+            print(f"    [IA] rate limit — pausando {pausa}s")
+            return None
+        if resp.status_code != 200:
+            print(f"    [IA] HTTP {resp.status_code} (segunda opinião): {resp.text[:100]}")
+            return None
+        try:
+            conteudo = resp.json()["choices"][0]["message"]["content"].strip()
+        except (KeyError, IndexError):
+            return None
+        inicio = conteudo.find("{")
+        fim = conteudo.rfind("}") + 1
+        if inicio < 0 or fim <= inicio:
+            return None
+        try:
+            obj = json.loads(conteudo[inicio:fim])
+        except json.JSONDecodeError:
+            return None
+        veredicto = str(obj.get("veredicto", "INCERTO")).upper()
+        if veredicto not in ("ACEITAR", "REJEITAR", "INCERTO"):
+            veredicto = "INCERTO"
+        print(f"    [IA] segunda opinião: {veredicto} — {obj.get('motivo','')[:60]}")
+        return {
+            "veredicto": veredicto,
+            "motivo": str(obj.get("motivo", ""))[:300],
+            "modelo": MODELO_SEGUNDA_OPINIAO,
+            "latencia_ms": latencia_ms,
+        }
+    finally:
+        _sem_ia.release()
+
+
 def montar_contexto(
     ativo: str,
     timeframe: str,
