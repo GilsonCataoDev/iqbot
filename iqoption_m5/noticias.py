@@ -179,6 +179,7 @@ class CalendarioEconomico:
 
     def __init__(self, pasta_dados: Path, ttl_segundos: float = 3600, url: str = URL_CALENDARIO):
         self.arquivo = Path(pasta_dados) / "calendario_economico.json"
+        self.arquivo_historico = Path(pasta_dados) / "historico_noticias.json"
         self.ttl_segundos = ttl_segundos
         self.url = url
         self._eventos: list[Evento] = []
@@ -204,6 +205,43 @@ class CalendarioEconomico:
             self.arquivo.parent.mkdir(parents=True, exist_ok=True)
             self.arquivo.write_text(json.dumps(bruto, ensure_ascii=False), encoding="utf-8")
         except OSError:
+            pass
+
+    def _gravar_historico(self, bruto: list[dict]) -> None:
+        """Mantem um arquivo acumulado; atualizacoes do mesmo evento nao duplicam."""
+        try:
+            existentes: list[dict] = []
+            if self.arquivo_historico.exists():
+                lido = json.loads(self.arquivo_historico.read_text(encoding="utf-8"))
+                if isinstance(lido, list):
+                    existentes = [item for item in lido if isinstance(item, dict)]
+
+            def chave(item: dict) -> tuple[str, str, str]:
+                return (
+                    str(item.get("date", "")),
+                    str(item.get("country", "")).upper(),
+                    str(item.get("title", "")),
+                )
+
+            por_chave = {chave(item): dict(item) for item in existentes if all(chave(item))}
+            for item in bruto:
+                if not isinstance(item, dict) or item.get("impact") not in IMPACTOS_RELEVANTES:
+                    continue
+                identificador = chave(item)
+                if not all(identificador):
+                    continue
+                anterior = por_chave.get(identificador, {})
+                # Campos vazios de uma leitura nao apagam um actual ja publicado.
+                atualizado = dict(anterior)
+                atualizado.update({k: v for k, v in item.items() if v not in (None, "", "N/A")})
+                por_chave[identificador] = atualizado
+
+            historico = sorted(por_chave.values(), key=lambda item: str(item.get("date", "")))
+            self.arquivo_historico.parent.mkdir(parents=True, exist_ok=True)
+            temporario = self.arquivo_historico.with_suffix(".tmp")
+            temporario.write_text(json.dumps(historico, ensure_ascii=False), encoding="utf-8")
+            temporario.replace(self.arquivo_historico)
+        except (OSError, json.JSONDecodeError):
             pass
 
     @staticmethod
@@ -244,6 +282,7 @@ class CalendarioEconomico:
                     print(f"Calendário econômico indisponível ({erro}); seguindo sem aviso de notícia.")
                     self._avisou_falha = True
                 return False
+        self._gravar_historico(bruto)
         self._eventos = self._converter(bruto)
         self._baixado_em = time.time()
         return True

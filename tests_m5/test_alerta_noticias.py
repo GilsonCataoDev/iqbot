@@ -183,6 +183,23 @@ class TestCalendarioEconomico(unittest.TestCase):
         self.assertFalse(calendario.atualizar())
         self.assertIsNone(calendario.aviso("EURUSD", self.agora))
 
+    def test_historico_nao_duplica_o_mesmo_evento(self):
+        calendario = CalendarioEconomico(self.pasta)
+        evento = self._evento(10)
+        calendario._gravar_historico([evento])
+        calendario._gravar_historico([evento])
+        historico = json.loads(calendario.arquivo_historico.read_text(encoding="utf-8"))
+        self.assertEqual(len(historico), 1)
+
+    def test_historico_atualiza_actual_sem_apagar_dado_publicado(self):
+        calendario = CalendarioEconomico(self.pasta)
+        evento = {**self._evento(10), "forecast": "200K"}
+        calendario._gravar_historico([evento])
+        calendario._gravar_historico([{**evento, "actual": "250K"}])
+        calendario._gravar_historico([{**evento, "actual": ""}])
+        historico = json.loads(calendario.arquivo_historico.read_text(encoding="utf-8"))
+        self.assertEqual(historico[0]["actual"], "250K")
+
 
 class TestIntegracaoAlertaNoticia(unittest.TestCase):
     def test_anexar_noticia_preenche_o_campo(self):

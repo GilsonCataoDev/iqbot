@@ -1218,6 +1218,9 @@ class RegistroSQLite:
             if detalhes.get("impulso_atr") is not None:
                 criterios.append(f"Impulso: {float(detalhes['impulso_atr']):.2f} ATR")
             criterios.extend(resumo_contexto(detalhes))
+            leitura_m5 = detalhes.get("leitura_m5") or {}
+            if leitura_m5:
+                criterios.extend(leitura_m5.get("criterios") or [])
             comparaveis = recuperar_comparaveis(
                 detalhes,
                 (
@@ -1255,6 +1258,7 @@ class RegistroSQLite:
                 "criterios": criterios[:9],
                 "diagnostico": diagnostico,
                 "comparaveis": comparaveis,
+                "leituraM5": leitura_m5,
             })
 
         return resultado

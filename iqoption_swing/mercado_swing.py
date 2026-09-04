@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import concurrent.futures
+import json
 import os
 import threading
 import time
@@ -17,6 +18,48 @@ class MercadoSwingIndisponivel(RuntimeError):
     pass
 
 
+# --- captura da resposta 'underlying-list' -----------------------------------
+# A lib (ws/client.py) so trata mensagens cujo nome ela conhece; 'underlying-list'
+# nao esta na lista, entao a resposta seria descartada silenciosamente. Por isso
+# interceptamos o on_message uma unica vez. Feio, mas a alternativa e forkar a lib.
+_LOCK_UNDERLYING = threading.Lock()
+_UNDERLYING: dict[str, list] = {}
+_HOOK_INSTALADO = False
+
+
+def _instalar_hook_underlying() -> None:
+    """PRECISA rodar antes de qualquer conexao.
+
+    ws/client.py faz `websocket.WebSocketApp(..., on_message=self.on_message)`:
+    isso congela o metodo BOUND no momento da construcao. Patchar a classe
+    depois de conectar nao tem efeito nenhum — o socket ja guardou a referencia
+    antiga. Por isso a instalacao acontece no import deste modulo, la embaixo.
+    """
+    global _HOOK_INSTALADO
+    if _HOOK_INSTALADO:
+        return
+    import iqoptionapi.ws.client as _wsclient
+
+    _original = _wsclient.WebsocketClient.on_message
+
+    def _com_underlying(self, message):
+        try:
+            m = json.loads(str(message))
+            if m.get("name") == "underlying-list":
+                with _LOCK_UNDERLYING:
+                    _UNDERLYING["items"] = (m.get("msg") or {}).get("items") or []
+        except Exception:
+            pass
+        return _original(self, message)
+
+    _wsclient.WebsocketClient.on_message = _com_underlying
+    _HOOK_INSTALADO = True
+
+
+# Instala no import: qualquer conexao criada depois daqui ja nasce com o hook.
+_instalar_hook_underlying()
+
+
 class MercadoSwing:
     """Conexão IQ Option para swing: busca D1/H4/H1 sob demanda (sem stream contínuo)."""
 
@@ -28,6 +71,9 @@ class MercadoSwing:
         self.config = config
         self._api: IQ_Option | None = None
         self._lock = threading.RLock()
+        # Separado do _lock: a reconexão precisa rodar mesmo com uma thread
+        # pendurada segurando _lock numa chamada morta (ver reconectar_se_necessario).
+        self._lock_reconexao = threading.Lock()
         self._email = ""
         self._senha = ""
         self._payouts: dict[str, float | None] = {}
@@ -75,62 +121,108 @@ class MercadoSwing:
     # Cache de mercado (payout + abertura)
     # -------------------------------------------------------------------------
 
+    @staticmethod
+    def _payout_de(detalhe: dict) -> float | None:
+        """Payout a partir de option.profit.commission, mesma conta que a lib faz."""
+        opcao = detalhe.get("option")
+        if not isinstance(opcao, dict):
+            return None
+        lucro = opcao.get("profit")
+        if not isinstance(lucro, dict):
+            return None
+        comissao = lucro.get("commission")
+        if not isinstance(comissao, (int, float)):
+            return None
+        return (100.0 - float(comissao)) / 100.0
+
     def _atualizar_cache(self) -> None:
-        try:
-            lucros = self._api.get_all_profit()
-        except Exception as e:
-            print(f"[SWING] payout indisponível: {e!r}")
-            lucros = {}
+        # Payout sai do get_all_init_v2, NUNCA do get_all_profit(): este usa o
+        # endpoint v1 (get_all_init), que a IQ parou de responder — fica em
+        # busy-wait de 30s e retenta pra sempre, sem nunca levantar exceção.
         # IDs binários via get_all_init_v2 (sempre disponível)
+        payout_secao: dict[str, dict[str, float]] = {"binary": {}, "turbo": {}}
         try:
             init_v2 = self._api.get_all_init_v2()
             for secao in ("binary", "turbo"):
                 for aid, info in (init_v2.get(secao, {}).get("actives", {}).items()):
                     nome_raw = info.get("name", "")
                     nome = nome_raw.split(".")[-1].upper() if "." in nome_raw else nome_raw.upper()
+                    # v2 devolve "EURUSD-op" pro mercado normal; o payout é o mesmo.
+                    base = nome[:-3] if nome.endswith("-OP") else nome
+                    valor = self._payout_de(info)
+                    if valor is not None and base in self.config.ativos:
+                        payout_secao[secao][base] = valor
                     if nome in self.config.ativos:
                         self._ids[nome] = int(aid)
                         self._abertos[nome] = info.get("enabled", False) and not info.get("is_suspended", True)
         except Exception as e:
             print(f"[SWING] IDs binários erro: {e!r}")
         for ativo in self.config.ativos:
-            entrada = lucros.get(ativo) or lucros.get(ativo.lower())
-            if isinstance(entrada, dict):
-                val = entrada.get("binary") or entrada.get("turbo")
-                self._payouts[ativo] = float(val) if isinstance(val, (int, float)) else None
-            else:
-                self._payouts[ativo] = None
+            val = payout_secao["binary"].get(ativo)
+            if val is None:
+                val = payout_secao["turbo"].get(ativo)
+            self._payouts[ativo] = val
             if ativo not in self._abertos:
                 self._abertos[ativo] = True  # fallback: assume aberto
         if self._ids:
             print(f"[SWING] IDs binários: {self._ids}")
-        # IDs forex via get_instruments("forex") com timeout (API tem loop infinito interno)
-        print("[SWING] Buscando IDs forex via get_instruments (timeout 12s)...")
-        _pool = concurrent.futures.ThreadPoolExecutor(max_workers=1)
-        _fut = _pool.submit(self._api.get_instruments, "forex")
+        # IDs forex. NAO usar get_instruments() da lib: a IQ aposentou o
+        # 'get-instruments' e responde "Invalid contract" em qualquer versao,
+        # inclusive pra crypto. O timeout que isso gerava era lido aqui como
+        # "a conta nao suporta CFD" — diagnostico errado; a conta suporta.
+        # Endpoint vivo (verificado 27/08/2026): 46 pares forex, 44 abertos.
+        print("[SWING] Buscando IDs forex (marginal-forex-instruments)...")
         try:
-            ins_data = _fut.result(timeout=12)
-            instruments = ins_data.get("instruments", []) if isinstance(ins_data, dict) else []
-            for detail in instruments:
-                nome = str(detail.get("name", "")).upper()
-                if nome in self.config.ativos:
-                    id_fx = detail.get("id")
-                    if id_fx:
-                        self._ids_forex[nome] = int(id_fx)
+            self._ids_forex = self._buscar_ids_forex()
             if self._ids_forex:
                 print(f"[SWING] IDs forex: {self._ids_forex}")
             else:
-                nomes_disp = [d.get("name") for d in instruments[:10]]
-                print(f"[SWING] Nenhum ID forex p/ {self.config.ativos}. Disponíveis: {nomes_disp}")
-        except concurrent.futures.TimeoutError:
-            print("[SWING] get_instruments('forex') TIMEOUT — conta PRACTICE pode não suportar CFD")
+                print(f"[SWING] Nenhum ID forex para {self.config.ativos} na resposta da IQ.")
         except Exception as e:
-            print(f"[SWING] get_instruments('forex') erro: {e!r}")
-        finally:
-            _pool.shutdown(wait=False)
+            print(f"[SWING] falha ao buscar IDs forex: {e!r}")
         if not self._ids_forex:
-            print("[SWING] IDs forex não encontrados — buy_order tentará com nome string")
+            # Sem os IDs nao da pra montar ordem de margem. E o buy_order da lib
+            # tambem nao serve: ele fala 'place-order-temp', igualmente aposentado.
+            print("[SWING] Sem IDs forex — execucao de margem indisponivel.")
         self._cache_ts = time.time()
+
+    def _buscar_ids_forex(self, timeout: float = 10.0) -> dict[str, int]:
+        """active_id de cada par via 'marginal-forex-instruments.get-underlying-list'.
+
+        A resposta vem em duas mensagens: um ACK 'result' e depois a
+        'underlying-list' com os items — por isso o hook no on_message.
+        """
+        _instalar_hook_underlying()
+        with _LOCK_UNDERLYING:
+            _UNDERLYING.pop("items", None)
+        self._api.api.send_websocket_request(
+            "sendMessage",
+            {
+                "name": "marginal-forex-instruments.get-underlying-list",
+                "version": "1.0",
+                "body": {},
+            },
+            "swing-forex-ids",
+        )
+        limite = time.time() + timeout
+        itens = None
+        while time.time() < limite:
+            with _LOCK_UNDERLYING:
+                itens = _UNDERLYING.get("items")
+            if itens is not None:
+                break
+            time.sleep(0.2)
+        if itens is None:
+            return {}
+        ids: dict[str, int] = {}
+        for item in itens:
+            if not isinstance(item, dict) or item.get("is_suspended"):
+                continue
+            nome = str(item.get("name", "")).upper()
+            active_id = item.get("active_id")
+            if nome in self.config.ativos and active_id:
+                ids[nome] = int(active_id)
+        return ids
 
     def _cache_se_preciso(self) -> None:
         if time.time() - self._cache_ts > 300:
@@ -360,15 +452,54 @@ class MercadoSwing:
             pass
         return None
 
-    def reconectar_se_necessario(self) -> bool:
-        with self._lock:
-            try:
-                self._api.get_server_timestamp()
-                return True
-            except Exception:
+    # Ver MercadoIQ.conexao_viva: mesma armadilha, mesma correção.
+    _MAX_ATRASO_TIMESTAMP = 90.0
+
+    def conexao_viva(self) -> bool:
+        """Liveness real do WebSocket.
+
+        get_server_timestamp() NÃO serve de sonda sozinho: é property em cache
+        que nunca levanta exceção com o socket morto. Foi o que travou o bot
+        M15 por 25min em 2026-08-27 (ver iqoption_m5/mercado_iq.py).
+        """
+        try:
+            if not self._api.check_connect():
+                return False
+        except Exception:
+            return False
+        try:
+            ts = float(self._api.get_server_timestamp())
+        except Exception:
+            return False
+        if ts <= 0:
+            return False
+        return abs(time.time() - ts) <= self._MAX_ATRASO_TIMESTAMP
+
+    _TIMEOUT_LOCK_RECONEXAO = 5.0
+
+    def reconectar_se_necessario(self, forcar: bool = False) -> bool:
+        """Ver MercadoIQ.reconectar_se_necessario: NÃO espera o _lock
+        indefinidamente, senão a reconexão nunca roda quando o loop está
+        pendurado segurando esse lock — o deadlock de 2026-08-27.
+        """
+        if not forcar and self.conexao_viva():
+            return True
+
+        tem_lock = self._lock.acquire(timeout=self._TIMEOUT_LOCK_RECONEXAO)
+        extra = "" if tem_lock else " (_lock preso — reconectando por fora)"
+        try:
+            with self._lock_reconexao:
+                if not forcar and self.conexao_viva():
+                    return True
                 try:
+                    print(f"[SWING] Reconectando (socket morto){extra}...")
                     self._api = self._nova_conexao()
                     self._atualizar_cache()
+                    print("[SWING] Reconexão concluída.")
                     return True
-                except Exception:
+                except Exception as e:
+                    print(f"[SWING] Reconexão FALHOU: {e!r}")
                     return False
+        finally:
+            if tem_lock:
+                self._lock.release()

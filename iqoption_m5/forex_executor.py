@@ -14,12 +14,14 @@ class ExecutorForexSimulado:
         banca: float = 1000.0,
         risco_percentual: float = 0.0025,
         spread: float = 0.00010,
+        ambiguidade_intrabar: str = "stop",
     ):
-        if banca <= 0 or not 0 < risco_percentual <= 0.02 or spread < 0:
+        if banca <= 0 or not 0 < risco_percentual <= 0.02 or spread < 0 or ambiguidade_intrabar not in {"stop", "alvo"}:
             raise ValueError("Configuração de risco/spread inválida.")
         self.banca = float(banca)
         self.risco_percentual = float(risco_percentual)
         self.spread = float(spread)
+        self.ambiguidade_intrabar = ambiguidade_intrabar
         self.posicao: PosicaoForex | None = None
         self.resultados: list[ResultadoForex] = []
 
@@ -60,8 +62,8 @@ class ExecutorForexSimulado:
         if not stop_atingido and not alvo_atingido:
             return None
         # Conservador: se OHLC não revela a ordem intrabar, contabiliza o stop.
-        motivo = "stop" if stop_atingido else "alvo"
-        saida = p.stop if stop_atingido else p.alvo
+        motivo = "stop" if stop_atingido and (not alvo_atingido or self.ambiguidade_intrabar == "stop") else "alvo"
+        saida = p.stop if motivo == "stop" else p.alvo
         lucro = (
             (saida - p.entrada) * p.quantidade
             if p.lado == "buy"

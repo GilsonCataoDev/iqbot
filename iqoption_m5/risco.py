@@ -1,10 +1,13 @@
 import json
+import os
 import threading
 import time
+import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 
 from .config import Configuracao
+from .exposicao import CoordenadorExposicao
 from .modelos import Autorizacao, Decisao, EstadoPersistido, ResumoRisco, SnapshotMercado
 
 KILL_SWITCH_ARQUIVO = Path(__file__).resolve().parent.parent / "kill_switch.json"
@@ -43,6 +46,16 @@ class GerenciadorRisco:
         self._motivo_encerramento = "operacao_pendente_banco" if estado.ordem_pendente else None
         self._cooldown_ate: float = 0.0
         self._ordens_abertas: dict[str, str] = {}  # ativo_base -> direcao ("call"/"put")
+        self._coordenador_exposicao = None
+        if config.bloquear_direcao_paralela:
+            expiracoes = list((config.expiracao_por_setup or {}).values())
+            ttl = (max(expiracoes or [config.expiracao_minutos]) * 60) + config.timeframe_segundos
+            self._coordenador_exposicao = CoordenadorExposicao(
+                config.pasta_dados / "exposicao_global.sqlite3",
+                config.conta,
+                f"{os.getpid()}-{uuid.uuid4().hex}",
+                ttl_segundos=ttl,
+            )
         # Drawdown: rastreia banca pico para calcular drawdown percentual
         self._banca_pico: float = max(config.banca_inicial + estado.lucro_total, config.banca_inicial)
         # Circuit breaker: bloqueia por tempo após N perdas seguidas
@@ -149,7 +162,17 @@ class GerenciadorRisco:
         if snapshot.payout is not None and snapshot.payout < self.config.payout_minimo:
             return Autorizacao(False, "payout_abaixo_minimo")
         segundo_no_candle = snapshot.timestamp_servidor % self.config.timeframe_segundos
-        if segundo_no_candle >= self.config.entrada_max_segundos_no_candle:
+        setup_nome = decisao.detalhes.get("setup", decisao.motivo)
+        janela_setup = (
+            self.config.janela_entrada_por_setup.get(setup_nome)
+            if self.config.janela_entrada_por_setup
+            else None
+        )
+        if janela_setup is not None:
+            entrada_atrasada = segundo_no_candle > janela_setup
+        else:
+            entrada_atrasada = segundo_no_candle >= self.config.entrada_max_segundos_no_candle
+        if entrada_atrasada:
             return Autorizacao(False, "entrada_atrasada")
         if _base_ativo(snapshot.ativo) in self._ordens_abertas:
             return Autorizacao(False, "ordem_ja_aberta")
@@ -195,6 +218,12 @@ class GerenciadorRisco:
         with self._lock:
             autorizacao = self._avaliar_sem_lock(snapshot, decisao)
             if autorizacao.permitida:
+                if self._coordenador_exposicao is not None:
+                    ok, motivo = self._coordenador_exposicao.reservar(
+                        snapshot.ativo, decisao.direcao
+                    )
+                    if not ok:
+                        return Autorizacao(False, motivo)
                 self._ordens_abertas[_base_ativo(snapshot.ativo)] = decisao.direcao
                 self._enviadas += 1
             return autorizacao
@@ -204,11 +233,15 @@ class GerenciadorRisco:
             key = _base_ativo(ativo)
             if key in self._ordens_abertas:
                 self._ordens_abertas.pop(key, None)
+                if self._coordenador_exposicao is not None:
+                    self._coordenador_exposicao.liberar(ativo)
                 self._enviadas = max(0, self._enviadas - 1)
 
     def registrar_resultado(self, lucro: float | None, ativo: str) -> None:
         with self._lock:
             self._ordens_abertas.pop(_base_ativo(ativo), None)
+            if self._coordenador_exposicao is not None:
+                self._coordenador_exposicao.liberar(ativo)
             if self.config.cooldown_pos_ordem_segundos > 0:
                 self._cooldown_ate = time.time() + self.config.cooldown_pos_ordem_segundos
             self._finalizadas += 1

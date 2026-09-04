@@ -1,9 +1,14 @@
 import unittest
+import time
 
 import pandas as pd
 
 from iqoption_m5.config import Configuracao
-from iqoption_m5.mercado_iq import MercadoIQ
+from iqoption_m5.mercado_iq import MercadoIQ, MercadoIndisponivel
+
+
+def _opcao(commission):
+    return {"option": {"profit": {"commission": commission}}}
 
 
 class ApiSemListaDigital:
@@ -11,9 +16,12 @@ class ApiSemListaDigital:
         return {
             "turbo": {
                 "actives": {
-                    "1": {"name": "turbo.EURUSD", "enabled": True, "is_suspended": False},
-                    "2": {"name": "turbo.GBPUSD", "enabled": False, "is_suspended": False},
-                    "3": {"name": "turbo.EURUSD-OTC", "enabled": True, "is_suspended": False},
+                    "1": {"name": "turbo.EURUSD", "enabled": True,
+                          "is_suspended": False, **_opcao(15)},
+                    "2": {"name": "turbo.GBPUSD", "enabled": False,
+                          "is_suspended": False, **_opcao(20)},
+                    "3": {"name": "turbo.EURUSD-OTC", "enabled": True,
+                          "is_suspended": False, **_opcao(10)},
                 }
             }
         }
@@ -22,15 +30,78 @@ class ApiSemListaDigital:
         raise TypeError("'NoneType' object is not subscriptable")
 
     def get_all_profit(self):
-        return {
-            "EURUSD": {"turbo": 0.85},
-            "GBPUSD": {"turbo": 0.80},
-            "USDJPY": {"turbo": 0.75},
-            "EURUSD-OTC": {"turbo": 0.90},
-        }
+        raise AssertionError(
+            "BUG: get_all_profit usa o endpoint v1 morto (busy-wait de 30s que "
+            "retenta pra sempre e nunca levanta). O payout tem de sair do v2."
+        )
 
 
 class TestMercadoIQ(unittest.TestCase):
+    def test_snapshot_recupera_candle_direto_quando_stream_esta_atrasado(self):
+        """O gráfico não pode congelar só porque o stream da IQ ficou velho."""
+        agora = int(time.time())
+        inicio_atual = agora - (agora % 300)
+
+        def vela(inicio, fechamento):
+            return {
+                "from": inicio, "open": fechamento - .0001, "close": fechamento,
+                "min": fechamento - .0002, "max": fechamento + .0002, "volume": 10,
+            }
+
+        class ApiStreamVelho:
+            def get_server_timestamp(self):
+                return agora
+
+            def get_realtime_candles(self, ativo, timeframe):
+                antiga = vela(inicio_atual - 1_200, 1.10)
+                return {antiga["from"]: antiga}
+
+            def get_candles(self, ativo, timeframe, quantidade, fim):
+                return [
+                    vela(inicio_atual - 600, 1.11),
+                    vela(inicio_atual - 300, 1.12),
+                    vela(inicio_atual, 1.13),
+                ]
+
+        mercado = MercadoIQ(Configuracao(ativos=("EURUSD",), limite_candles=3))
+        mercado._api = ApiStreamVelho()
+        mercado._mercado_aberto = {"EURUSD": True}
+        mercado._payouts = {"EURUSD": .85}
+        mercado._cache_atualizado = time.time()
+        mercado._buffers["EURUSD"] = mercado._candles_para_df(
+            [
+                vela(inicio_atual - 1_800, 1.10), vela(inicio_atual - 1_500, 1.10),
+                vela(inicio_atual - 1_200, 1.10),
+            ]
+        )
+
+        snapshot = mercado.snapshot("EURUSD")
+
+        self.assertEqual(float(snapshot.candles.iloc[-1]["Close"]), 1.13)
+        self.assertGreaterEqual(int(snapshot.candles.index[-1].timestamp()), inicio_atual)
+
+    def test_realtime_tem_timeout_para_nao_congelar_o_lab(self):
+        class ApiRealtimeTravado:
+            def get_realtime_candles(self, ativo, timeframe):
+                time.sleep(.2)
+
+        mercado = MercadoIQ(Configuracao())
+        mercado._api = ApiRealtimeTravado()
+        inicio = time.monotonic()
+        with self.assertRaises(MercadoIndisponivel):
+            mercado._buscar_realtime_com_timeout("EURUSD", 300, timeout=.02)
+        self.assertLess(time.monotonic() - inicio, .12)
+
+    def test_contexto_superior_descarta_candle_em_formacao(self):
+        indice = pd.date_range("2026-08-25 08:00", periods=3, freq="1h")
+        candles = pd.DataFrame({"Close": [1.0, 2.0, 99.0]}, index=indice)
+
+        fechados = MercadoIQ._somente_fechados(
+            candles, timeframe_segundos=3600, timestamp_servidor=indice[-1].timestamp() + 300
+        )
+
+        self.assertEqual(list(fechados["Close"]), [1.0, 2.0])
+
     def test_ids_separam_otc_explicito_de_mercado_normal_op(self):
         class ApiComNormalEOTC:
             def get_all_init_v2(self):
@@ -56,7 +127,7 @@ class TestMercadoIQ(unittest.TestCase):
         )
         mercado._api = ApiComNormalEOTC()
 
-        abertos = mercado._obter_abertura_turbo()
+        abertos, _ = mercado._obter_estado_mercado()
 
         self.assertEqual(mercado._ids_ativos["GBPUSD-OTC"], 81)
         self.assertEqual(mercado._ids_ativos["GBPUSD"], 1867)
@@ -73,8 +144,42 @@ class TestMercadoIQ(unittest.TestCase):
         self.assertFalse(mercado._mercado_aberto["GBPUSD"])
         self.assertFalse(mercado._mercado_aberto["USDJPY"])
         self.assertTrue(mercado._mercado_aberto["EURUSD-OTC"])
-        self.assertEqual(mercado._payouts["EURUSD"], 0.85)
-        self.assertEqual(mercado._payouts["EURUSD-OTC"], 0.90)
+        # Payout vem de option.profit.commission do proprio v2: (100-c)/100.
+        self.assertAlmostEqual(mercado._payouts["EURUSD"], 0.85)
+        self.assertAlmostEqual(mercado._payouts["EURUSD-OTC"], 0.90)
+        self.assertIsNone(mercado._payouts["USDJPY"])
+
+    def test_refresh_de_cache_nao_repete_com_workers_concorrentes(self):
+        """Sem lock, os 7 workers veem o cache vencido no mesmo instante e
+        disparam 7 refreshes simultaneos — era a origem das rajadas de
+        'get_all_init late 30 sec' oito a oito no log."""
+        import threading
+
+        mercado = MercadoIQ(Configuracao())
+        mercado._api = ApiSemListaDigital()
+        chamadas = []
+        original = mercado._atualizar_cache_forcado
+
+        def contando():
+            chamadas.append(1)
+            original()
+
+        mercado._atualizar_cache_forcado = contando
+
+        largada = threading.Event()
+
+        def worker():
+            largada.wait()
+            mercado._atualizar_cache_se_preciso()
+
+        threads = [threading.Thread(target=worker) for _ in range(7)]
+        for t in threads:
+            t.start()
+        largada.set()
+        for t in threads:
+            t.join()
+
+        self.assertEqual(len(chamadas), 1)
 
     def test_consulta_resultado_de_ordem_de_conexao_anterior(self):
         class ApiBaixoNivel:
@@ -145,6 +250,29 @@ class TestMercadoIQ(unittest.TestCase):
         self.assertAlmostEqual(
             mercado.consultar_resultado("555", timeout_segundos=0.2),
             1.5,
+        )
+
+    def test_consulta_resultado_aceita_id_em_lista_da_iq(self):
+        class ApiBaixoNivel:
+            get_options_v2_data = None
+
+            def get_options_v2(self, limite, tipos):
+                self.get_options_v2_data = {
+                    "msg": {"closed_options": [{
+                        "id": [14217628554], "amount": 5.0,
+                        "win": "loose", "win_amount": 0.0,
+                    }]}
+                }
+
+        class ApiHistorico:
+            def __init__(self):
+                self.api = ApiBaixoNivel()
+
+        mercado = MercadoIQ(Configuracao())
+        mercado._api = ApiHistorico()
+        self.assertEqual(
+            mercado.consultar_resultado("14217628554", timeout_segundos=0.2),
+            "loose",
         )
 
     def test_resultado_por_candle_compara_entrada_com_fechamento(self):

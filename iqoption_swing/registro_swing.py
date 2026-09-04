@@ -5,7 +5,7 @@ from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 
-from .estrategia_swing import SinalSwing
+from .estrategia_swing import AnaliseSwing, SinalSwing
 
 
 class RegistroSwing:
@@ -71,6 +71,28 @@ class RegistroSwing:
                     tp REAL NOT NULL,
                     resultado TEXT,          -- 'win' | 'loss' | 'expirado'
                     encerrado_em TEXT,
+                    detalhes_json TEXT
+                );
+
+                CREATE TABLE IF NOT EXISTS analises_monitor (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    registrado_em TEXT NOT NULL,
+                    ativo TEXT NOT NULL,
+                    estado TEXT NOT NULL,
+                    direcao TEXT,
+                    setup TEXT,
+                    preco_atual REAL,
+                    zona_min REAL,
+                    zona_max REAL,
+                    invalidacao REAL,
+                    tp1 REAL,
+                    tp2 REAL,
+                    rr REAL,
+                    noticia_bloqueada INTEGER NOT NULL DEFAULT 0,
+                    noticia_desc TEXT,
+                    noticia_direcao TEXT,
+                    bloqueadores_json TEXT,
+                    pendentes_json TEXT,
                     detalhes_json TEXT
                 );
             """)
@@ -162,6 +184,66 @@ class RegistroSwing:
             )
             return cur.lastrowid  # type: ignore[return-value]
 
+    def registrar_analise_monitor(
+        self,
+        analise: AnaliseSwing,
+        preco_atual: float | None = None,
+        noticia_bloqueada: bool = False,
+        noticia_desc: str = "",
+        noticia_direcao: str | None = None,
+    ) -> int:
+        """Salva cada decisão do painel: ENTRAR / ESPERAR / EVITAR."""
+        zona = analise.zona_entrada
+        zona_min = min(zona) if zona else None
+        zona_max = max(zona) if zona else None
+        with self._lock, self._sessao() as db:
+            cur = db.execute(
+                """INSERT INTO analises_monitor
+                   (registrado_em, ativo, estado, direcao, setup, preco_atual,
+                    zona_min, zona_max, invalidacao, tp1, tp2, rr,
+                    noticia_bloqueada, noticia_desc, noticia_direcao,
+                    bloqueadores_json, pendentes_json, detalhes_json)
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                (
+                    datetime.now(timezone.utc).replace(tzinfo=None).isoformat(),
+                    analise.ativo,
+                    analise.estado,
+                    analise.direcao,
+                    analise.setup,
+                    preco_atual,
+                    zona_min,
+                    zona_max,
+                    analise.invalidacao,
+                    analise.tp1,
+                    analise.tp2,
+                    analise.rr,
+                    1 if noticia_bloqueada else 0,
+                    noticia_desc,
+                    noticia_direcao,
+                    json.dumps(analise.bloqueadores, default=str),
+                    json.dumps(analise.pendentes, default=str),
+                    json.dumps(analise.detalhes, default=str),
+                ),
+            )
+            return cur.lastrowid  # type: ignore[return-value]
+
+    def historico_analises_monitor(self, limit: int = 200) -> list[dict]:
+        """Retorna decisões recentes do painel Swing."""
+        with self._lock, self._sessao() as db:
+            rows = db.execute(
+                """SELECT id, registrado_em, ativo, estado, direcao, setup,
+                          preco_atual, zona_min, zona_max, invalidacao, tp1, tp2, rr,
+                          noticia_bloqueada, noticia_desc, noticia_direcao
+                   FROM analises_monitor ORDER BY registrado_em DESC LIMIT ?""",
+                (limit,),
+            ).fetchall()
+        keys = [
+            "id", "registrado_em", "ativo", "estado", "direcao", "setup",
+            "preco_atual", "zona_min", "zona_max", "invalidacao", "tp1", "tp2", "rr",
+            "noticia_bloqueada", "noticia_desc", "noticia_direcao",
+        ]
+        return [dict(zip(keys, r)) for r in rows]
+
     def monitor_pendentes(self) -> list[dict]:
         """Retorna sinais monitor sem resultado ainda."""
         with self._lock, self._sessao() as db:
@@ -235,13 +317,17 @@ class RegistroSwing:
             total = db.execute(
                 "SELECT COUNT(*) FROM operacoes WHERE enviada_em LIKE ?", (f"{hoje}%",)
             ).fetchone()[0]
-            perdas_consec = db.execute(
-                """SELECT COUNT(*) FROM (
-                     SELECT lucro FROM operacoes
-                     WHERE resultado IS NOT NULL
-                     ORDER BY enviada_em DESC LIMIT 10
-                   ) WHERE lucro < 0"""
-            ).fetchone()[0]
+            lucros_recentes = db.execute(
+                """SELECT lucro FROM operacoes
+                   WHERE resultado IS NOT NULL AND enviada_em LIKE ?
+                   ORDER BY enviada_em DESC""",
+                (f"{hoje}%",),
+            ).fetchall()
+            perdas_consec = 0
+            for (valor,) in lucros_recentes:
+                if valor is None or valor >= 0:
+                    break
+                perdas_consec += 1
             lucro = db.execute(
                 "SELECT COALESCE(SUM(lucro),0) FROM operacoes WHERE enviada_em LIKE ? AND lucro IS NOT NULL",
                 (f"{hoje}%",),

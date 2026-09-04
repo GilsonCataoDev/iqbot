@@ -191,8 +191,17 @@ class GraficoM5:
         niveis_sr: dict | None = None,
         plano_forex: dict | None = None,
         movimentos_unicos: dict | None = None,
+        fibo_contexto: dict | None = None,
     ) -> dict:
         conversor = self._unix
+        fibo_contexto_saida = dict(fibo_contexto) if fibo_contexto else None
+        if fibo_contexto_saida:
+            for campo in ("inicio", "fim"):
+                if fibo_contexto_saida.get(campo) is not None:
+                    fibo_contexto_saida[f"{campo}_time"] = conversor(
+                        fibo_contexto_saida[campo]
+                    )
+                    fibo_contexto_saida[campo] = str(fibo_contexto_saida[campo])
         candles = [
             {
                 "time": conversor(indice), "open": float(row.Open), "high": float(row.High),
@@ -227,10 +236,10 @@ class GraficoM5:
                 {"tipo": "suporte",     "preco": suporte},
                 {"tipo": "resistencia", "preco": resistencia},
             ]
-        fib = [
-            {"nivel": nivel, "preco": suporte + amplitude * nivel}
-            for nivel in (0.0, 0.236, 0.382, 0.5, 0.618, 0.786, 1.0)
-        ] if amplitude > 0 else []
+        # Sem impulso confirmado não existe Fibo. Usar simplesmente a máxima e
+        # a mínima da janela criava níveis visualmente convincentes, porém sem
+        # relação com um movimento negociável.
+        fib = list(fibo_contexto_saida.get("niveis", [])) if fibo_contexto_saida else []
         sinais_reversao = []
         pullbacks = []
         confluencias = []
@@ -243,6 +252,9 @@ class GraficoM5:
                 "fatores": list(sinal.detalhes.get("fatores", [])),
                 "setup": sinal.detalhes.get("setup", sinal.motivo),
                 "razao": list(sinal.detalhes.get("razao", [])),
+                "leituraM5": sinal.detalhes.get("leitura_m5"),
+                "zonaFib": sinal.detalhes.get("zona_fib"),
+                "nivelSr": sinal.detalhes.get("nivel_sr"),
             }
             if sinal.detalhes.get("setup") in ("pullback", "pullback_confluencia"):
                 pullbacks.append(item)
@@ -271,6 +283,7 @@ class GraficoM5:
             "pullbacks": pullbacks,
             "niveis": niveis,
             "fib": fib,
+            "fibContexto": fibo_contexto_saida,
             "confluencias": confluencias,
             "sinais": sinais_reversao,
             "alertaProximo": (

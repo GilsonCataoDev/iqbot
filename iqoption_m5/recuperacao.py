@@ -3,6 +3,7 @@ import threading
 from datetime import datetime
 
 from .executor import ExecutorSeguro
+from .exposicao import CoordenadorExposicao
 from .modelos import ResultadoOrdem
 from .registro import RegistroSQLite
 
@@ -33,15 +34,29 @@ def recuperar_operacoes_pendentes(
     config=None,
     timeout_segundos: float = 25.0,
     idade_perda_tecnica_segundos: float = 600.0,
+    incluir_desconhecidas: bool = True,
 ) -> tuple[int, int]:
     recuperadas = 0
     falhas = 0
-    for pendente in registro.operacoes_pendentes():
+    pendentes = (
+        registro.operacoes_pendentes()
+        if incluir_desconhecidas
+        else registro.operacoes_abertas()
+    )
+    exposicao = None
+    if config is not None and getattr(config, "bloquear_direcao_paralela", False):
+        exposicao = CoordenadorExposicao(
+            config.pasta_dados / "exposicao_global.sqlite3",
+            config.conta,
+            "recuperacao",
+            ttl_segundos=60,
+        )
+    for pendente in pendentes:
         # Nunca consulta a IQ antes da expiracao real da opcao — um resultado
         # devolvido cedo demais pode ser pnl_net provisorio de opcao ainda aberta
         # (mesma causa raiz do bug corrigido em mercado_iq.aguardar_resultado).
         if config is not None:
-            expiracao_min = (
+            expiracao_min = pendente.expiracao_minutos or (
                 (config.expiracao_por_setup or {}).get(pendente.setup)
                 if config.expiracao_por_setup
                 else None
@@ -49,7 +64,15 @@ def recuperar_operacoes_pendentes(
             if expiracao_min is None:
                 expiracao_min = config.expiracao_minutos
             idade = (datetime.now() - pendente.enviada_em).total_seconds()
-            if idade < expiracao_min * 60 + 5:
+            # 0 = fim da vela atual. Após reinício, use a duração inteira do
+            # timeframe como limite conservador, pois o segundo da entrada não
+            # fica disponível nesta rotina.
+            espera_segundos = (
+                config.timeframe_segundos + 5
+                if float(expiracao_min) == 0
+                else float(expiracao_min) * 60 + 5
+            )
+            if idade < espera_segundos:
                 print(
                     f">> {pendente.ativo}: ordem {pendente.id_ordem} ainda nao "
                     f"expirou (idade={idade:.0f}s, expiracao={expiracao_min}min) — "
@@ -78,6 +101,8 @@ def recuperar_operacoes_pendentes(
                     resultado_bruto=bruto,
                 )
             )
+            if exposicao is not None:
+                exposicao.liberar_ativo(pendente.ativo)
             print(
                 f">> {pendente.ativo}: resultado da ordem {pendente.id_ordem} "
                 f"recuperado | lucro={lucro:+.2f}"
@@ -99,6 +124,8 @@ def recuperar_operacoes_pendentes(
                         resultado_bruto=f"resultado_desconhecido:{erro}",
                     )
                 )
+                if exposicao is not None:
+                    exposicao.liberar_ativo(pendente.ativo)
                 print(
                     f">> {pendente.ativo}: a IQ não devolveu o resultado da ordem "
                     f"{pendente.id_ordem}; mantida como resultado desconhecido. "

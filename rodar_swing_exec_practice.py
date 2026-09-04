@@ -1,11 +1,11 @@
-"""Swing bot — PRACTICE com execução de ordens."""
+"""Swing bot — PRACTICE em monitor; execução bloqueada até nova validação."""
 from iqoption_swing.config_swing import SwingConfig
 from iqoption_swing.app_swing import main
 
 config = SwingConfig(
     modo="forex",
     conta="PRACTICE",
-    executar_ordens=True,
+    executar_ordens=False,
     ativos=(
         "EURUSD", "GBPUSD", "USDJPY",
         "EURJPY", "GBPJPY", "AUDUSD",

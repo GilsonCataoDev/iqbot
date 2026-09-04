@@ -120,19 +120,18 @@ class TestEstrategiaM5(unittest.TestCase):
         self.assertEqual(set(decisao.detalhes["fatores"]), {"fibo", "resistencia"})
 
     def test_pullback_sem_confirmacao_aciona_fibo_sr_retracao(self):
-        # Vela bearish em uptrend tocando Fib+S/R = fibo_sr_retracao (entra sem confirmação).
-        # Desde 21706d8 esse setup é intra-candle: avaliado no candle EM FORMAÇÃO
-        # via avaliar_reversoes(), não no candle fechado de avaliar().
+        # Vela bullish em uptrend tocando Fib+S/R = fibo_sr_retracao.
+        # A estratégia mantém a âncora estável já avaliada; a Fibo visual do
+        # painel usa uma função separada e pode acompanhar a perna em andamento.
         df = self._cenario_pullback("call")
         idx = df.index
         df.loc[idx[-2], ["Open", "High", "Low", "Close", "RSI"]] = [104.4, 104.5, 104.0, 104.1, 45.0]
-        df.loc[idx[-1], ["Open", "High", "Low", "Close", "RSI"]] = [104.6, 104.6, 104.0, 104.2, 44.0]
+        df.loc[idx[-1], ["Open", "High", "Low", "Close", "RSI"]] = [104.1, 104.6, 104.0, 104.4, 44.0]
         decisoes = self.estrategia.avaliar_reversoes("EURUSD-OTC", df)
         fibo = [d for d in decisoes if d.detalhes.get("setup") == "fibo_sr_retracao"]
-        self.assertTrue(fibo, "vela bearish tocando fibo+suporte deve gerar fibo_sr_retracao")
+        self.assertTrue(fibo, "vela bullish tocando fibo+suporte deve gerar fibo_sr_retracao")
         self.assertEqual(fibo[0].direcao, "call")
         self.assertEqual(set(fibo[0].detalhes["fatores"]), {"fibo", "suporte"})
-        # o setup de confirmação (candle fechado) não dispara nesse cenário
         decisao_fechado = self.estrategia.avaliar("EURUSD-OTC", df)
         if decisao_fechado is not None:
             self.assertNotEqual(decisao_fechado.detalhes.get("setup"), "fibo_sr_retracao")
@@ -162,6 +161,42 @@ class TestEstrategiasOpcionais(unittest.TestCase):
         est = EstrategiaReversaoM5(config)
         est.calcular_indicadores = lambda candles, ativo="": candles.copy()
         return est
+
+    def test_breakout_reteste_call_exige_rompimento_reteste_e_confirmacao(self):
+        df = self._base_df(70)
+        df["ATR"] = 0.0010
+        df["RSI"] = 55.0
+        df["EMA_Micro"] = 1.1010
+        df["EMA_Macro"] = 1.1000
+        df["TendenciaMacro"] = "alta"
+        df[["Open", "High", "Low", "Close"]] = [1.1000, 1.1020, 1.0980, 1.1000]
+
+        # pivô de resistência antes do rompimento
+        df.iloc[58, df.columns.get_loc("High")] = 1.1200
+        df.iloc[58, df.columns.get_loc("Close")] = 1.1100
+        # rompimento, reteste e confirmação
+        df.iloc[64, df.columns.get_loc("Open")] = 1.1190
+        df.iloc[64, df.columns.get_loc("Close")] = 1.1230
+        df.iloc[64, df.columns.get_loc("High")] = 1.1240
+        df.iloc[65, df.columns.get_loc("Open")] = 1.1230
+        df.iloc[65, df.columns.get_loc("Low")] = 1.1201
+        df.iloc[65, df.columns.get_loc("Close")] = 1.1210
+        df.iloc[65, df.columns.get_loc("High")] = 1.1220
+        df.iloc[66, df.columns.get_loc("Open")] = 1.1210
+        df.iloc[66, df.columns.get_loc("Close")] = 1.1235
+        df.iloc[66, df.columns.get_loc("High")] = 1.1245
+
+        est = self._estrategia(
+            breakout_reteste_ativo=True,
+            pullback_confluencia_ativo=False,
+            reversao_bollinger_rsi_ativo=False,
+            macd_crossover_ativo=False,
+            retracao_intracandle_ativo=False,
+        )
+        decisao = est._avaliar_breakout_reteste("EURUSD", df, 66)
+        self.assertIsNotNone(decisao)
+        self.assertEqual(decisao.direcao, "call")
+        self.assertEqual(decisao.detalhes["setup"], "breakout_reteste")
 
     # ------------------------------------------------------------------ #
     # engulfing_sr                                                         #
@@ -334,3 +369,65 @@ class TestEstrategiasOpcionais(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+def test_ema921_intravela_gera_call_no_toque_atual_da_faixa():
+    """O setup intravela não pode depender de candle de rejeição fechado."""
+    from iqoption_m5.config import configuracao_ema921_rsi_intravela_m5_practice
+
+    indice = pd.date_range("2026-01-01", periods=30, freq="5min")
+    closes = [100 + i * 0.1 for i in range(29)] + [102.25]
+    dados = pd.DataFrame(
+        {
+            "Open": closes,
+            "High": [preco + 0.12 for preco in closes],
+            "Low": [preco - 0.12 for preco in closes],
+            "Close": closes,
+            "ATR": [0.3] * 30,
+            "RSI": [50.0] * 30,
+        },
+        index=indice,
+    )
+    estrategia = EstrategiaReversaoM5(configuracao_ema921_rsi_intravela_m5_practice())
+
+    decisao = estrategia._avaliar_ema921_rsi_intravela("EURUSD", dados, len(dados) - 1)
+
+    assert decisao is not None
+    assert decisao.direcao == "call"
+    assert decisao.detalhes["setup"] == "ema921_rsi_intravela"
+    assert decisao.detalhes["confirmacao"] == "toque_ao_vivo"
+
+
+def test_nzd_trend_pullback_exige_m15_alinhado_e_adx():
+    """O candidato NZD só aparece com tendência M5/M15 e força mensurável."""
+    from iqoption_m5.config import Configuracao
+
+    indice_m5 = pd.date_range("2026-01-01", periods=35, freq="5min")
+    closes_m5 = [100 + i * 0.1 for i in range(34)] + [103.7]
+    m5 = pd.DataFrame(
+        {
+            "Open": closes_m5[:-1] + [103.0],
+            "High": [v + 0.15 for v in closes_m5[:-1]] + [103.8],
+            "Low": [v - 0.15 for v in closes_m5[:-1]] + [102.3],
+            "Close": closes_m5,
+            "ATR": [0.5] * 35,
+            "RSI": [50.0] * 35,
+            "ADX": [25.0] * 35,
+            "DI_Mais": [30.0] * 35,
+            "DI_Menos": [15.0] * 35,
+        },
+        index=indice_m5,
+    )
+    indice_m15 = pd.date_range("2026-01-01", periods=30, freq="15min")
+    closes_m15 = [100 + i * 0.2 for i in range(30)]
+    m15 = pd.DataFrame({"Close": closes_m15}, index=indice_m15)
+    estrategia = EstrategiaReversaoM5(Configuracao(nzd_trend_pullback_ativo=True))
+
+    decisao = estrategia.avaliar_nzd_trend_pullback("NZDUSD", m5, m15, len(m5) - 1)
+
+    assert decisao is not None
+    assert decisao.direcao == "call"
+    assert decisao.detalhes["setup"] == "nzd_trend_pullback_v1"
+    m15_baixa = m15.copy()
+    m15_baixa["Close"] = list(reversed(closes_m15))
+    assert estrategia.avaliar_nzd_trend_pullback("NZDUSD", m5, m15_baixa, len(m5) - 1) is None

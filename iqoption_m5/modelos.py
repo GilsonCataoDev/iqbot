@@ -55,6 +55,8 @@ class OperacaoPendente:
     valor: float
     payout: float
     setup: str = "desconhecido"
+    timeframe: int = 0
+    expiracao_minutos: int = 0
 
 
 @dataclass(frozen=True)

@@ -551,6 +551,15 @@ class EstrategiaSwing:
         detalhes["setup"] = setup_nome
         detalhes["zona_entrada"] = [round(zona_entrada[0], 5), round(zona_entrada[1], 5)]
 
+        setups_ativos = set(getattr(self.config, "setups_ativos", ()) or ())
+        if setups_ativos and setup_nome not in setups_ativos:
+            return self._evitar(
+                ativo,
+                direcao,
+                [f"setup {setup_nome} desligado pelo filtro Swing"],
+                detalhes,
+            )
+
         invalidacao = self._calcular_invalidacao(df_h4, tendencia, zona_entrada)
         tp2 = self._calcular_tp2(df_h4, tendencia, tp1, preco_atual) if tp1 else None
         rr  = self._calcular_rr(tendencia, zona_entrada, tp1, invalidacao) if tp1 else None

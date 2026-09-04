@@ -32,16 +32,184 @@ from .timing import (
 )
 from .estrategia import EstrategiaReversaoM5
 from .executor import ExecutorSeguro
+from .forex_estrategia import plano_rompimento_reteste
+from .forex_modelos import PlanoForex
 from .grafico import GraficoM5
 from .agente_regime import RegimeMercado, classificar as regime_classificar
 from .ia import analisar as ia_analisar, montar_contexto as ia_contexto
 from .mercado_iq import MercadoIQ, MercadoIndisponivel
 from .modelos import Decisao
+from iqoption_swing.tocaia_swing import avaliar_tocaia, tocaia_para_alerta
 
 try:
     from plyer import notification as _notificacao
 except ImportError:
     _notificacao = None
+
+
+def _alerta_tocaia_auxiliar(
+    config: Configuracao,
+    ativo: str,
+    indicadores: pd.DataFrame,
+    dados_grafico: dict,
+) -> dict | None:
+    """Aviso auxiliar para M15/H1: espera região + gatilho, sem executar ordem."""
+    if config.timeframe_segundos not in (900, 3600):
+        return None
+    tolerancia_pips = 8.0 if config.timeframe_segundos == 900 else 12.0
+    tocaia = avaliar_tocaia(
+        ativo,
+        indicadores,
+        fib=dados_grafico.get("fib"),
+        canal=dados_grafico.get("canal"),
+        niveis_sr=dados_grafico.get("niveisSR"),
+        tolerancia_pips=tolerancia_pips,
+    )
+    if tocaia is None:
+        return None
+    alerta = tocaia_para_alerta(tocaia)
+    tf = config.rotulo_timeframe
+    tendencia = str(dados_grafico.get("tendenciaMacro") or "").lower()
+    contra_tendencia = (
+        (alerta["direcao"] == "put" and tendencia == "alta")
+        or (alerta["direcao"] == "call" and tendencia == "baixa")
+    )
+    alerta["setup"] = f"tocaia_{tf.lower()}"
+    alerta["mensagem"] = f"{tf}: {alerta['mensagem']}"
+    alerta["fatores"] = [f"radar auxiliar {tf}", *alerta.get("fatores", [])]
+    if contra_tendencia:
+        direcao_original = alerta["direcao"].upper()
+        alerta["direcao"] = "aviso"
+        alerta["precoEntrada"] = alerta["preco"]
+        alerta["radarEstado"] = "CUIDADO_TOPO" if direcao_original == "PUT" else "CUIDADO_FUNDO"
+        alerta["fatores"] = [
+            f"não é {direcao_original}: contra H4 {tendencia}",
+            "aguardar rompimento a favor da tendência ou rejeição clara",
+            *alerta["fatores"],
+        ]
+        alerta["mensagem"] = (
+            f"{tf}: cuidado, região de {'topo' if direcao_original == 'PUT' else 'fundo'} "
+            f"contra H4 {tendencia}; não é entrada imediata."
+        )
+    return alerta
+
+
+def _plano_forex_m15(
+    config: Configuracao,
+    ativo: str,
+    candles: pd.DataFrame,
+) -> PlanoForex | None:
+    if not config.forex_reteste_m15_ativo or config.timeframe_segundos != 900:
+        return None
+    if candles is None or len(candles) < 80:
+        return None
+    fechados = candles.iloc[:-1]  # último candle do stream pode estar formando
+    if len(fechados) < 80:
+        return None
+    return plano_rompimento_reteste(ativo, fechados)
+
+
+def _alerta_plano_forex(plano: PlanoForex, preco_atual: float, unix) -> dict:
+    direcao = "call" if plano.lado == "buy" else "put"
+    return {
+        "id": f"{plano.ativo}:forex_reteste_m15:{plano.sinal_em.isoformat()}",
+        "time": unix(pd.Timestamp(plano.sinal_em)),
+        "direcao": direcao,
+        "preco": preco_atual,
+        "precoEntrada": preco_atual,
+        "entradaConfirmada": True,
+        "setup": "forex_reteste_m15",
+        "radarEstado": "ENTRAR_FOREX_BINARIA",
+        "sl": plano.stop,
+        "tp": plano.alvo,
+        "alvoProvavel": plano.alvo,
+        "fatores": [
+            "plano forex: rompimento + reteste",
+            f"nível {plano.nivel:.5f}",
+            f"SL visual {plano.stop:.5f}",
+            f"TP visual {plano.alvo:.5f}",
+        ],
+        "mensagem": "Entrada forex visual; execução automática na binária practice.",
+    }
+
+
+def _pip_do_ativo(ativo: str) -> float:
+    """Tamanho do pip: pares com JPY cotam com 2 casas, o resto com 4."""
+    return 0.01 if "JPY" in ativo.upper() else 0.0001
+
+
+def _plano_forex_payload(plano: PlanoForex, preco_atual: float) -> dict:
+    """Card do plano forex pro grafico: onde entrar, TP, SL e R:R.
+
+    Os pips e o R:R sao calculados aqui, no Python, e nao no JS: a conta depende
+    do tamanho do pip do par, que o front nao tem como saber.
+    """
+    pip = _pip_do_ativo(plano.ativo)
+    dist_tp = abs(plano.alvo - preco_atual) / pip
+    dist_sl = abs(preco_atual - plano.stop) / pip
+    risco = abs(preco_atual - plano.stop)
+    return {
+        "id": f"{plano.ativo}:forex_reteste_m15:{plano.sinal_em.isoformat()}",
+        "ativo": plano.ativo,
+        "lado": "COMPRA" if plano.lado == "buy" else "VENDA",
+        "direcao": "call" if plano.lado == "buy" else "put",
+        "nivel": plano.nivel,
+        "entrada": preco_atual,
+        "tp": plano.alvo,
+        "sl": plano.stop,
+        "tpPips": round(dist_tp, 1),
+        "slPips": round(dist_sl, 1),
+        "rr": round(abs(plano.alvo - preco_atual) / risco, 2) if risco > 0 else None,
+        "motivo": plano.motivo,
+        "sinalEm": plano.sinal_em.isoformat(),
+        "nota": "SL/TP sao o plano forex manual. A binaria M15 entra sozinha e expira no fim da vela.",
+    }
+
+
+def _decisao_plano_forex(plano: PlanoForex, preco_atual: float) -> Decisao:
+    direcao = "call" if plano.lado == "buy" else "put"
+    return Decisao(
+        ativo=plano.ativo,
+        direcao=direcao,
+        preco=preco_atual,
+        candle_hora=pd.Timestamp(plano.sinal_em),
+        motivo="forex_reteste_m15",
+        detalhes={
+            "setup": "forex_reteste_m15",
+            "nivel_sr": plano.nivel,
+            "sl": plano.stop,
+            "tp": plano.alvo,
+            "alvoProvavel": plano.alvo,
+            "risco_preco": plano.risco_preco,
+            "razao": [
+                "rompimento + reteste com plano forex",
+                "SL/TP são visuais para validar espaço",
+                "execução é binária CALL/PUT",
+            ],
+        },
+    )
+
+
+_SETUPS_INTRACANDLE_TOQUE = {
+    "sr_rejeicao",
+    "fibo_sr_retracao",
+    "pin_bar_sr",
+    "retracao_intracandle",
+    "pullback_confluencia",
+    "ema921_rsi_intravela",
+}
+
+
+def _limite_janela_operacional(config: Configuracao) -> int:
+    limite = int(config.entrada_max_segundos_no_candle)
+    if not config.entrada_intracandle_por_toque_ativo or not config.janela_entrada_por_setup:
+        return limite
+    extras = [
+        int(janela)
+        for setup, janela in config.janela_entrada_por_setup.items()
+        if setup in _SETUPS_INTRACANDLE_TOQUE and janela is not None
+    ]
+    return max([limite, *extras]) if extras else limite
 
 
 # ---------------------------------------------------------------------------
@@ -57,19 +225,52 @@ def _atualizar_heartbeat() -> None:
         _ultimo_heartbeat = time.time()
 
 
-def _watchdog(config) -> None:  # type: ignore[no-untyped-def]
-    """Thread daemon que avisa se o loop principal parou de processar ativos."""
+def _watchdog(config, mercado=None) -> None:  # type: ignore[no-untyped-def]
+    """Thread daemon que detecta E CORRIGE trava do loop principal.
+
+    Antes só imprimia alerta. Em 2026-08-27 o WebSocket caiu às 10:31 e o bot
+    ficou 25min repetindo o alerta sem fazer nada — porque a sonda de conexão
+    usava uma property em cache que nunca falha (ver MercadoIQ.conexao_viva).
+    Agora o watchdog força reconexão, que é a única ação capaz de destravar.
+
+    Backoff: tenta reconectar no máximo uma vez por ciclo de timeout, para não
+    entrar em loop de reconexão quando a IQ está fora do ar.
+    """
+    tentativas = 0
+    ultima_tentativa = 0.0
     while True:
         time.sleep(60)
         with _lock_heartbeat:
             desde = time.time() - _ultimo_heartbeat
         limite = config.watchdog_timeout_minutos * 60
-        if desde > limite:
-            print(
-                f"[WATCHDOG] ALERTA: nenhum ativo processado há {desde/60:.1f} min "
-                f"(limite: {config.watchdog_timeout_minutos} min). "
-                "Verifique conexão ou trave do processo."
-            )
+        if desde <= limite:
+            tentativas = 0
+            continue
+
+        print(
+            f"[WATCHDOG] ALERTA: nenhum ativo processado há {desde/60:.1f} min "
+            f"(limite: {config.watchdog_timeout_minutos} min)."
+        )
+        if mercado is None:
+            continue
+
+        # Não martela: espera um ciclo de timeout inteiro entre tentativas.
+        if time.time() - ultima_tentativa < limite:
+            continue
+        ultima_tentativa = time.time()
+        tentativas += 1
+        print(f"[WATCHDOG] Forçando reconexão (tentativa {tentativas})...")
+        try:
+            ok = mercado.reconectar_se_necessario(forcar=True)
+        except Exception as e:
+            ok = False
+            print(f"[WATCHDOG] Erro ao reconectar: {e!r}")
+        if ok:
+            print("[WATCHDOG] Reconexão OK — se o loop não voltar no próximo "
+                  "ciclo, o travamento não é de conexão.")
+        else:
+            print(f"[WATCHDOG] Reconexão falhou ({tentativas}x). Se persistir, "
+                  "reinicie o bot pelo .bat.")
 
 
 # ---------------------------------------------------------------------------
@@ -107,10 +308,75 @@ from .registro import RegistroSQLite
 from .risco import GerenciadorRisco, kill_switch_ativo, _base_ativo as _base_ativo_risco
 
 
+def _expiracao_pendente_segundos(config: Configuracao, setup: str) -> int:
+    minutos = (
+        (config.expiracao_por_setup or {}).get(setup)
+        if config.expiracao_por_setup
+        else None
+    )
+    if minutos is None:
+        minutos = config.expiracao_minutos
+    # 0 significa fim da vela atual. Para recuperação após reinício não temos
+    # o segundo exato da entrada; aguardar até um timeframe inteiro evita
+    # consultar a IQ cedo e marcar um resultado provisório como definitivo.
+    if float(minutos) == 0:
+        return config.timeframe_segundos + 5
+    return int(float(minutos) * 60 + 5)
+
+
+def _segundos_ate_proxima_pendente_expirar(registro: RegistroSQLite, config: Configuracao) -> float | None:
+    abertas = registro.operacoes_abertas()
+    if not abertas:
+        return None
+    agora = datetime.now()
+    restantes = []
+    for ordem in abertas:
+        idade = (agora - ordem.enviada_em).total_seconds()
+        restantes.append(_expiracao_pendente_segundos(config, ordem.setup) - idade)
+    return max(0.0, min(restantes)) if restantes else None
+
+
+def _recuperar_pendencias_inicio(
+    mercado: MercadoIQ,
+    registro: RegistroSQLite,
+    config: Configuracao,
+    sleep_fn=time.sleep,
+    espera_maxima_segundos: float = 900.0,
+) -> None:
+    estado_inicial = registro.estado_hoje()
+    if not estado_inicial.ordem_pendente:
+        return
+    print("Operação anterior pendente. Conectando para recuperar o resultado na IQ...")
+    mercado.iniciar()
+    recuperar_operacoes_pendentes(mercado, registro, config)
+    while registro.estado_hoje().ordem_pendente:
+        restante = _segundos_ate_proxima_pendente_expirar(registro, config)
+        if restante is None:
+            break
+        if restante > espera_maxima_segundos:
+            print(
+                f">> Ordem anterior ainda aberta; faltam ~{restante/60:.1f}min. "
+                "Fechando agora — reinicie mais perto da expiração."
+            )
+            break
+        # Se a IQ já passou do mark estimado mas ainda não publicou o P&L,
+        # não martelar o endpoint a cada segundo. O relógio da corretora pode
+        # atrasar alguns segundos; uma tentativa a cada 30s é suficiente.
+        espera = 30.0 if restante <= 0 else min(30.0, max(1.0, restante + 2.0))
+        print(
+            f">> Ordem anterior ainda aberta; aguardando ~{espera:.0f}s "
+            "para tentar recuperar de novo..."
+        )
+        sleep_fn(espera)
+        recuperar_operacoes_pendentes(
+            mercado, registro, config, incluir_desconhecidas=False
+        )
+
+
 def main(config: Configuracao | None = None) -> None:
     config = config or Configuracao()
     config.validar()
-    registro = RegistroSQLite(config.banco_sqlite)
+    registro = RegistroSQLite(config.banco_sqlite, config=config)
     mercado = MercadoIQ(config)
     estrategia = EstrategiaReversaoM5(config)
     grafico = GraficoM5(config) if config.abrir_grafico else None
@@ -246,11 +512,16 @@ def main(config: Configuracao | None = None) -> None:
         if config.max_operacoes_dia > 0
         else "sem limite diário"
     )
-    print(f"IQ Option {config.rotulo_timeframe} — mercado normal e OTC")
+    tem_otc = any(ativo.upper().endswith("-OTC") for ativo in config.ativos)
+    rotulo_mercado = "mercado normal e OTC" if tem_otc else "somente mercado normal"
+    expiracao_rotulo = f"{config.expiracao_minutos}min"
+    if (config.expiracao_por_setup or {}).get("ema921_rsi_intravela") == 0:
+        expiracao_rotulo = "fim da vela atual (EMA intravela)"
+    print(f"IQ Option {config.rotulo_timeframe} — {rotulo_mercado}")
     print(
         f"Conta={config.conta} | ordens={'ATIVAS' if config.executar_ordens else 'DESATIVADAS'} | "
         f"valor={config.valor_por_ordem} | máximo={limite_diario} | "
-        f"expiração={config.expiracao_minutos}min"
+        f"expiração={expiracao_rotulo}"
     )
     if config.timeframe_segundos != 300:
         print(
@@ -261,10 +532,8 @@ def main(config: Configuracao | None = None) -> None:
     mercado_conectado = False
     estado_inicial = registro.estado_hoje()
     if estado_inicial.ordem_pendente:
-        print("Operação anterior pendente. Conectando para recuperar o resultado na IQ...")
-        mercado.iniciar()
+        _recuperar_pendencias_inicio(mercado, registro, config)
         mercado_conectado = True
-        recuperar_operacoes_pendentes(mercado, registro, config)
 
     risco = GerenciadorRisco(config, registro.estado_hoje())
     executor = ExecutorSeguro(config, mercado, risco, registro)
@@ -336,7 +605,7 @@ def main(config: Configuracao | None = None) -> None:
     _atualizar_heartbeat()  # define timestamp inicial
     threading.Thread(
         target=_watchdog,
-        args=(config,),
+        args=(config, mercado),
         name="watchdog",
         daemon=True,
     ).start()
@@ -691,6 +960,18 @@ def main(config: Configuracao | None = None) -> None:
 
                     threading.Thread(target=_ia_alerta, daemon=True).start()
 
+        plano_forex = _plano_forex_m15(config, ativo, snapshot.candles)
+        alerta_forex = None
+        plano_forex_card = None
+        if plano_forex is not None:
+            _preco_plano = float(indicadores.iloc[-1]["Close"])
+            alerta_forex = _alerta_plano_forex(
+                plano_forex,
+                _preco_plano,
+                grafico._unix if grafico is not None else lambda ts: int(pd.Timestamp(ts).timestamp()),
+            )
+            plano_forex_card = _plano_forex_payload(plano_forex, _preco_plano)
+
         # --- Gráfico em tempo real (atualiza a cada 3s, não só no fechamento) ---
         if grafico is not None and _pode_atualizar_grafico(ativo):
             try:
@@ -725,13 +1006,17 @@ def main(config: Configuracao | None = None) -> None:
                         "direcao": ia_atual.direcao_sugerida,
                         "segundosAtras": round(time.time() - ia_atual.gerado_em),
                     }
+                niveis_sr_grafico = estrategia.niveis_sr_atuais(indicadores, len(indicadores) - 1)
                 dados_grafico = grafico.montar_dados(
                     snapshot=snapshot,
                     indicadores=indicadores,
                     sinais=sinais_grafico,
                     possivel=estrategia.possivel_entrada(ativo, snapshot.candles),
                     operacoes=registro.operacoes_grafico(ativo),
-                    alerta=para_grafico(alerta, grafico._unix, segundos_restantes),
+                    alerta=(
+                        para_grafico(alerta, grafico._unix, segundos_restantes)
+                        if alerta is not None else alerta_forex
+                    ),
                     noticias=proximas_noticias,
                     explicacao=ultima_explicacao[ativo],
                     parecer_ia=parecer_dict,
@@ -745,8 +1030,13 @@ def main(config: Configuracao | None = None) -> None:
                     },
                     stats_globais=registro.stats_globais(),
                     entradas_detalhadas=registro.entradas_hoje_detalhadas(),
-                    niveis_sr=estrategia.niveis_sr_atuais(indicadores, len(indicadores) - 1),
+                    niveis_sr=niveis_sr_grafico,
+                    plano_forex=plano_forex_card,
                 )
+                if dados_grafico.get("alerta") is None:
+                    dados_grafico["alerta"] = _alerta_tocaia_auxiliar(
+                        config, ativo, indicadores, dados_grafico
+                    )
                 grafico_fila.put((ativo, dados_grafico))
             except Exception as erro:
                 print(f"[{datetime.now():%H:%M:%S}] {ativo}: falha ao enfileirar gráfico ({erro})")
@@ -754,11 +1044,13 @@ def main(config: Configuracao | None = None) -> None:
         if ultimo_candle_processado[ativo] == candle_fechado:
             return
 
+        limite_janela_operacional = _limite_janela_operacional(config)
+
         # Fora da janela de entrada o risco bloquearia qualquer ordem por
         # 'entrada_atrasada'. Se marcarmos o candle como processado aqui, o
         # próximo tick (já no candle seguinte) vai avaliar o candle recém-fechado
         # em vez do candle cujo sinal ainda estava pendente — entrada uma vela atrasada.
-        if segundo_no_candle >= config.entrada_max_segundos_no_candle:
+        if segundo_no_candle > limite_janela_operacional:
             print(f"[{datetime.now():%H:%M:%S}] [FIM] {ativo} (fora da janela, slot preservado)")
             return
 
@@ -812,16 +1104,66 @@ def main(config: Configuracao | None = None) -> None:
 
         status = "aberto" if snapshot.mercado_aberto else "fechado"
         payout = f"{snapshot.payout:.0%}" if snapshot.payout is not None else "indisponível"
+        aviso_noticia = calendario.aviso(ativo, agora_utc)
+        confirmacao = calendario.confirmacao_recente(ativo, agora_utc)
 
         # Continuação: avaliada no candle FECHADO (sinal confirmado no close)
         decisoes_continuacao = estrategia.avaliar_todas(ativo, indicadores)
         # Reversão: avaliada no candle EM FORMAÇÃO (entra na mesma vela que toca o nível)
         decisoes_reversao = estrategia.avaliar_reversoes(ativo, indicadores)
-        decisoes_todas = decisoes_continuacao + decisoes_reversao
+        decisoes_forex = []
+        if plano_forex is not None:
+            decisoes_forex.append(
+                _decisao_plano_forex(plano_forex, float(indicadores.iloc[-1]["Close"]))
+            )
+        decisoes_noticia = []
+        if (
+            config.noticia_confirmada_ativo
+            and confirmacao
+            and config.timeframe_segundos in (900, 3600)
+            and not e_sintetico(ativo)
+            and len(indicadores) >= 2
+        ):
+            direcao_noticia = str(confirmacao["direcao"]).lower()
+            atual = indicadores.iloc[-1]
+            anterior = indicadores.iloc[-2]
+            movimento_ok = (
+                direcao_noticia == "call"
+                and float(atual["Close"]) > float(atual["Open"])
+                and float(atual["Close"]) > float(anterior["Close"])
+            ) or (
+                direcao_noticia == "put"
+                and float(atual["Close"]) < float(atual["Open"])
+                and float(atual["Close"]) < float(anterior["Close"])
+            )
+            if movimento_ok:
+                decisoes_noticia.append(
+                    Decisao(
+                        ativo=ativo,
+                        direcao=direcao_noticia,
+                        preco=float(atual["Close"]),
+                        candle_hora=pd.Timestamp(indicadores.index[-1]),
+                        motivo="noticia_confirmada_m5",
+                        detalhes={
+                            "setup": "noticia_confirmada",
+                            "nivel_sr": float(atual["Close"]),
+                            "atr": float(atual.get("ATR", 0) or 0),
+                            "noticia": confirmacao["titulo"],
+                            "actual": confirmacao["actual"],
+                            "forecast": confirmacao["forecast"],
+                            "razao": [
+                                f"noticia confirmou {confirmacao['direcao']}",
+                                f"actual={confirmacao['actual']} vs forecast={confirmacao['forecast']}",
+                                "preco acompanhou a direcao no candle atual",
+                            ],
+                        },
+                    )
+                )
+        decisoes_todas = decisoes_forex + decisoes_continuacao + decisoes_reversao + decisoes_noticia
 
         if not decisoes_todas:
             ultima_explicacao[ativo] = []
-            dentro_da_janela = segundo_no_candle < config.entrada_max_segundos_no_candle
+            dentro_da_janela = segundo_no_candle <= limite_janela_operacional
             if dentro_da_janela and snapshot.mercado_aberto:
                 # Ainda dentro da janela — aguarda toque intra-candle de reversão.
                 # Não marca slot para não perder sinal que apareça nos próximos 5s.
@@ -836,9 +1178,6 @@ def main(config: Configuracao | None = None) -> None:
                 )
                 print(f"[{datetime.now():%H:%M:%S}] [FIM] {ativo}")
             return
-
-        aviso_noticia = calendario.aviso(ativo, agora_utc)
-        confirmacao = calendario.confirmacao_recente(ativo, agora_utc)
 
         with _lock_ia:
             ia_atual = parecer_ia.get(ativo)
@@ -1067,7 +1406,10 @@ def main(config: Configuracao | None = None) -> None:
                         e for e in calendario.janela_de_risco(ativo, agora_utc)
                         if e.impacto == "High"
                     ]
-                    if _noticias_high:
+                    _noticia_liberada = (
+                        config.permitir_noticia_confirmada_a_favor and favorece_noticia
+                    )
+                    if _noticias_high and not _noticia_liberada:
                         print(
                             f"    [{setup_nome}] notícia HIGH impacto: "
                             f"{_noticias_high[0].titulo} — cancelado"
@@ -1075,6 +1417,11 @@ def main(config: Configuracao | None = None) -> None:
                         _shadow(decisao, "noticia_high")
                         algum_bloqueio_definitivo = True
                         continue
+                    if _noticias_high and _noticia_liberada:
+                        print(
+                            f"    [{setup_nome}] notícia HIGH a favor confirmada: "
+                            f"{_noticias_high[0].titulo} — modo experimental liberou"
+                        )
                 if ia_discorda and favorece_noticia:
                     print(
                         "    [IA] discordou mas a noticia confirmada a favor do sinal tem prioridade"
@@ -1132,7 +1479,7 @@ def main(config: Configuracao | None = None) -> None:
             ultimo_candle_processado[ativo] = candle_fechado
             _candle_guard.registrar(ativo, config.timeframe_segundos, _candle_ts_unix)
         else:
-            tempo_restante_janela = config.entrada_max_segundos_no_candle - segundo_no_candle
+            tempo_restante_janela = limite_janela_operacional - segundo_no_candle
             if tempo_restante_janela > 5:
                 _retry_ativos.add(ativo)
                 print(
@@ -1258,9 +1605,11 @@ def main(config: Configuracao | None = None) -> None:
                 sono = seg_restantes + 5.0
 
             # Se algum ativo ficou bloqueado por razão temporária dentro da janela,
-            # acorda em 2s para retry — reduz latência de entrada pós-fechamento do candle.
+            # acorda em 1s no setup de toque — reduz a distância entre o toque
+            # real e a leitura. Os demais setups preservam o intervalo de 2s.
             if _retry_ativos:
-                sono = min(sono, 2.0)
+                intervalo_retry = 1.0 if config.ema921_rsi_intravela_ativo else 2.0
+                sono = min(sono, intervalo_retry)
             _retry_ativos.clear()
 
             sono = max(1.0, sono)

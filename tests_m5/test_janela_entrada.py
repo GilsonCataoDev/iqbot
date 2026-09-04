@@ -4,7 +4,13 @@ Verifica a lógica de filtro por segundo_no_candle sem precisar do loop completo
 do app.py. O filtro é trivial (comparação simples), então os testes validam
 a configuração e a corretude da lógica isolada.
 """
-from iqoption_m5.config import Configuracao
+from datetime import datetime
+
+import pandas as pd
+
+from iqoption_m5.config import Configuracao, configuracao_scalping_h1, configuracao_scalping_m15
+from iqoption_m5.modelos import Decisao, SnapshotMercado
+from iqoption_m5.risco import GerenciadorRisco
 
 
 # ---------------------------------------------------------------------------
@@ -37,6 +43,22 @@ class TestJanelaEntradaConfig:
     def test_validar_nao_quebra_sem_janela(self):
         c = Configuracao()
         c.validar()
+
+    def test_m15_liga_janela_intracandle_por_toque(self):
+        c = configuracao_scalping_m15()
+
+        assert c.entrada_intracandle_por_toque_ativo
+        assert c.janela_entrada_por_setup["sr_rejeicao"] == 540
+        # Pullback pode acontecer no meio da vela; até 10min ainda sobram 5min
+        # para a opção expirar no fechamento da própria vela.
+        assert c.janela_entrada_por_setup["pullback_confluencia"] == 600
+
+    def test_h1_liga_janela_intracandle_por_toque(self):
+        c = configuracao_scalping_h1()
+
+        assert c.entrada_intracandle_por_toque_ativo
+        assert c.janela_entrada_por_setup["sr_rejeicao"] == 2400
+        assert c.janela_entrada_por_setup["pullback_confluencia"] == 2400
 
 
 # ---------------------------------------------------------------------------
@@ -88,3 +110,79 @@ class TestJanelaFiltroLogica:
         jep = {"sr_rejeicao": 0}
         assert not _aplica_filtro(jep, "sr_rejeicao", 0)
         assert _aplica_filtro(jep, "sr_rejeicao", 1)
+
+
+class TestRiscoJanelaIntracandle:
+    def _snapshot(self, segundo_no_candle: int) -> SnapshotMercado:
+        ts = 1_800_000_000
+        ts = ts - (ts % 900) + segundo_no_candle
+        candles = pd.DataFrame(
+            {"Open": [1.0], "High": [1.1], "Low": [0.9], "Close": [1.0], "Volume": [1.0]},
+            index=pd.date_range("2026-01-01", periods=1, freq="15min"),
+        )
+        return SnapshotMercado("EURUSD", candles, 0.85, True, ts)
+
+    def test_setup_intracandle_passa_no_meio_da_vela(self):
+        config = configuracao_scalping_m15()
+        decisao = Decisao(
+            "EURUSD",
+            "call",
+            1.0,
+            datetime.now(),
+            "sr_rejeicao_m15",
+            detalhes={"setup": "sr_rejeicao"},
+        )
+
+        autorizacao = GerenciadorRisco(config).avaliar(self._snapshot(360), decisao)
+
+        assert autorizacao.permitida
+
+    def test_pullback_confluencia_passa_no_meio_da_vela(self):
+        config = configuracao_scalping_m15()
+        decisao = Decisao(
+            "EURUSD",
+            "call",
+            1.0,
+            datetime.now(),
+            "pullback_m15",
+            detalhes={"setup": "pullback_confluencia"},
+        )
+
+        # 600s = 10min, o limite da janela (a comparacao e inclusiva).
+        autorizacao = GerenciadorRisco(config).avaliar(self._snapshot(600), decisao)
+
+        assert autorizacao.permitida
+
+    def test_pullback_confluencia_bloqueado_passando_dos_10min(self):
+        """Depois de 10min sobra pouca vela pra opcao respirar — e a expiracao
+        e o fechamento dessa mesma vela."""
+        config = configuracao_scalping_m15()
+        decisao = Decisao(
+            "EURUSD",
+            "call",
+            1.0,
+            datetime.now(),
+            "pullback_m15",
+            detalhes={"setup": "pullback_confluencia"},
+        )
+
+        autorizacao = GerenciadorRisco(config).avaliar(self._snapshot(601), decisao)
+
+        assert not autorizacao.permitida
+        assert autorizacao.motivo == "entrada_atrasada"
+
+    def test_pullback_simples_continua_bloqueado_no_meio_da_vela(self):
+        config = configuracao_scalping_m15()
+        decisao = Decisao(
+            "EURUSD",
+            "call",
+            1.0,
+            datetime.now(),
+            "pullback_m15",
+            detalhes={"setup": "pullback"},
+        )
+
+        autorizacao = GerenciadorRisco(config).avaliar(self._snapshot(600), decisao)
+
+        assert not autorizacao.permitida
+        assert autorizacao.motivo == "entrada_atrasada"

@@ -972,8 +972,15 @@ def configuracao_ema_laboratorio_practice(base: Configuracao | None = None) -> C
         # ordens do mesmo ativo (ou duas na mesma direção) em timeframes
         # diferentes ao mesmo tempo.
         bloquear_direcao_paralela=True,
+        # O perfil-base vem do experimento M1, que usa uma faixa larga.
+        # No Lab M5/M15 a campanha Fibo mede a zona clássica e mais seletiva.
+        pullback_fib_min=0.382,
+        pullback_fib_max=0.618,
         sufixo_banco="ema_laboratorio_practice",
         porta_grafico=8785,
+        # O Lab promete atualização visual a cada segundo. Trinta segundos
+        # sem snapshot já é conexão presa, não uma espera normal de M5/M15.
+        watchdog_timeout_minutos=0.5,
     )
 
 

@@ -15,7 +15,11 @@ from datetime import datetime, timezone
 import pandas as pd
 
 from .config import Configuracao, configuracao_ema_laboratorio_practice
-from .auditoria_entrada import enriquecer_decisao, retroalimentar_decisoes
+from .auditoria_entrada import (
+    enriquecer_decisao,
+    qualificar_leitura_m5,
+    retroalimentar_decisoes,
+)
 from .estrategia import EstrategiaReversaoM5
 from .executor import ExecutorSeguro
 from .grafico import GraficoM5
@@ -35,6 +39,78 @@ class RastroEma:
     somente_sombra: bool = False
 
 
+class ProgressoLaboratorio:
+    """Relógio thread-safe do loop e do gráfico ao vivo.
+
+    O Lab roda em uma única conexão IQ. Se uma chamada da biblioteca trava, o
+    processo continua existindo, mas nenhum JSON novo chega ao navegador. Este
+    relógio permite que outra thread detecte a ausência de progresso e force a
+    reconexão sem depender da chamada que ficou presa.
+    """
+
+    def __init__(self, agora: float | None = None) -> None:
+        self._lock = threading.Lock()
+        self._ultimo = time.monotonic() if agora is None else float(agora)
+
+    def marcar(self, agora: float | None = None) -> None:
+        with self._lock:
+            self._ultimo = time.monotonic() if agora is None else float(agora)
+
+    def idade(self, agora: float | None = None) -> float:
+        referencia = time.monotonic() if agora is None else float(agora)
+        with self._lock:
+            return max(0.0, referencia - self._ultimo)
+
+
+def _armar_watchdog_apos_inicializacao(
+    progresso: ProgressoLaboratorio, agora: float | None = None
+) -> None:
+    """Zera a idade depois da carga inicial, antes de ativar o watchdog.
+
+    Conectar, baixar históricos e semear o gráfico pode levar mais que o
+    limite do watchdog. Esse tempo não é estagnação do ciclo ao vivo.
+    """
+    progresso.marcar(agora)
+
+
+def _reconectar_laboratorio_estagnado(
+    mercado: MercadoIQ, progresso: ProgressoLaboratorio, *, agora: float,
+    limite_s: float,
+) -> bool:
+    """Reconecta apenas após estagnação comprovada do Lab."""
+    if progresso.idade(agora) <= limite_s:
+        return False
+    print(
+        f"[WATCHDOG LAB] Sem candle/JSON novo há {progresso.idade(agora):.0f}s; "
+        "reconectando a IQ..."
+    )
+    try:
+        ok = bool(mercado.reconectar_se_necessario(forcar=True))
+    except Exception as erro:
+        print(f"[WATCHDOG LAB] Reconexão falhou: {erro!r}")
+        return False
+    if ok:
+        progresso.marcar(agora)
+        print("[WATCHDOG LAB] Reconexão concluída; aguardando velas novas.")
+    return ok
+
+
+def _vigiar_laboratorio(
+    mercado: MercadoIQ, progresso: ProgressoLaboratorio, parar: threading.Event,
+    limite_s: float,
+) -> None:
+    """Evita que um socket congelado deixe o gráfico parado por horas."""
+    ultima_tentativa = float("-inf")
+    while not parar.wait(5.0):
+        agora = time.monotonic()
+        if progresso.idade(agora) <= limite_s or agora - ultima_tentativa < limite_s:
+            continue
+        ultima_tentativa = agora
+        _reconectar_laboratorio_estagnado(
+            mercado, progresso, agora=agora, limite_s=limite_s
+        )
+
+
 def _config_rastro(base: Configuracao, timeframe: int, setup: str) -> Configuracao:
     """Configura apenas um setup por rastro; evita que sinais se confundam."""
     is_m15 = timeframe == 900
@@ -49,14 +125,17 @@ def _config_rastro(base: Configuracao, timeframe: int, setup: str) -> Configurac
         ema920_prime_ativo=setup == "ema920_prime",
         ema921_rsi_pullback_ativo=setup == "ema921_rsi_pullback",
         ema921_rsi_intravela_ativo=setup == "ema921_rsi_intravela",
+        fibo_sr_retracao_ativo=setup == "fibo_sr_retracao",
         nzd_trend_pullback_ativo=setup == "nzd_trend_pullback_v1",
         # M15 só segue a favor do contexto H1. O filtro é medido em sombra
         # antes de qualquer nova ordem real nesse timeframe.
         filtro_h1_ativo=is_m15,
-        entrada_intracandle_por_toque_ativo=setup == "ema921_rsi_intravela",
+        entrada_intracandle_por_toque_ativo=setup in (
+            "ema921_rsi_intravela", "fibo_sr_retracao",
+        ),
         janela_entrada_por_setup=(
-            {"ema921_rsi_intravela": janela_intravela}
-            if setup == "ema921_rsi_intravela" else None
+            {setup: janela_intravela}
+            if setup in ("ema921_rsi_intravela", "fibo_sr_retracao") else None
         ),
         expiracao_por_setup=(
             {"ema921_rsi_intravela": 0}
@@ -72,6 +151,7 @@ def _rastros(base: Configuracao) -> list[RastroEma]:
             ("ema920_pullback", "EMA9/20 fechado"),
             ("ema921_rsi_pullback", "EMA9/21 + RSI fechado"),
             ("ema921_rsi_intravela", "EMA9/21 + RSI intravela"),
+            ("fibo_sr_retracao", "Fibo 38/50/62 + S/R + rejeição"),
         ]
         if timeframe == 300:
             setups.append(("ema920_prime", "EMA9/20 Prime"))
@@ -89,7 +169,7 @@ def _rastros(base: Configuracao) -> list[RastroEma]:
                         )
                     ),
                     config=_config_rastro(base, timeframe, setup),
-                    intravela=setup == "ema921_rsi_intravela",
+                    intravela=setup in ("ema921_rsi_intravela", "fibo_sr_retracao"),
                     # EMA9/20 fechado é o único setup que pode abrir ordem em
                     # M5 e M15. M15 exige H1 alinhado; EMA9/21 e intravela
                     # seguem em sombra, sem disputar uma posição principal.
@@ -121,6 +201,7 @@ def _setup_do_rastro(config: Configuracao) -> str:
             ("ema920_prime", config.ema920_prime_ativo),
             ("ema921_rsi_pullback", config.ema921_rsi_pullback_ativo),
             ("ema921_rsi_intravela", config.ema921_rsi_intravela_ativo),
+            ("fibo_sr_retracao", config.fibo_sr_retracao_ativo),
             ("nzd_trend_pullback_v1", config.nzd_trend_pullback_ativo),
         ) if ligado
     ]
@@ -229,6 +310,7 @@ def _atualizar_grafico_laboratorio(
         movimentos_unicos=registro.resumo_movimentos_unicos(),
         stats_globais=registro.stats_globais(),
         entradas_detalhadas=registro.entradas_hoje_detalhadas(),
+        fibo_contexto=estrategia.mapa_fibonacci_atual(indicadores),
     )
     grafico.atualizar(snapshot.ativo, dados)
     return dados
@@ -322,6 +404,7 @@ def executar_laboratorio_ema() -> None:
     dados_grafico_ao_vivo: dict[str, dict] = {}
     lock_grafico_ao_vivo = threading.Lock()
     parar_grafico_ao_vivo = threading.Event()
+    progresso = ProgressoLaboratorio()
 
     print("=" * 68)
     print("LABORATÓRIO EMA — PRACTICE | uma conexão IQ | M5 + M15")
@@ -329,7 +412,7 @@ def executar_laboratorio_ema() -> None:
     print(f"Ordens M5/M15: {', '.join(ativos_ordem)} (EMA9/20 fechado).")
     print(f"Em sombra para comparação: {', '.join(base.ativos_somente_sombra)}.")
     print("M15: EMA9/20 ativo com filtro H1; demais setups, NZD e candidatos ficam em sombra.")
-    print("Rastros: EMA9/20, EMA9/21+RSI, intravela e NZD M5/M15+ADX.")
+    print("Rastros: EMA9/20, EMA9/21+RSI, Fibo+S/R em sombra e NZD M5/M15+ADX.")
     print(f"Banco único: {base.banco_sqlite}")
     print("=" * 68)
 
@@ -362,6 +445,7 @@ def executar_laboratorio_ema() -> None:
                             if patch is None:
                                 continue
                             grafico.atualizar(ativo_grafico, patch)
+                            progresso.marcar()
                             with lock_grafico_ao_vivo:
                                 dados_grafico_ao_vivo[ativo_grafico] = patch
                         except Exception:
@@ -372,6 +456,14 @@ def executar_laboratorio_ema() -> None:
             threading.Thread(
                 target=_grafico_ao_vivo, name="ema-lab-grafico-ao-vivo", daemon=True
             ).start()
+        limite_watchdog_s = max(30.0, float(base.watchdog_timeout_minutos) * 60.0)
+        _armar_watchdog_apos_inicializacao(progresso)
+        threading.Thread(
+            target=_vigiar_laboratorio,
+            args=(mercado, progresso, parar_grafico_ao_vivo, limite_watchdog_s),
+            name="ema-lab-watchdog",
+            daemon=True,
+        ).start()
         print(f"Conectado. Monitorando {', '.join(base.ativos)} a cada 1 segundo.")
 
         while True:
@@ -398,12 +490,10 @@ def executar_laboratorio_ema() -> None:
                                 ativo, rastro.config.timeframe_segundos
                             )
                             snapshots[chave_snapshot] = snapshot
+                            progresso.marcar()
                         except MercadoIndisponivel as erro:
                             print(f"[{rastro.nome}] {ativo}: indisponível ({erro})")
                             continue
-                    if not snapshot.mercado_aberto:
-                        continue
-                    _resolver_sombras(registro, snapshot)
                     indicadores = estrategias[rastro.nome].calcular_indicadores(
                         snapshot.candles, ativo
                     )
@@ -424,6 +514,12 @@ def executar_laboratorio_ema() -> None:
                                 dados_grafico_ao_vivo[ativo] = dados_grafico
                         except Exception as erro:
                             print(f"[GRÁFICO] {ativo}: atualização falhou ({erro})")
+                    # Abertura/payout decide se pode enviar ordem. O gráfico
+                    # deve continuar recebendo candles mesmo quando esse
+                    # estado vem fechado ou temporariamente incorreto da IQ.
+                    if not snapshot.mercado_aberto:
+                        continue
+                    _resolver_sombras(registro, snapshot)
                     try:
                         setup = _setup_do_rastro(rastro.config)
                     except RuntimeError as erro:
@@ -492,6 +588,10 @@ def executar_laboratorio_ema() -> None:
                         if decisao.detalhes.get("setup") != setup:
                             continue
                         decisao = enriquecer_decisao(decisao, indicadores)
+                        # A qualificação é observacional: o M5 continua
+                        # operando igual enquanto acumulamos uma amostra nova.
+                        if rastro.config.timeframe_segundos == 300:
+                            decisao = qualificar_leitura_m5(decisao)
                         autorizacao_risco = riscos[rastro.nome].avaliar(snapshot, decisao)
                         agora_utc = datetime.fromtimestamp(
                             snapshot.timestamp_servidor, tz=timezone.utc
@@ -506,7 +606,9 @@ def executar_laboratorio_ema() -> None:
                         if ativo in base.ativos_somente_sombra:
                             motivo_sombra = "ativo_candidato_sombra"
                         elif rastro.somente_sombra:
-                            if setup == "nzd_trend_pullback_v1":
+                            if setup == "fibo_sr_retracao":
+                                motivo_sombra = "fibo_sr_validacao"
+                            elif setup == "nzd_trend_pullback_v1":
                                 motivo_sombra = (
                                     "nzd_v1_noticia_high"
                                     if noticia_high else "nzd_v1_validacao"

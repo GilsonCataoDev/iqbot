@@ -15,9 +15,23 @@ class SwingConfig:
     conta: str = "PRACTICE"
     confirmo_conta_real: bool = False
     executar_ordens: bool = False
+    # A tese atual teve edge negativo no histórico; só muda após nova validação.
+    estrategia_validada: bool = False
 
     # Ativos
-    ativos: tuple[str, ...] = ("EURUSD", "GBPUSD", "USDJPY")
+    ativos: tuple[str, ...] = (
+        "EURUSD",
+        "GBPUSD",
+        "AUDUSD",
+        "NZDUSD",
+        "USDCAD",
+        "USDCHF",
+        "USDJPY",
+        "EURJPY",
+        "GBPJPY",
+        "EURGBP",
+        "AUDJPY",
+    )
 
     # Banco
     caminho_banco: Path = Path("dados/scalping_swing.db")
@@ -49,6 +63,9 @@ class SwingConfig:
 
     # Scoring mínimo para executar
     pontuacao_minima: int = 8
+    # Setups liberados no Swing. Backtest recente favoreceu pullback/breakout;
+    # S/R simples e divergência ficam desligados até novo forward-test validar.
+    setups_ativos: tuple[str, ...] = ("pullback_tendencia", "breakout_reteste")
 
     # Parâmetros D1
     d1_slope_min_atr: float = 0.05   # inclinação mínima da EMA50 em múltiplos de ATR
@@ -65,11 +82,36 @@ class SwingConfig:
 
     # Loop
     intervalo_loop_segundos: float = 60.0
+    intervalo_radar_segundos: float = 1.0
+    intervalo_verificacao_monitor_segundos: float = 60.0
+    radar_tolerancia_toque_pips: float = 2.0
+    janela_noticia_minutos: int = 120
+    permitir_entrada_a_favor_noticia: bool = False
     porta_grafico: int = 8773
     sufixo_banco: str = "swing"
 
     def validar(self) -> None:
+        if self.modo not in {"forex", "binaria"}:
+            raise RuntimeError("Modo Swing deve ser 'forex' ou 'binaria'.")
+        if self.executar_ordens and not self.estrategia_validada:
+            raise RuntimeError(
+                "estratégia Swing não validada: execução bloqueada; use modo monitor"
+            )
         if self.conta.upper() == "REAL" and not self.confirmo_conta_real:
             raise RuntimeError(
                 "Para operar na conta REAL, defina confirmo_conta_real=True explicitamente."
             )
+        if not 0 < self.risco_percentual <= 0.02:
+            raise RuntimeError("risco_percentual Swing deve ficar entre 0 e 2%.")
+        if self.rr_ratio <= 0 or self.sl_atr_multiplo <= 0:
+            raise RuntimeError("R:R e múltiplo de ATR precisam ser positivos.")
+        if self.max_operacoes_dia < 0:
+            raise RuntimeError("max_operacoes_dia não pode ser negativo; 0 significa sem limite.")
+        if self.intervalo_radar_segundos <= 0:
+            raise RuntimeError("intervalo_radar_segundos precisa ser positivo.")
+        if self.intervalo_verificacao_monitor_segundos <= 0:
+            raise RuntimeError("intervalo_verificacao_monitor_segundos precisa ser positivo.")
+        if self.radar_tolerancia_toque_pips < 0:
+            raise RuntimeError("radar_tolerancia_toque_pips não pode ser negativo.")
+        if self.janela_noticia_minutos <= 0:
+            raise RuntimeError("janela_noticia_minutos precisa ser positivo.")

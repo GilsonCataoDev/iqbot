@@ -38,7 +38,8 @@ class TestGraficoM5(unittest.TestCase):
         self.assertTrue(dados["bandaSup"])
         self.assertTrue(dados["rsi"])
         self.assertEqual(len(dados["niveis"]), 2)
-        self.assertEqual(len(dados["fib"]), 7)
+        # Sem impulso confirmado, o gráfico não inventa Fibo entre máxima/mínima.
+        self.assertEqual(dados["fib"], [])
 
     def test_sinais_historicos_nao_usam_candle_em_formacao(self):
         sinais = EstrategiaReversaoM5(self.config).sinais_historicos("EURUSD", self.candles)
@@ -61,6 +62,29 @@ class TestGraficoM5(unittest.TestCase):
         self.assertEqual(len(dados["pullbacks"]), 1)
         self.assertEqual(len(dados["confluencias"]), 1)
         self.assertEqual(dados["confluencias"][0]["fatores"], ["fibo", "suporte"])
+
+    def test_lab_usa_no_grafico_o_mesmo_mapa_fibo_da_estrategia(self):
+        estrategia = EstrategiaReversaoM5(self.config)
+        indicadores = estrategia.calcular_indicadores(self.candles)
+        snapshot = SnapshotMercado("EURUSD", self.candles, 0.85, True, 1_800_000_000)
+        contexto = {
+            "direcao": "call", "estado": "AGUARDAR RETRAÇÃO",
+            "inicio": self.idx[-20], "fim": self.idx[-5],
+            "origem": 98.5, "extremo": 101.5,
+            "niveis": [
+                {"nivel": .382, "preco": 99.8, "papel": "zona"},
+                {"nivel": .618, "preco": 99.2, "papel": "zona"},
+            ],
+        }
+
+        dados = GraficoM5(self.config).montar_dados(
+            snapshot, indicadores, [], None, [], fibo_contexto=contexto
+        )
+
+        self.assertEqual(dados["fib"], contexto["niveis"])
+        self.assertEqual(dados["fibContexto"]["estado"], "AGUARDAR RETRAÇÃO")
+        self.assertEqual(dados["fibContexto"]["inicio_time"], int(self.idx[-20].timestamp()))
+        self.assertEqual(dados["fibContexto"]["fim_time"], int(self.idx[-5].timestamp()))
 
     def test_servidor_publica_manifesto(self):
         grafico = GraficoM5(self.config)
@@ -91,7 +115,7 @@ class TestGraficoM5(unittest.TestCase):
         try:
             self.assertNotEqual(grafico.pasta_web.resolve(), pasta_projeto.resolve())
             with urllib.request.urlopen(url, timeout=3) as resposta:
-                self.assertIn("IQ Option M5", resposta.read().decode("utf-8"))
+                self.assertIn('id="barra-logo">IQ M5', resposta.read().decode("utf-8"))
         finally:
             grafico.fechar()
 

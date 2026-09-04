@@ -87,7 +87,8 @@
 
   /* ── Sidebar ── */
   #sidebar {
-    width: 240px; flex-shrink: 0; display: flex; flex-direction: column;
+    width: clamp(290px, 18vw, 330px); min-width: 290px;
+    flex-shrink: 0; display: flex; flex-direction: column;
     border-right: 1px solid var(--border); overflow-y: auto; background: var(--bg);
   }
   .cartao {
@@ -100,6 +101,14 @@
   }
   .cartao p { margin: 0; font-size: 12px; color: var(--muted); }
   .cartao ul { margin: 0; padding-left: 14px; font-size: 11px; line-height: 1.6; }
+  #lab-nav { display:none; position:sticky; top:0; z-index:5; padding:7px; gap:4px; flex-wrap:wrap; background:var(--bg); border-bottom:1px solid var(--border); }
+  #lab-nav button { background:#1e293b; color:var(--muted); border:1px solid var(--border); border-radius:4px; padding:5px 7px; font:inherit; font-size:10px; cursor:pointer; }
+  #lab-nav button.on { color:#fff; border-color:#42a5f5; background:#164e75; }
+  .lab-hidden { display:none !important; }
+  .dados-grid { display:grid; grid-template-columns:1fr 1fr; gap:6px; }
+  .dados-chip { background:#1b2437; border:1px solid var(--border); border-radius:5px; padding:7px; }
+  .dados-chip span { display:block; color:var(--muted); font-size:9px; text-transform:uppercase; }
+  .dados-chip strong { font-size:14px; color:#7dd3fc; }
 
   /* cartão de sinal em destaque */
   #cartao-sinal {
@@ -130,7 +139,7 @@
   #cartao-sinal.pulsando { animation: pulse-sinal 1.3s ease-in-out infinite; }
 
   .sinal-direcao {
-    font-size: 32px; font-weight: 800; letter-spacing: .02em;
+    font-size: 28px; font-weight: 800; letter-spacing: .02em;
     margin: 4px 0 2px;
   }
   .sinal-direcao.call { color: var(--green); }
@@ -212,7 +221,7 @@
     padding: 3px 0; border-bottom: 1px solid #1a2035; font-size: 11px;
   }
   .setup-row:last-child { border-bottom: none; }
-  .setup-row-label { flex: 1; font-size: 10px; color: var(--text); }
+  .setup-row-label { flex: 1; min-width: 0; overflow-wrap: anywhere; font-size: 10px; color: var(--text); }
   .setup-row-bar-wrap { width: 42px; height: 3px; background: #1c2233; border-radius: 2px; overflow: hidden; }
   .setup-row-bar { height: 100%; border-radius: 2px; }
   .setup-row-wr { font-size: 10px; font-weight: 700; min-width: 30px; text-align: right; }
@@ -275,6 +284,8 @@
   .entrada-status-ganho    { color: var(--green); font-size: 10px; margin-left: auto; }
   .entrada-status-perda    { color: var(--red);   font-size: 10px; margin-left: auto; }
   .entrada-status-outro    { color: var(--muted); font-size: 10px; margin-left: auto; }
+  .entrada-qualificada { color: #00e676; font-size: 9px; font-weight: 700; margin-left: auto; }
+  .entrada-estudo { color: #e0b040; font-size: 9px; font-weight: 700; margin-left: auto; }
 
   /* cartão extra expansível */
   #cartao-extra { cursor: pointer; user-select: none; }
@@ -342,7 +353,7 @@
   @media (max-width: 700px) {
     html, body { overflow: auto; height: auto; }
     #main { flex-direction: column; overflow: visible; }
-    #sidebar { width: 100%; border-right: none; border-bottom: 1px solid var(--border); max-height: none; overflow: visible; }
+    #sidebar { width: 100%; min-width: 0; border-right: none; border-bottom: 1px solid var(--border); max-height: none; overflow: visible; }
     #charts-area { height: 80vh; }
     #barra { flex-wrap: wrap; }
   }
@@ -364,7 +375,9 @@
     <label><input type="checkbox" id="camada-bandas" checked> Bandas</label>
     <label><input type="checkbox" id="camada-ema"> EMAs</label>
     <label><input type="checkbox" id="camada-niveis" checked> S/R</label>
-    <label><input type="checkbox" id="camada-fib"> Fib</label>
+    <label><input type="checkbox" id="camada-fib" checked> Fib</label>
+    <label><input type="checkbox" id="camada-bloqueados"> Bloqueados</label>
+    <label><input type="checkbox" id="camada-auxiliares"> Auxiliares</label>
     <button class="btn-icon" id="btn-som" title="Ativar/desativar som nos sinais">🔕</button>
   </div>
 </div>
@@ -377,6 +390,13 @@
 
   <!-- ── Sidebar ── -->
   <div id="sidebar">
+
+    <div id="lab-nav">
+      <button data-lab-view="agora" onclick="mudarVisaoLab('agora')">Agora</button>
+      <button data-lab-view="entradas" onclick="mudarVisaoLab('entradas')">Entradas</button>
+      <button data-lab-view="estudos" onclick="mudarVisaoLab('estudos')">Estudos</button>
+      <button data-lab-view="dados" onclick="mudarVisaoLab('dados')">Dados</button>
+    </div>
 
     <!-- P&L hoje -->
     <div class="cartao" id="cartao-pl">
@@ -449,6 +469,12 @@
       </div>
     </div>
 
+    <div class="cartao" id="cartao-dados" style="display:none">
+      <h3>Saúde dos dados</h3>
+      <div class="dados-grid" id="dados-corpo"></div>
+      <p style="margin-top:7px">Planilha: execute EXPORTAR_DADOS_PAINEIS.bat</p>
+    </div>
+
   </div><!-- /sidebar -->
 
   <!-- ── Charts ── -->
@@ -475,6 +501,32 @@
 // ── Estado global ──
 const params = new URLSearchParams(window.location.search);
 const fonte = params.get('fonte') || 'iqoption_m5';
+const modoLab = fonte.includes('ema_laboratorio') || location.port === '8785';
+let visaoLab = localStorage.getItem('emaLabVisao') || 'agora';
+const CARTOES_LAB = {
+  agora:['cartao-pl','cartao-sinal','cartao-plano-forex','cartao-rapido'],
+  entradas:['cartao-pl','cartao-entradas'],
+  estudos:['cartao-setup','cartao-extra'],
+  dados:['cartao-dados'],
+};
+function mudarVisaoLab(nome) {
+  if (!modoLab) return;
+  visaoLab = CARTOES_LAB[nome] ? nome : 'agora';
+  localStorage.setItem('emaLabVisao', visaoLab);
+  const permitidos = new Set(CARTOES_LAB[visaoLab]);
+  Object.values(CARTOES_LAB).flat().forEach(id => {
+    const el = document.getElementById(id);
+    if (el) el.classList.toggle('lab-hidden', !permitidos.has(id));
+  });
+  document.querySelectorAll('#lab-nav button').forEach(b => b.classList.toggle('on', b.dataset.labView === visaoLab));
+  setTimeout(() => window.dispatchEvent(new Event('resize')), 0);
+}
+if (modoLab) {
+  document.getElementById('lab-nav').style.display = 'flex';
+  document.getElementById('barra-logo').textContent = 'LAB EMA · M5/M15';
+  document.getElementById('cartao-dados').style.display = '';
+  mudarVisaoLab(visaoLab);
+}
 const CHAVE_LS = `monitor_ativo_selecionado_${fonte}`;
 let ativoAtual = null;
 let listaAtivos = [];
@@ -614,7 +666,8 @@ let primeiraCarga = true;
 let linhasNiveis = [], linhasFib = [], linhaEntrada = null, linhasGatilho = [];
 let linhaSL = null, linhaTP = null;
 let linhaAlvoProvavel = null;
-let _cacheNiveis = [], _cacheFib = [], _cachePrecisao = 5, _cachePrecoAtual = null;
+let _cacheNiveis = [], _cacheFib = [], _cacheFibContexto = null, _cacheCandles = [];
+let _cachePrecisao = 5, _cachePrecoAtual = null;
 let _razaoMap = {};
 
 chartPreco.subscribeClick(param => {
@@ -643,6 +696,14 @@ const chkBandas = document.getElementById('camada-bandas');
 const chkEma    = document.getElementById('camada-ema');
 const chkNiveis = document.getElementById('camada-niveis');
 const chkFib    = document.getElementById('camada-fib');
+const chkBloqueados = document.getElementById('camada-bloqueados');
+const chkAuxiliares = document.getElementById('camada-auxiliares');
+// Fora do Lab preservamos a visualização histórica anterior. No Lab, a tela
+// nasce limpa e o operador escolhe quando quer inspecionar ruído de pesquisa.
+if (!modoLab) {
+  chkBloqueados.checked = true;
+  chkAuxiliares.checked = true;
+}
 function _toggleNiveis() {
   linhasNiveis.forEach(l => serieCandle.removePriceLine(l));
   const niveisVisiveis = _cachePrecoAtual == null ? _cacheNiveis : [..._cacheNiveis]
@@ -655,13 +716,66 @@ function _toggleNiveis() {
     title: `${n.tipo === 'resistencia' ? 'R' : 'S'} ${n.preco.toFixed(_cachePrecisao)}`,
   })) : [];
 }
+function _ancorasFib(contexto, candles) {
+  const inicioInformado = Number(contexto?.inicio_time);
+  const fimInformado = Number(contexto?.fim_time);
+  if ([inicioInformado, fimInformado].every(Number.isFinite)) {
+    return { inicio: inicioInformado, fim: fimInformado };
+  }
+
+  // Compatibilidade com um Lab que já estava aberto antes de o backend passar
+  // os horários das âncoras. Recupera no gráfico os candles mais próximos dos
+  // preços de origem e extremo, mantendo a ordem origem -> extremo.
+  const origem = Number(contexto?.origem);
+  const extremo = Number(contexto?.extremo);
+  if (![origem, extremo].every(Number.isFinite) || candles.length < 2) return null;
+  const compra = contexto?.direcao === 'call';
+  const campoOrigem = compra ? 'low' : 'high';
+  const campoExtremo = compra ? 'high' : 'low';
+  let melhor = null;
+  for (let i = 0; i < candles.length - 1; i++) {
+    const erroOrigem = Math.abs(Number(candles[i][campoOrigem]) - origem);
+    for (let j = i + 1; j < candles.length; j++) {
+      const erro = erroOrigem + Math.abs(Number(candles[j][campoExtremo]) - extremo);
+      if (!melhor || erro < melhor.erro) melhor = { erro, inicio: Number(candles[i].time), fim: Number(candles[j].time) };
+    }
+  }
+  return melhor && [melhor.inicio, melhor.fim].every(Number.isFinite) ? melhor : null;
+}
 function _toggleFib() {
-  linhasFib.forEach(l => serieCandle.removePriceLine(l));
-  linhasFib = chkFib.checked ? _cacheFib.map(f => serieCandle.createPriceLine({
-    price: f.preco, color: CORES_FIB[f.nivel] || '#9598a1',
-    lineWidth: 1, lineStyle: LightweightCharts.LineStyle.Dotted, axisLabelVisible: false,
-    title: `Fib ${(f.nivel*100).toFixed(1)}%`,
-  })) : [];
+  linhasFib.forEach(s => chartPreco.removeSeries(s));
+  linhasFib = [];
+  if (!chkFib.checked || !_cacheFibContexto || !_cacheCandles.length) return;
+  const ancoras = _ancorasFib(_cacheFibContexto, _cacheCandles);
+  if (!ancoras) return;
+  const inicio = ancoras.inicio;
+  const fimImpulso = ancoras.fim;
+  const fimGrafico = Number(_cacheCandles[_cacheCandles.length - 1].time);
+  if (![inicio, fimImpulso, fimGrafico].every(Number.isFinite)) return;
+
+  const impulso = chartPreco.addLineSeries({
+    color: '#bc8cffaa', lineWidth: 2, lineStyle: LightweightCharts.LineStyle.Solid,
+    title: 'Fib impulso', lastValueVisible: false, priceLineVisible: false,
+    crosshairMarkerVisible: false,
+  });
+  impulso.setData([
+    {time: inicio, value: Number(_cacheFibContexto.origem)},
+    {time: fimImpulso, value: Number(_cacheFibContexto.extremo)},
+  ]);
+  linhasFib.push(impulso);
+
+  _cacheFib.filter(f => f.papel === 'zona' || f.papel === 'extremo').forEach(f => {
+    const serie = chartPreco.addLineSeries({
+      color: CORES_FIB[f.nivel] || '#9598a1',
+      lineWidth: f.papel === 'zona' ? 2 : 1,
+      lineStyle: f.papel === 'zona' ? LightweightCharts.LineStyle.Dashed : LightweightCharts.LineStyle.Dotted,
+      title: `Fib ${(Number(f.nivel)*100).toFixed(1)}%`,
+      lastValueVisible: f.papel === 'zona', priceLineVisible: false,
+      crosshairMarkerVisible: false,
+    });
+    serie.setData([{time: inicio, value: Number(f.preco)}, {time: fimGrafico, value: Number(f.preco)}]);
+    linhasFib.push(serie);
+  });
 }
 [chkBandas, chkEma, chkNiveis, chkFib].forEach(chk => chk.addEventListener('change', () => {
   serieBandaSup.applyOptions({ visible: chkBandas.checked });
@@ -672,6 +786,30 @@ function _toggleFib() {
   _toggleNiveis();
   _toggleFib();
 }));
+[chkBloqueados, chkAuxiliares].forEach(chk => chk.addEventListener('change', atualizar));
+
+function abreviarSetup(valor) {
+  const texto = String(valor || '')
+    .replace('ema921_rsi_intravela', '9/21 RSI intra')
+    .replace('ema921_rsi_pullback', '9/21 RSI')
+    .replace('ema920_pullback', '9/20')
+    .replace('pullback_confluencia', 'pullback+conf.');
+  return texto.length > 22 ? texto.slice(0, 21) + '…' : texto;
+}
+
+function compactarMarcadores(itens) {
+  const escolhidos = new Map();
+  for (const item of itens) {
+    const chave = `${item.time}:${item.position}`;
+    const anterior = escolhidos.get(chave);
+    if (!anterior || (item._prioridade || 0) > (anterior._prioridade || 0)) {
+      escolhidos.set(chave, item);
+    }
+  }
+  return [...escolhidos.values()]
+    .sort((a,b) => a.time - b.time)
+    .map(({_prioridade, ...item}) => item);
+}
 
 function selecionarAtivo(id) {
   ativoAtual = id; primeiraCarga = true;
@@ -794,6 +932,8 @@ async function atualizar() {
     // Atualiza cache de S/R e Fib
     _cacheNiveis = dados.niveis || [];
     _cacheFib = dados.fib || [];
+    _cacheFibContexto = dados.fibContexto || null;
+    _cacheCandles = dados.candles || [];
     if (dados.candles.length) {
       const precoRef2 = dados.candles[dados.candles.length-1].close;
       _cachePrecoAtual = precoRef2;
@@ -872,34 +1012,43 @@ async function atualizar() {
     }
 
     // Marcadores no chart
-    const marcadoresSinal = dados.sinais.map(s => ({
+    const marcadoresSinal = dados.sinais
+      .filter(s => s.status !== 'bloqueado' || chkBloqueados.checked)
+      .map(s => ({
       time: s.time,
       position: s.direcao === 'compra' ? 'belowBar' : 'aboveBar',
       color: s.status === 'bloqueado' ? '#9598a1' : (s.direcao === 'compra' ? '#26a69a' : '#ef5350'),
       shape: s.direcao === 'compra' ? 'arrowUp' : 'arrowDown',
-      text: `${s.setup ? '['+s.setup+'] ' : ''}${s.direcao === 'compra' ? '▲' : '▼'}${s.status === 'bloqueado' ? ' BLQ' : ''}`,
+      text: `${s.setup ? '['+abreviarSetup(s.setup)+'] ' : ''}${s.direcao === 'compra' ? '▲' : '▼'}${s.leituraM5?.qualificada ? ' QLF' : ''}${s.status === 'bloqueado' ? ' BLQ' : ''}`,
       size: 2,
+      _prioridade: s.status === 'bloqueado' ? 10 : 30,
     }));
     const temposConfl = new Set((dados.confluencias||[]).map(c => c.time));
-    const marcadoresPullback = (dados.pullbacks||[]).filter(p => !temposConfl.has(p.time)).map(p => ({
+    const marcadoresPullback = !chkAuxiliares.checked ? [] : (dados.pullbacks||[])
+      .filter(p => !temposConfl.has(p.time))
+      .filter(p => p.status !== 'bloqueado' || chkBloqueados.checked).map(p => ({
       time: p.time,
       position: p.direcao === 'compra' ? 'belowBar' : 'aboveBar',
       color: p.status === 'bloqueado' ? '#9598a1' : (p.direcao === 'compra' ? '#80cbc4' : '#ef9a9a'),
       shape: 'circle', text: `PB ${(p.fatores||[]).join('+')}${p.status==='bloqueado'?' BLQ':''}`,
+      _prioridade: 15,
     }));
-    const marcadoresConfl = (dados.confluencias||[]).map(c => ({
+    const marcadoresConfl = !chkAuxiliares.checked ? [] : (dados.confluencias||[])
+      .filter(c => c.status !== 'bloqueado' || chkBloqueados.checked).map(c => ({
       time: c.time,
       position: c.direcao === 'compra' ? 'belowBar' : 'aboveBar',
       color: c.status === 'bloqueado' ? '#9598a1' : '#ffd700',
       shape: c.direcao === 'compra' ? 'arrowUp' : 'arrowDown',
       text: `CONF ${c.fatores.join('+')}${c.status==='bloqueado'?' BLQ':''}`,
       size: 2,
+      _prioridade: 20,
     }));
     const marcadoresAlerta = dados.alertaProximo ? [{
       time: dados.alertaProximo.time,
       position: dados.alertaProximo.direcao === 'compra_proxima' ? 'belowBar' : 'aboveBar',
       color: '#ffd54f', shape: 'square', size: 2,
       text: `PRÓXIMO ${dados.alertaProximo.setup||''} RSI:${dados.alertaProximo.rsi||'?'}`,
+      _prioridade: 40,
     }] : [];
     const marcadoresReaisOp = (dados.operacoesReais||[]).map(o => ({
       time: o.time,
@@ -908,6 +1057,7 @@ async function atualizar() {
       shape: o.aberta ? 'square' : (o.vitoria ? 'arrowUp' : 'arrowDown'),
       text: `[${o.setup||'?'}] ${o.direcao==='call'?'▲':'▼'} ${o.aberta ? '…' : (o.vitoria ? '✓' : '✗')}`,
       size: 2,
+      _prioridade: 50,
     }));
 
     // linha de entrada em aberto
@@ -921,8 +1071,10 @@ async function atualizar() {
       });
     }
 
-    const marcadores = [...marcadoresSinal, ...marcadoresPullback, ...marcadoresConfl,
-      ...marcadoresAlerta, ...marcadoresReaisOp].sort((a,b) => a.time - b.time);
+    const marcadores = compactarMarcadores([
+      ...marcadoresSinal, ...marcadoresPullback, ...marcadoresConfl,
+      ...marcadoresAlerta, ...marcadoresReaisOp,
+    ]);
     serieCandle.setMarkers(marcadores);
 
     // Mapa de razões por timestamp (para tooltip educativo)
@@ -1128,11 +1280,17 @@ function renderizarLeituraRapida(dados) {
   const risco = noticiaHigh ? `${noticiaHigh.moeda} HIGH ${noticiaHigh.minutos < 0 ? 'há '+Math.abs(noticiaHigh.minutos)+'m' : 'em '+noticiaHigh.minutos+'m'}`
     : (aberta ? `ordem aberta ${aberta.direcao.toUpperCase()}` : 'livre');
   const riscoCls = noticiaHigh ? 'quick-danger' : (aberta ? 'quick-warn' : 'quick-ok');
+  const fib = dados.fibContexto;
+  const fibTxt = fib ? `${fib.direcao === 'call' ? 'CALL' : 'PUT'} · ${fib.estado}` : 'sem impulso válido';
+  const fibCls = fib?.confirmado ? 'quick-ok'
+    : (fib?.tocou_zona || fib?.estado === 'RETRAÇÃO PROFUNDA — ESPERAR' ? 'quick-warn'
+    : (fib?.estado === 'IMPULSO INVALIDADO' ? 'quick-danger' : 'quick-info'));
   el.innerHTML = [
     ['Estado', estado, estadoCls],
     ['Direção', direcao, direcao === 'CALL' ? 'quick-ok' : (direcao === 'PUT' ? 'quick-danger' : 'quick-info')],
     ['Alvo', alvo, 'quick-warn'],
     ['Risco', risco, riscoCls],
+    ['Fibo 38–62%', fibTxt, fibCls],
   ].map(([k,v,c]) => `<div class="quick-chip"><div class="quick-label">${k}</div><div class="quick-value ${c}">${escapar(v)}</div></div>`).join('');
 }
 
@@ -1169,6 +1327,20 @@ function renderizarPlanoForex(dados) {
 function renderizarPainel(dados) {
   renderizarPlanoForex(dados);
   renderizarLeituraRapida(dados);
+  if (modoLab) {
+    const entradasSaude = dados.entradasDetalhadas || [];
+    const pendentes = entradasSaude.filter(e => e.status === 'aberta' || e.lucro == null).length;
+    const sinaisSaude = dados.sinais || [];
+    const candlesSaude = dados.candles || [];
+    const corpoDados = document.getElementById('dados-corpo');
+    if (corpoDados) corpoDados.innerHTML = [
+      ['Candles', candlesSaude.length], ['Sinais na tela', sinaisSaude.length],
+      ['Entradas hoje', entradasSaude.length], ['Pendentes', pendentes],
+      ['Timeframe', `M${Math.max(1,Math.round((dados.timeframeSegundos||300)/60))}`],
+      ['Atualização', dados.atualizadoEm ? new Date(dados.atualizadoEm*1000).toLocaleTimeString('pt-BR') : '—'],
+    ].map(([r,v])=>`<div class="dados-chip"><span>${escapar(r)}</span><strong>${escapar(v)}</strong></div>`).join('');
+    mudarVisaoLab(visaoLab);
+  }
   // P&L hero card
   const stats = dados.statsGlobais;
   const plTotal = document.getElementById('pl-total-hero');
@@ -1213,6 +1385,11 @@ function renderizarPainel(dados) {
     const exp = e.expiracao_minutos ? `${e.expiracao_minutos}min` : '?';
     const criterios = (e.criterios||[]).map(c=>`<span class="entrada-criterio">${escapar(c)}</span>`).join('') || 'Sem critérios auditados.';
     const comp = e.comparaveis || {};
+    const leitura = e.leituraM5 || {};
+    const leituraBadge = leitura.modo === 'sombra'
+      ? `<span class="${leitura.qualificada ? 'entrada-qualificada' : 'entrada-estudo'}">${leitura.qualificada ? 'M5 QUAL.' : 'M5 ESTUDO'}</span>`
+      : '';
+    const leituraNota = leitura.observacao ? `<div>${escapar(leitura.observacao)}</div>` : '';
     const similares = comp.amostra
       ? `Casos parecidos: ${comp.wins}W/${comp.losses}L · ${comp.winrate}% (${comp.amostra} casos)`
       : 'Casos parecidos: ainda sem amostra auditada suficiente.';
@@ -1223,10 +1400,12 @@ function renderizarPainel(dados) {
       `<span class="entrada-ativo">${escapar(e.ativo)}</span>` +
       `<span class="${dCls}">${dLbl}</span>` +
       `<span class="entrada-setup">${escapar(e.setup)}</span>` +
+      leituraBadge +
       `<span class="${sCls}">${sStr}</span></div>` +
       `<details class="entrada-auditoria" data-chave="${escapar(chave)}"${aberto}><summary>ver leitura</summary>` +
       `<div>${tf} · exp. ${exp}${e.preco_entrada!=null ? ` · @ ${Number(e.preco_entrada).toFixed(5)}` : ''}</div>` +
       `<div class="entrada-diagnostico">${escapar(e.diagnostico||'')}</div>` +
+      leituraNota +
       `<div>${escapar(similares)}</div>` +
       `<div>${criterios}</div></details></div>`;
   }

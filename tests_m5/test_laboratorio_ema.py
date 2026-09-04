@@ -3,11 +3,13 @@ from datetime import datetime, timedelta
 import pandas as pd
 
 from iqoption_m5.config import configuracao_ema_laboratorio_practice, configuracao_ema_m5_real
-from iqoption_m5.auditoria_entrada import recuperar_comparaveis
+from iqoption_m5.auditoria_entrada import qualificar_leitura_m5, recuperar_comparaveis
 from iqoption_m5.executor import ExecutorSeguro
+from iqoption_m5.estrategia import EstrategiaReversaoM5
 from iqoption_m5.laboratorio_ema import (
     _alvo_sombra, _rastros, _recuperar_pendencias_periodicas, _setup_do_rastro,
-    _patch_candle_ao_vivo,
+    _patch_candle_ao_vivo, ProgressoLaboratorio, _reconectar_laboratorio_estagnado,
+    _armar_watchdog_apos_inicializacao,
 )
 from iqoption_m5.modelos import Autorizacao, Decisao, ResultadoOrdem, SnapshotMercado
 from iqoption_m5.registro import RegistroSQLite
@@ -17,7 +19,7 @@ def test_laboratorio_tem_rastros_m5_e_m15_e_nzd_em_sombra():
     config = configuracao_ema_laboratorio_practice()
     rastros = _rastros(config)
 
-    assert len(rastros) == 8
+    assert len(rastros) == 10
     assert config.ativos == (
         "EURUSD", "AUDCAD", "NZDUSD", "GBPUSD", "USDJPY", "AUDUSD", "USDCAD", "EURJPY",
     )
@@ -25,7 +27,10 @@ def test_laboratorio_tem_rastros_m5_e_m15_e_nzd_em_sombra():
         "NZDUSD", "GBPUSD", "USDJPY", "AUDUSD", "USDCAD", "EURJPY",
     )
     assert {r.config.timeframe_segundos for r in rastros} == {300, 900}
-    assert sum(r.intravela for r in rastros) == 2
+    assert sum(r.intravela for r in rastros) == 4
+    fibos = [r for r in rastros if r.config.fibo_sr_retracao_ativo]
+    assert {r.config.timeframe_segundos for r in fibos} == {300, 900}
+    assert all(r.somente_sombra and r.intravela for r in fibos)
     nzd = next(r for r in rastros if r.config.nzd_trend_pullback_ativo)
     assert nzd.somente_sombra
     assert nzd.config.timeframe_segundos == 300
@@ -37,6 +42,8 @@ def test_laboratorio_tem_rastros_m5_e_m15_e_nzd_em_sombra():
     assert {r.config.timeframe_segundos for r in rastros_executaveis} == {300, 900}
     assert all(r.config.ema920_pullback_ativo for r in rastros_executaveis)
     assert config.bloquear_direcao_paralela
+    assert config.pullback_fib_min == 0.382
+    assert config.pullback_fib_max == 0.618
     prime = next(r for r in rastros if r.config.ema920_prime_ativo)
     assert prime.somente_sombra
     assert prime.config.timeframe_segundos == 300
@@ -49,7 +56,100 @@ def test_todo_rastro_identifica_o_proprio_setup_sem_stopiteration():
     setups = [_setup_do_rastro(r.config) for r in rastros]
 
     assert "ema920_prime" in setups
+    assert setups.count("fibo_sr_retracao") == 2
     assert len(setups) == len(rastros)
+
+
+def test_mapa_fibo_do_lab_usa_impulso_fechado_e_zona_classica():
+    indice = pd.date_range("2026-09-03 10:00", periods=21, freq="5min")
+    fechamento = [100 + n * 0.5 for n in range(20)] + [106.0]
+    candles = pd.DataFrame({
+        "Open": [v - 0.2 for v in fechamento],
+        "High": [v + 0.4 for v in fechamento],
+        "Low": [v - 0.4 for v in fechamento],
+        "Close": fechamento,
+        "Volume": 10.0,
+    }, index=indice)
+    estrategia = EstrategiaReversaoM5(configuracao_ema_laboratorio_practice())
+    indicadores = estrategia.calcular_indicadores(candles, "EURUSD")
+
+    mapa = estrategia.mapa_fibonacci_atual(indicadores)
+
+    assert mapa is not None
+    assert [n["nivel"] for n in mapa["niveis"]] == [0.0, 0.236, 0.382, 0.5, 0.618, 0.786, 1.0]
+    assert mapa["zona_inf"] < mapa["zona_sup"]
+    assert mapa["amplitude_atr"] >= 1.5
+    assert mapa["inicio"] < mapa["fim"]
+    assert mapa["origem"] != mapa["extremo"]
+
+
+def test_fibo_distingue_retracao_profunda_de_impulso_invalidado():
+    indice = pd.date_range("2026-09-03 10:00", periods=31, freq="5min")
+    fechamento = list(pd.Series(range(30), dtype=float).map(lambda n: 110 - n / 3)) + [107.0]
+    candles = pd.DataFrame({
+        "Open": [v + .10 for v in fechamento],
+        "High": [v + .20 for v in fechamento],
+        "Low": [v - .20 for v in fechamento],
+        "Close": fechamento,
+        "Volume": 10.0,
+    }, index=indice)
+    estrategia = EstrategiaReversaoM5(configuracao_ema_laboratorio_practice())
+    indicadores = estrategia.calcular_indicadores(candles, "GBPUSD")
+    indicadores.loc[indicadores.index[-1], "TendenciaMacro"] = "baixa"
+
+    mapa = estrategia.mapa_fibonacci_atual(indicadores)
+
+    assert mapa is not None
+    assert mapa["zona_sup"] < mapa["preco_atual"] < mapa["fib786"]
+    assert mapa["estado"] == "RETRAÇÃO PROFUNDA — ESPERAR"
+
+
+def test_fibo_prefere_ultimo_swing_confirmado_ao_extremo_antigo_da_janela():
+    indice = pd.date_range("2026-09-04 10:00", periods=30, freq="5min")
+    high = [106, 108, 110, 109, 108, 106, 104, 102, 101, 103,
+            104, 105, 106, 106, 107, 107, 107, 107, 108, 107.5,
+            107, 106.5, 106, 105.5, 105, 105.4, 105.8, 106.2, 106.5, 106.8]
+    low = [v - 1 for v in high]
+    low[8] = 100
+    low[24] = 104
+    candles = pd.DataFrame({
+        "Open": [(h + l) / 2 for h, l in zip(high, low)],
+        "High": high,
+        "Low": low,
+        "Close": [(h + l) / 2 for h, l in zip(high, low)],
+        "ATR": 1.0,
+    }, index=indice)
+    estrategia = EstrategiaReversaoM5(configuracao_ema_laboratorio_practice())
+
+    mapa = estrategia._mapa_fibonacci_visual(candles, len(candles) - 1, "baixa")
+
+    assert mapa is not None
+    assert mapa["inicio"] == indice[18]
+    assert mapa["fim"] == indice[24]
+    assert mapa["origem"] == 108
+    assert mapa["extremo"] == 104
+
+
+def test_fibo_estende_extremo_ate_o_fim_da_perna_em_andamento():
+    indice = pd.date_range("2026-09-04 16:00", periods=25, freq="5min")
+    high = [110, 109.8, 109.5, 109.2, 109.0, 109.4, 109.8, 110.2, 110.0,
+            109.7, 109.3, 109.0, 108.8, 109.1, 109.0, 108.7, 108.5, 108.2,
+            108.0, 107.8, 107.5, 107.3, 107.0, 106.8, 106.7]
+    low = [v - 0.4 for v in high]
+    candles = pd.DataFrame({
+        "Open": [(h + l) / 2 for h, l in zip(high, low)],
+        "High": high, "Low": low,
+        "Close": [(h + l) / 2 for h, l in zip(high, low)],
+        "ATR": 0.5,
+    }, index=indice)
+    estrategia = EstrategiaReversaoM5(configuracao_ema_laboratorio_practice())
+
+    mapa = estrategia._mapa_fibonacci_visual(candles, len(candles) - 1, "baixa")
+
+    assert mapa is not None
+    # indice_recuo fica fora do cálculo; o extremo deve alcançar o último
+    # candle fechado, sem esperar duas velas futuras confirmarem um pivô.
+    assert mapa["fim"] == indice[-2]
 
 
 def test_patch_ao_vivo_substitui_a_vela_em_formacao_sem_mudar_o_historico():
@@ -70,6 +170,44 @@ def test_patch_ao_vivo_substitui_a_vela_em_formacao_sem_mudar_o_historico():
     assert len(patch["candles"]) == 1
     assert patch["candles"][-1]["close"] == 1.102
     assert patch["atualizado_em"] == 123.0
+
+
+def test_watchdog_do_lab_reconecta_quando_nao_ha_progresso():
+    class MercadoFalso:
+        def __init__(self):
+            self.chamadas = []
+
+        def reconectar_se_necessario(self, forcar=False):
+            self.chamadas.append(forcar)
+            return True
+
+    progresso = ProgressoLaboratorio(agora=100.0)
+    mercado = MercadoFalso()
+
+    assert not _reconectar_laboratorio_estagnado(mercado, progresso, agora=110.0, limite_s=30.0)
+    assert _reconectar_laboratorio_estagnado(mercado, progresso, agora=131.0, limite_s=30.0)
+    assert mercado.chamadas == [True]
+    assert progresso.idade(131.0) == 0.0
+
+
+def test_watchdog_do_lab_ignora_tempo_gasto_na_inicializacao():
+    """Carga de streams/histórico não pode parecer congelamento do loop."""
+    progresso = ProgressoLaboratorio(agora=100.0)
+
+    _armar_watchdog_apos_inicializacao(progresso, agora=170.0)
+
+    assert progresso.idade(175.0) == 5.0
+
+
+def test_grafico_atualiza_antes_do_bloqueio_de_mercado_fechado():
+    """Estado de negociação bloqueia ordens, não o desenho dos candles."""
+    import inspect
+    from iqoption_m5.laboratorio_ema import executar_laboratorio_ema
+
+    fonte = inspect.getsource(executar_laboratorio_ema)
+    assert fonte.index("_atualizar_grafico_laboratorio(") < fonte.index(
+        "if not snapshot.mercado_aberto:"
+    )
 
 
 def test_perfil_ema_m5_real_isola_risco_e_setups_experimentais():
@@ -268,3 +406,17 @@ def test_recuperacao_de_comparaveis_usa_tags_e_resultados():
     assert resumo["amostra"] == 2
     assert resumo["wins"] == 1
     assert resumo["winrate"] == 50.0
+
+
+def test_leitura_m5_qualifica_sem_alterar_a_direcao_ou_a_ordem():
+    decisao = Decisao(
+        "EURUSD", "call", 1.1, pd.Timestamp("2026-09-03 12:00:00"), "ema920_pullback",
+        detalhes={"auditoria": {"fechamento_posicao": 0.80, "atr_relativo": 1.0}},
+    )
+
+    qualificada = qualificar_leitura_m5(decisao)
+
+    assert qualificada.direcao == "call"
+    assert qualificada.preco == 1.1
+    assert qualificada.detalhes["leitura_m5"]["qualificada"] is True
+    assert qualificada.detalhes["leitura_m5"]["modo"] == "sombra"

@@ -16,7 +16,9 @@ nome, e vice-versa. Leia sempre as linhas separadamente.
 """
 
 import math
+import os
 import sqlite3
+import threading
 import time
 from dataclasses import dataclass
 
@@ -95,12 +97,36 @@ def carregar_cache(config: Configuracao, ativo: str) -> pd.DataFrame | None:
     arquivo = _arquivo_historico(config, ativo)
     if not arquivo.exists():
         return None
-    df = pd.read_csv(arquivo, parse_dates=["timestamp"]).set_index("timestamp")
-    return df.sort_index()
+    df = pd.read_csv(arquivo)
+    if "timestamp" not in df.columns:
+        return None
+    df["timestamp"] = pd.to_datetime(df["timestamp"], errors="coerce")
+    for coluna in ("Open", "High", "Low", "Close", "Volume"):
+        if coluna in df.columns:
+            df[coluna] = pd.to_numeric(df[coluna], errors="coerce")
+    obrigatorias = [c for c in ("timestamp", "Open", "High", "Low", "Close") if c in df.columns]
+    df = df.dropna(subset=obrigatorias).set_index("timestamp")
+    return df[~df.index.duplicated(keep="last")].sort_index()
 
 
 def salvar_cache(config: Configuracao, ativo: str, candles: pd.DataFrame) -> None:
-    candles.rename_axis("timestamp").to_csv(_arquivo_historico(config, ativo))
+    arquivo = _arquivo_historico(config, ativo)
+    temporario = arquivo.with_name(
+        f".{arquivo.name}.{os.getpid()}.{threading.get_ident()}.tmp"
+    )
+    candles.rename_axis("timestamp").to_csv(temporario)
+    try:
+        for tentativa in range(10):
+            try:
+                os.replace(temporario, arquivo)
+                return
+            except PermissionError:
+                if tentativa == 9:
+                    raise
+                time.sleep(0.10 * (tentativa + 1))
+    finally:
+        if temporario.exists():
+            temporario.unlink(missing_ok=True)
 
 
 def baixar_historico(api, config: Configuracao, ativo: str, total: int) -> pd.DataFrame:

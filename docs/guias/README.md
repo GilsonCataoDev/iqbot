@@ -65,13 +65,17 @@ A fonte do calendário é o feed público semanal do ForexFactory, sem cadastro.
 
 ## Estratégias de entrada (M15/H1 — ativas)
 
-Medidas com `backtest_m15.py --m1-minutos 8` (reconstrói o candle parcial via M1 para remover o viés de lookahead dos setups de reversão). Breakeven a 85% de payout é 54,1%.
+O backtest usa por padrão a mesma janela disponível ao vivo: 1 minuto no M15 e
+5 minutos no H1. Os números antigos medidos com `--m1-minutos 8` ficam
+**invalidos para decisão** até a nova campanha ser recalculada, pois davam mais
+tempo ao sinal M15 e o filtro H1/H4 podia incluir dados futuros. Cada execução
+agora salva um relatório versionado em `iqoption_m5/dados/validacoes/`.
 
 | Setup | WR medido | Edge |
 |---|---|---|
-| `sr_rejeicao` | ~80% | +25.9pp |
-| `fibo_sr_retracao` | 75.5% | +21.4pp |
-| `pin_bar_sr` | 74.6% | +20.5pp |
+| `sr_rejeicao` | aguardando revalidação | — |
+| `fibo_sr_retracao` | aguardando revalidação | — |
+| `pin_bar_sr` | aguardando revalidação | — |
 | `retracao_intracandle` | 50.4% | **-3.7pp — desligado** |
 | `pullback` / `pullback_confluencia` | ~49% | **negativo — desligado** |
 | `macd_crossover` | 33% | **negativo — desligado** |

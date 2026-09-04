@@ -1,4 +1,6 @@
 import unittest
+import tempfile
+from pathlib import Path
 
 import pandas as pd
 
@@ -185,6 +187,23 @@ class TestDivisaoTreinoTeste(unittest.TestCase):
         df = self._df(100).sort_values("hora_entrada", ascending=False)
         treino, teste = backtest.dividir_treino_teste(df, 0.7)
         self.assertGreater(teste["hora_entrada"].min(), treino["hora_entrada"].max())
+
+
+class TestCacheHistorico(unittest.TestCase):
+    def test_descarta_linha_truncada_e_mantem_datetimeindex(self):
+        pasta = Path(tempfile.mkdtemp())
+        config = Configuracao(pasta_dados=pasta, timeframe_segundos=900)
+        historico = pasta / "historico"
+        historico.mkdir()
+        (historico / "EURUSD_900s.csv").write_text(
+            "timestamp,Open,High,Low,Close,Volume\n"
+            "2026-01-01 00:00:00,1.1,1.2,1.0,1.15,10\n"
+            "17659,2285.0,,,,\n",
+            encoding="utf-8",
+        )
+        carregado = backtest.carregar_cache(config, "EURUSD")
+        self.assertIsInstance(carregado.index, pd.DatetimeIndex)
+        self.assertEqual(len(carregado), 1)
 
 
 if __name__ == "__main__":

@@ -36,6 +36,12 @@ AGG = {"Open": "first", "High": "max", "Low": "min", "Close": "last", "Volume": 
 MAX_CANDLES_TRADE = 12  # mesmo timeout do monitor (_MONITOR_TIMEOUT_H4)
 
 
+def _resample_fechado(df: pd.DataFrame, regra: str) -> pd.DataFrame:
+    """Rotula o agregado no fechamento para não liberar H4/D1 futuro."""
+    cols = {k: v for k, v in AGG.items() if k in df.columns}
+    return df.resample(regra, closed="left", label="right").agg(cols).dropna()
+
+
 def baixar_h1(ativos, n_total=5000, chunk=1000):
     """Baixa H1 em blocos, andando pra tras a partir de agora."""
     from iqoption_swing.mercado_swing import MercadoSwing
@@ -128,8 +134,8 @@ def _rodar_ativo(args):
     ativo, h1, cfg, passo_h4 = args
     est = EstrategiaSwingCache(cfg)
     trades = []
-    h4 = h1.resample("4h").agg(AGG).dropna()
-    d1 = h1.resample("1D").agg(AGG).dropna()
+    h4 = _resample_fechado(h1, "4h")
+    d1 = _resample_fechado(h1, "1D")
     if len(h4) < 80 or len(d1) < 60:
         print(f"  {ativo}: historico curto (h4={len(h4)} d1={len(d1)}), pulando")
         return trades
@@ -138,42 +144,43 @@ def _rodar_ativo(args):
         agora = h4.index[i]
         jan_h4 = h4.iloc[max(0, i - cfg.h4_num_candles + 1): i + 1]
         jan_d1 = d1[d1.index <= agora].iloc[-cfg.d1_num_candles:]
-        jan_h1 = h1[h1.index <= agora].iloc[-cfg.h1_num_candles:]
+        # Índice H1 é a abertura; às 12:00 o candle 12:00 ainda não fechou.
+        jan_h1 = h1[h1.index + pd.Timedelta(hours=1) <= agora].iloc[-cfg.h1_num_candles:]
         if len(jan_d1) < 55 or len(jan_h1) < 20:
             continue
         try:
             # a estrategia loga cada bloqueio; no backtest isso inunda a saida
             with contextlib.redirect_stdout(_io.StringIO()):
-                sinal = est.avaliar(ativo, jan_d1, jan_h4, jan_h1)
-        except Exception:
+                analise = est.avaliar(ativo, jan_d1, jan_h4, jan_h1)
+        except Exception as exc:
+            raise RuntimeError(f"{ativo} {agora}: erro avaliando Swing") from exc
+        if analise.estado != "ENTRAR" or analise.direcao not in {"compra", "venda"}:
             continue
-        if sinal is None:
+        if (
+            analise.zona_entrada is None
+            or analise.invalidacao is None
+            or analise.tp1 is None
+        ):
             continue
-        ind = est._adicionar_indicadores(jan_h4)
-        serie_atr = ind["ATR"].dropna()
-        if serie_atr.empty:
+        entrada = sum(analise.zona_entrada) / 2
+        sl = float(analise.invalidacao)
+        tp = float(analise.tp1)
+        risco = abs(entrada - sl)
+        ganho = abs(tp - entrada)
+        if risco <= 0 or ganho <= 0:
             continue
-        atr = float(serie_atr.iloc[-1])
-        entrada = float(jan_h4.iloc[-1]["Close"])
-        # mesma logica de executor_swing._calcular_sl_tp
-        zona = sinal.detalhes.get("zona_fib")
-        if zona and len(zona) == 2 and atr > 0:
-            buf = atr * 0.3
-            sl = float(zona[0]) - buf if sinal.direcao == "call" else float(zona[1]) + buf
-            sl_d = abs(entrada - sl)
-        else:
-            sl_d = atr * cfg.sl_atr_multiplo
-            sl = entrada - sl_d if sinal.direcao == "call" else entrada + sl_d
-        if sl_d <= 0:
+        if analise.direcao == "compra" and not (sl < entrada < tp):
             continue
-        tp_d = sl_d * cfg.rr_ratio
-        tp = entrada + tp_d if sinal.direcao == "call" else entrada - tp_d
-        res, ncand = resolver(h4.iloc[i + 1:], sinal.direcao, sl, tp)
+        if analise.direcao == "venda" and not (tp < entrada < sl):
+            continue
+        direcao_iq = "call" if analise.direcao == "compra" else "put"
+        rr_trade = ganho / risco
+        res, ncand = resolver(h4.iloc[i + 1:], direcao_iq, sl, tp)
         trades.append({
-            "ativo": ativo, "quando": agora, "direcao": sinal.direcao,
-            "setup": sinal.setup, "score": sinal.pontuacao,
+            "ativo": ativo, "quando": agora, "direcao": direcao_iq,
+            "setup": analise.setup, "score": 10,
             "resultado": res, "candles": ncand,
-            "R": cfg.rr_ratio if res == "win" else (-1.0 if res == "loss" else 0.0),
+            "R": rr_trade if res == "win" else (-1.0 if res == "loss" else 0.0),
         })
     return trades
 
@@ -198,26 +205,44 @@ def relatorio(df, cfg):
     if df.empty:
         print("\nNENHUM sinal gerado no periodo.")
         return
-    be = 1.0 / (1.0 + cfg.rr_ratio)
     dec = df[df.resultado != "timeout"]
     n = len(dec)
     wr = (dec.resultado == "win").mean() if n else 0.0
     n_to = int((df.resultado == "timeout").sum())
+    r_medio_win = float(df.loc[df.resultado == "win", "R"].mean()) if (df.resultado == "win").any() else cfg.rr_ratio
+    be = 1.0 / (1.0 + r_medio_win)
+    ev_total = float(df.R.mean())
     print("\n" + "=" * 68)
     print(f"RESULTADO  ({len(df)} sinais, {n} decididos, {n_to} timeout)")
     print("=" * 68)
-    print(f"  WR = {wr:.1%}   breakeven(R:R {cfg.rr_ratio}) = {be:.1%}   edge = {(wr-be)*100:+.1f}pp")
-    print(f"  EV = {df.R.mean():+.3f}R por trade | total = {df.R.sum():+.1f}R")
+    print(f"  WR = {wr:.1%}   breakeven(R medio win {r_medio_win:.2f}R) = {be:.1%}   edge = {(wr-be)*100:+.1f}pp")
+    print(f"  EV = {ev_total:+.3f}R por trade | total = {df.R.sum():+.1f}R")
     if n:
-        se = math.sqrt(wr * (1 - wr) / n)
-        lo, hi = wr - 1.96 * se, wr + 1.96 * se
+        z = 1.96
+        den = 1 + z * z / n
+        centro = (wr + z * z / (2 * n)) / den
+        margem = z * math.sqrt((wr * (1 - wr) + z * z / (4 * n)) / n) / den
+        lo, hi = max(0.0, centro - margem), min(1.0, centro + margem)
         if hi < be:
-            marca = "  <- todo o IC abaixo do breakeven: edge NEGATIVO provado"
+            marca = "  <- todo o IC abaixo do breakeven: edge NEGATIVO"
+        elif lo > be and ev_total > 0:
+            marca = "  <- WR acima do breakeven e EV positivo"
         elif lo > be:
-            marca = "  <- todo o IC acima do breakeven: edge POSITIVO provado"
+            marca = "  <- WR acima do breakeven, mas EV total ainda nao confirma"
         else:
             marca = "  <- IC cruza o breakeven: inconclusivo, falta amostra"
         print(f"  IC95% do WR: [{lo:.1%}, {hi:.1%}]{marca}")
+
+    ordenado = df.sort_values("quando")
+    meio = len(ordenado) // 2
+    print("\n  --- estabilidade temporal ---")
+    for nome, parte in (("1a metade", ordenado.iloc[:meio]), ("2a metade", ordenado.iloc[meio:])):
+        decididos = parte[parte.resultado != "timeout"]
+        wr_parte = (decididos.resultado == "win").mean() if len(decididos) else 0.0
+        print(
+            f"    {nome:<12} n={len(parte):<4} WR={wr_parte:.1%} "
+            f"EV={parte.R.mean():+.3f}R total={parte.R.sum():+.1f}R"
+        )
 
     for col, titulo in [("setup", "SETUP"), ("ativo", "PAR"), ("score", "SCORE")]:
         print(f"\n  --- por {titulo} ---")
@@ -227,6 +252,11 @@ def relatorio(df, cfg):
         for k, r in g.sort_values("R", ascending=False).iterrows():
             wrs = f"{r.WR:.0%}" if pd.notna(r.WR) else "  -"
             print(f"    {str(k):<22} n={int(r.n):<4} WR={wrs:>4}  EV={r.EV:+.3f}R  tot={r.R:+7.1f}R")
+    comparacoes = sum(df[col].nunique() for col in ("setup", "ativo", "score"))
+    print(
+        f"\n  Multiplicidade: {comparacoes} grupos comparados; "
+        f"alpha Bonferroni={0.05/comparacoes:.5f}."
+    )
 
 
 def main():

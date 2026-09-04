@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import json
 import os
+import socket
 import sys
 import threading
 import time
@@ -40,18 +41,62 @@ from iqoption_m5 import backtest
 from iqoption_m5.config import configuracao_scalping_m15
 from iqoption_m5.grafico import GraficoM5
 from iqoption_m5.mercado_iq import MercadoIQ
+from iqoption_m5.monitor_store import MonitorEventStore, SCHEMA_VERSAO
 from iqoption_m5.noticias import CalendarioEconomico
 
 FOREX = ["EURUSD", "GBPUSD", "USDJPY", "AUDUSD", "EURJPY", "USDCAD", "NZDUSD",
          "EURGBP", "EURCHF", "EURCAD", "GBPJPY", "GBPCHF", "GBPCAD", "CADCHF"]
+# Cripto normal, sem OTC. Fica 24/7 porque esse bloco foi medido separado.
 CRYPTO = ["BTCUSD", "ETHUSD", "XRPUSD"]
-ATIVOS = FOREX + CRYPTO
-CLASSE = {**{a: "forex" for a in FOREX}, **{a: "crypto" for a in CRYPTO}}
+# Ouro e uma classe própria: lê o mesmo contexto M15 e o plano Fibo, mas não
+# herda a validação estatística do Forex. XAU/USD também recebe notícias USD.
+COMMODITIES = ["XAUUSD"]
+ATIVOS = FOREX + CRYPTO + COMMODITIES
+CLASSE = {
+    **{a: "forex" for a in FOREX},
+    **{a: "crypto" for a in CRYPTO},
+    **{a: "ouro" for a in COMMODITIES},
+}
 
 TF = 900
 PORTA = 8777
 INTERVALO_S = 30
 JAN = 10
+SIMULADOR_VERSAO = 2
+
+
+def adquirir_trava_monitor(porta: int = PORTA + 10_000) -> socket.socket:
+    """Impede duas instâncias de gravarem os mesmos JSONs e sinais."""
+    trava = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    if hasattr(socket, "SO_EXCLUSIVEADDRUSE"):
+        trava.setsockopt(socket.SOL_SOCKET, socket.SO_EXCLUSIVEADDRUSE, 1)
+    try:
+        trava.bind(("127.0.0.1", porta))
+        trava.listen(1)
+        return trava
+    except OSError:
+        trava.close()
+        raise
+
+
+def janela_validada_para(classe: str, hora_utc: int) -> bool:
+    """Só devolve elegibilidade onde o falso rompimento foi medido.
+
+    Cripto foi avaliado 24/7. Ouro não deve receber, por semelhança, a janela
+    de Forex: por enquanto seus sinais ficam como estudo e o plano Fibo serve
+    apenas para leitura/registro.
+    """
+    return classe == "crypto" or (classe == "forex" and hora_utc in (21, 22))
+
+
+def unidade_movimento(ativo: str) -> tuple[float, str]:
+    """Unidade legível sem chamar variação de Bitcoin de 'pips'."""
+    classe = CLASSE.get(ativo, "forex")
+    if classe == "crypto":
+        return 1.0, "USD"
+    if classe == "ouro":
+        return 0.01, "pontos"
+    return M.pip(ativo), "pips"
 
 
 def tendencia_dia(df: pd.DataFrame) -> dict:
@@ -68,6 +113,275 @@ def tendencia_dia(df: pd.DataFrame) -> dict:
     ema = "alta" if float(e_r.iloc[-1]) > float(e_l.iloc[-1]) else "baixa"
     return {"dir": "alta" if pct > 0.05 else ("baixa" if pct < -0.05 else "lateral"),
             "pct": round(pct, 2), "ema": ema}
+
+
+def _tendencia_ema(fechamentos: pd.Series) -> str:
+    """Direção objetiva de uma série fechada; ``lateral`` não serve ao Fibo."""
+    if len(fechamentos) < 22:
+        return "lateral"
+    rapida = fechamentos.ewm(span=9, adjust=False).mean().iloc[-1]
+    lenta = fechamentos.ewm(span=21, adjust=False).mean().iloc[-1]
+    if not np.isfinite(rapida) or not np.isfinite(lenta):
+        return "lateral"
+    return "alta" if rapida > lenta else "baixa" if rapida < lenta else "lateral"
+
+
+def _tendencia_h1_a_partir_m15(df: pd.DataFrame) -> str:
+    """Calcula H1 de velas M15 já fechadas, sem buscar uma segunda fonte.
+
+    A última hora costuma estar incompleta; ela é descartada para que uma vela
+    M15 em formação não mude a direção H1 exibida.
+    """
+    try:
+        h1 = df["Close"].resample("1h").last().dropna()
+        return _tendencia_ema(h1.iloc[:-1])
+    except (TypeError, ValueError, AttributeError):
+        return "lateral"
+
+
+def _ultimo_impulso(df: pd.DataFrame, atr: pd.Series, direcao: str) -> dict | None:
+    """Último impulso de pelo menos 1.5 ATR, sem olhar candles futuros.
+
+    O extremo final precisa ser o maior/menor desde o começo do impulso. Isso
+    evita desenhar Fibo em todo candle pequeno de uma consolidação.
+    """
+    janela = df.tail(64)
+    atr_janela = atr.reindex(janela.index)
+    if len(janela) < 16:
+        return None
+    for fim in range(len(janela) - 2, 7, -1):
+        atr_fim = float(atr_janela.iloc[fim])
+        if not np.isfinite(atr_fim) or atr_fim <= 0:
+            continue
+        inicio = max(0, fim - 32)
+        antes = janela.iloc[inicio:fim]
+        if antes.empty:
+            continue
+        if direcao == "buy":
+            inicio_rel = int(antes["Low"].values.argmin())
+            comeco = inicio + inicio_rel
+            base = float(janela["Low"].iloc[comeco])
+            extremo = float(janela["High"].iloc[fim])
+            confirmou_extremo = extremo >= float(janela["High"].iloc[comeco:fim + 1].max())
+        else:
+            inicio_rel = int(antes["High"].values.argmax())
+            comeco = inicio + inicio_rel
+            base = float(janela["High"].iloc[comeco])
+            extremo = float(janela["Low"].iloc[fim])
+            confirmou_extremo = extremo <= float(janela["Low"].iloc[comeco:fim + 1].min())
+        amplitude = abs(extremo - base)
+        if confirmou_extremo and amplitude >= 1.5 * atr_fim:
+            return {
+                "inicio": janela.index[comeco], "fim": janela.index[fim],
+                "base": base, "extremo": extremo, "amplitude": amplitude,
+                "atr": atr_fim,
+            }
+    return None
+
+
+def plano_fibo(df: pd.DataFrame, atr: pd.Series, ativo: str,
+                noticia: dict | None = None) -> dict:
+    """Mapa Fibo M15 de estudo: zona, invalidação, alvos e confirmação.
+
+    Não cria sinal operacional e não muda ``decisao_entrada``. O propósito é
+    tornar a espera por retração e a relação risco/retorno observáveis antes de
+    decidir se este filtro merece uma validação estatística própria.
+    """
+    sem_plano = {"disponivel": False, "estado": "SEM PLANO FIBO"}
+    if len(df) < 96 or atr.empty:
+        return sem_plano
+    m15 = _tendencia_ema(df["Close"])
+    h1 = _tendencia_h1_a_partir_m15(df)
+    if m15 not in ("alta", "baixa") or h1 != m15:
+        return {
+            **sem_plano, "m15": m15, "h1": h1,
+            "estado": "SEM ALINHAMENTO H1/M15",
+            "motivo": "Fibo é apenas leitura quando M15 e H1 não apontam a mesma direção.",
+        }
+    direcao = "buy" if m15 == "alta" else "sell"
+    impulso = _ultimo_impulso(df, atr, direcao)
+    if impulso is None:
+        return {
+            **sem_plano, "m15": m15, "h1": h1, "direcao": direcao,
+            "estado": "SEM IMPULSO LIMPO", "motivo": "A última perna não alcançou 1.5 ATR.",
+        }
+
+    base, extremo, amp, atr_atual = (
+        impulso["base"], impulso["extremo"], impulso["amplitude"], impulso["atr"]
+    )
+    preco = float(df["Close"].iloc[-1])
+    vela = df.iloc[-1]
+    margem = 0.15 * atr_atual
+    if direcao == "buy":
+        fib382, fib500, fib618, fib786 = (
+            extremo - amp * .382, extremo - amp * .500,
+            extremo - amp * .618, extremo - amp * .786,
+        )
+        zona_inf, zona_sup = fib618, fib382
+        entrada, sl, tp1 = fib618, fib786 - margem, extremo
+        tp2, tp3 = extremo + amp * .272, extremo + amp * .618
+        invalida = preco <= fib786
+        na_zona = zona_inf <= preco <= zona_sup
+        confirmou = (
+            float(vela["Low"]) <= zona_sup and float(vela["Low"]) > sl
+            and float(vela["Close"]) > float(vela["Open"])
+            and float(vela["Close"]) >= fib500
+        )
+    else:
+        fib382, fib500, fib618, fib786 = (
+            extremo + amp * .382, extremo + amp * .500,
+            extremo + amp * .618, extremo + amp * .786,
+        )
+        zona_inf, zona_sup = fib382, fib618
+        entrada, sl, tp1 = fib618, fib786 + margem, extremo
+        tp2, tp3 = extremo - amp * .272, extremo - amp * .618
+        invalida = preco >= fib786
+        na_zona = zona_inf <= preco <= zona_sup
+        confirmou = (
+            float(vela["High"]) >= zona_inf and float(vela["High"]) < sl
+            and float(vela["Close"]) < float(vela["Open"])
+            and float(vela["Close"]) <= fib500
+        )
+    risco = abs(entrada - sl)
+    rr = abs(tp1 - entrada) / risco if risco > 0 else 0.0
+    noticia_risco = (noticia or {}).get("estado") == "janela_risco"
+    qualificada = bool(confirmou and rr >= 1.5 and not invalida and not noticia_risco)
+    if invalida:
+        estado = "IDEIA INVALIDADA"
+        motivo = "Preço fechou além de 78.6% da retração."
+    elif noticia_risco:
+        estado = "NOTÍCIA — AGUARDAR"
+        motivo = "Há notícia relevante na janela de risco."
+    elif qualificada:
+        estado = f"ENTRADA FIBO {direcao.upper()} — ESTUDO"
+        motivo = "Zona tocada, rejeição confirmada e R:R mínimo de 1.5."
+    elif na_zona:
+        estado = "NA ZONA — ESPERAR REJEIÇÃO"
+        motivo = "Preço chegou à retração; ainda falta candle de confirmação."
+    else:
+        estado = "AGUARDAR ZONA FIBO"
+        motivo = "Aguarde o preço alcançar a zona 38.2%–61.8%."
+    checklist = [
+        {"nome": "Tendência H1 e M15 alinhadas", "ok": True},
+        {"nome": "Impulso limpo de pelo menos 1.5 ATR", "ok": True},
+        {"nome": "Preço na zona Fibo 38.2%–61.8%", "ok": na_zona},
+        {"nome": "Rejeição a favor da tendência", "ok": confirmou},
+        {"nome": "R:R até TP1 de pelo menos 1.5", "ok": rr >= 1.5},
+        {"nome": "Sem notícia de alto impacto na janela", "ok": not noticia_risco},
+    ]
+    passo, unidade = unidade_movimento(ativo)
+    arred = lambda valor: round(float(valor), 6)
+    return {
+        "disponivel": True, "direcao": direcao, "m15": m15, "h1": h1,
+        "estado": estado, "motivo": motivo, "qualificada": qualificada,
+        "na_zona": na_zona, "confirmou": confirmou, "rr": round(rr, 2),
+        "zona_inf": arred(zona_inf), "zona_sup": arred(zona_sup),
+        "fib382": arred(fib382), "fib500": arred(fib500),
+        "fib618": arred(fib618), "fib786": arred(fib786),
+        "impulso_inicio": str(impulso["inicio"]), "impulso_fim": str(impulso["fim"]),
+        "amplitude_atr": round(amp / atr_atual, 2),
+        "checklist": checklist,
+        "alvos": {
+            "entrada": arred(entrada), "sl": arred(sl), "tp1": arred(tp1),
+            "tp2": arred(tp2), "tp3": arred(tp3),
+            "risco_pips": round(risco / passo, 1),
+            "risco_unidade": unidade, "modo_entrada": "limite",
+        },
+    }
+
+
+def plano_varredura_liquidez(df: pd.DataFrame, atr: pd.Series, ativo: str,
+                             noticia: dict | None = None) -> dict:
+    """Varredura BUY objetiva, publicada somente como estudo em sombra.
+
+    Diferente do falso rompimento antigo, exige que o pavio atravesse o piso
+    anterior e que o candle feche novamente dentro do range. A entrada só é
+    considerada caso o preço rompa a máxima do candle de varredura.
+    """
+    vazio = {
+        "disponivel": False, "sinal_estudo": False, "direcao": "buy",
+        "estado": "SEM VARREDURA", "motivo": "Aguardando estrutura suficiente.",
+    }
+    if CLASSE.get(ativo) != "forex" or len(df) < 60 or atr.empty:
+        return vazio
+
+    av = float(atr.reindex(df.index).iloc[-1])
+    if not np.isfinite(av) or av <= 0:
+        return vazio
+    anteriores = df.iloc[-11:-1]
+    if len(anteriores) != 10:
+        return vazio
+
+    amp = df["High"] - df["Low"]
+    media_10 = amp.shift(1).rolling(10).mean()
+    limiar = media_10.expanding(min_periods=40).quantile(.25).shift(1)
+    media_atual, limiar_atual = float(media_10.iloc[-1]), float(limiar.iloc[-1])
+    acumulacao = bool(
+        np.isfinite(media_atual) and np.isfinite(limiar_atual)
+        and media_atual <= limiar_atual
+    )
+
+    piso = float(anteriores["Low"].min())
+    teto = float(anteriores["High"].max())
+    vela = df.iloc[-1]
+    abertura, maxima, minima, fechamento = map(
+        float, (vela["Open"], vela["High"], vela["Low"], vela["Close"])
+    )
+    alcance = max(maxima - minima, 1e-12)
+    varreu = minima < piso
+    reclaim = fechamento > piso
+    penetracao_atr = max(0.0, piso - minima) / av
+    pavio_inferior = min(abertura, fechamento) - minima
+    rejeicao = pavio_inferior / alcance >= .35 and (fechamento - minima) / alcance >= .60
+
+    entrada = maxima + .02 * av
+    sl = minima - .10 * av
+    risco = entrada - sl
+    recompensa = teto - entrada
+    rr = recompensa / risco if risco > 0 else 0.0
+    noticia_risco = (noticia or {}).get("estado") == "janela_risco"
+    penetracao_ok = .05 <= penetracao_atr <= .75
+    qualificada = bool(
+        acumulacao and varreu and reclaim and rejeicao and penetracao_ok
+        and rr >= 1.5 and not noticia_risco
+    )
+
+    if noticia_risco:
+        estado, motivo = "NOTÍCIA — AGUARDAR", "Varredura ocorreu dentro da janela de notícia."
+    elif qualificada:
+        estado = "VARREDURA BUY — ESTUDO"
+        motivo = "Pavio varreu o piso, fechou dentro do range e deixou alvo estrutural >= 1.5R."
+    elif varreu and not reclaim:
+        estado, motivo = "ROMPIMENTO, NÃO VARREDURA", "O candle não fechou novamente dentro do range."
+    elif varreu:
+        estado, motivo = "VARREDURA FRACA", "Faltou rejeição, acumulação ou espaço mínimo até o alvo."
+    else:
+        estado, motivo = "AGUARDAR VARREDURA", "O piso das dez velas anteriores ainda não foi varrido."
+
+    passo, unidade = unidade_movimento(ativo)
+    arred = lambda valor: round(float(valor), 6)
+    return {
+        "disponivel": True, "sinal_estudo": qualificada, "direcao": "buy",
+        "estado": estado, "motivo": motivo, "acumulacao": acumulacao,
+        "varreu": varreu, "reclaim": reclaim, "rejeicao": rejeicao,
+        "penetracao_atr": round(penetracao_atr, 2), "rr": round(rr, 2),
+        "piso_range": arred(piso), "teto_range": arred(teto),
+        "h1": _tendencia_h1_a_partir_m15(df),
+        "checklist": [
+            {"nome": "Acumulação antes da varredura", "ok": acumulacao},
+            {"nome": "Pavio atravessou o piso anterior", "ok": varreu},
+            {"nome": "Fechamento voltou para dentro do range", "ok": reclaim},
+            {"nome": "Pavio/rejeição forte", "ok": rejeicao},
+            {"nome": "Varredura entre 0.05 e 0.75 ATR", "ok": penetracao_ok},
+            {"nome": "Espaço até o teto de pelo menos 1.5R", "ok": rr >= 1.5},
+            {"nome": "Sem notícia de alto impacto na janela", "ok": not noticia_risco},
+        ],
+        "alvos": {
+            "entrada": arred(entrada), "sl": arred(sl), "tp1": arred(teto),
+            "risco_pips": round(risco / passo, 1), "risco_unidade": unidade,
+            "modo_entrada": "stop",
+        },
+    }
 
 
 def contexto_noticia(calendario: CalendarioEconomico | None, ativo: str,
@@ -127,27 +441,435 @@ def dossie_candle(df: pd.DataFrame, atr: pd.Series, ativo: str, noticia: dict) -
     }
 
 
+def leitura_fluxo_sessao(df: pd.DataFrame, atr: pd.Series, ativo: str) -> dict:
+    """Leitura de leilão usando o tick-volume disponível nos candles M15.
+
+    O volume de cada candle é distribuído entre as faixas de preço atravessadas.
+    POC/VAH/VAL são uma aproximação de pesquisa, não volume Forex centralizado.
+    """
+    indisponivel = {
+        "disponivel": False, "estado": "FLUXO INDISPONÍVEL",
+        "motivo": "São necessários candles e ATR válidos.",
+    }
+    if len(df) < 32 or atr.empty:
+        return indisponivel
+    try:
+        atual = pd.Timestamp(df.index[-1])
+        hora = int(atual.hour)
+        if 0 <= hora < 7:
+            sessao, inicio = "ÁSIA", atual.normalize()
+        elif 7 <= hora < 13:
+            sessao, inicio = "LONDRES", atual.normalize() + pd.Timedelta(hours=7)
+        elif 13 <= hora < 16:
+            sessao, inicio = "LONDRES + NOVA YORK", atual.normalize() + pd.Timedelta(hours=7)
+        elif 16 <= hora < 22:
+            sessao, inicio = "NOVA YORK", atual.normalize() + pd.Timedelta(hours=13)
+        else:
+            sessao, inicio = "TRANSIÇÃO / BAIXA LIQUIDEZ", atual.normalize()
+
+        janela = df[df.index >= inicio].tail(96)
+        if len(janela) < 4:
+            janela = df.tail(32)
+        colunas = janela[["Open", "High", "Low", "Close"]].apply(
+            pd.to_numeric, errors="coerce"
+        )
+        valido = colunas.notna().all(axis=1)
+        janela, colunas = janela.loc[valido], colunas.loc[valido]
+        if len(janela) < 4:
+            return indisponivel
+
+        if "Volume" in janela:
+            volumes = pd.to_numeric(janela["Volume"], errors="coerce").fillna(0.0).clip(lower=0.0)
+        else:
+            volumes = pd.Series(0.0, index=janela.index)
+        fonte_volume = "tick-volume M15"
+        if float(volumes.sum()) <= 0:
+            volumes = pd.Series(1.0, index=janela.index)
+            fonte_volume = "atividade uniforme (sem volume)"
+
+        tipico = (colunas["High"] + colunas["Low"] + colunas["Close"]) / 3.0
+        vwap = float((tipico * volumes).sum() / volumes.sum())
+        minimo, maximo = float(colunas["Low"].min()), float(colunas["High"].max())
+        if not np.isfinite(minimo + maximo) or maximo <= minimo:
+            return indisponivel
+
+        quantidade_faixas = 32
+        bordas = np.linspace(minimo, maximo, quantidade_faixas + 1)
+        perfil = np.zeros(quantidade_faixas, dtype=float)
+        for (_, vela), volume in zip(colunas.iterrows(), volumes.to_numpy()):
+            primeiro = int(np.clip(
+                np.searchsorted(bordas, float(vela["Low"]), side="right") - 1,
+                0, quantidade_faixas - 1,
+            ))
+            ultimo = int(np.clip(
+                np.searchsorted(bordas, float(vela["High"]), side="left"),
+                0, quantidade_faixas - 1,
+            ))
+            perfil[primeiro:ultimo + 1] += float(volume) / max(1, ultimo - primeiro + 1)
+        centros = (bordas[:-1] + bordas[1:]) / 2.0
+        poc = float(centros[int(np.argmax(perfil))])
+        alvo_volume = float(perfil.sum()) * .70
+        escolhidas, acumulado = [], 0.0
+        for indice in np.argsort(perfil)[::-1]:
+            escolhidas.append(int(indice))
+            acumulado += float(perfil[indice])
+            if acumulado >= alvo_volume:
+                break
+        val = float(bordas[min(escolhidas)])
+        vah = float(bordas[max(escolhidas) + 1])
+
+        vela = colunas.iloc[-1]
+        fechamento = float(vela["Close"])
+        anterior = float(colunas["Close"].iloc[-2])
+        atr_atual = float(atr.reindex(df.index).iloc[-1])
+        if not np.isfinite(atr_atual) or atr_atual <= 0:
+            return indisponivel
+        mediana_volume = float(volumes.iloc[:-1].tail(20).median())
+        volume_rel = float(volumes.iloc[-1] / mediana_volume) if mediana_volume > 0 else 1.0
+        movimento_atr = abs(fechamento - anterior) / atr_atual
+        eficiencia = movimento_atr / max(.25, volume_rel)
+        if eficiencia >= .85:
+            eficiencia_estado = "MOVIMENTO EFICIENTE"
+        elif eficiencia <= .30 and volume_rel >= 1.0:
+            eficiencia_estado = "POSSÍVEL ABSORÇÃO"
+        else:
+            eficiencia_estado = "MOVIMENTO EQUILIBRADO"
+
+        rejeita_vah = float(vela["High"]) >= vah and fechamento < vah
+        rejeita_val = float(vela["Low"]) <= val and fechamento > val
+        if rejeita_vah and not rejeita_val:
+            estado, direcao = "REJEIÇÃO NA VAH", "sell"
+        elif rejeita_val and not rejeita_vah:
+            estado, direcao = "REJEIÇÃO NA VAL", "buy"
+        elif fechamento > vah:
+            estado, direcao = "ACEITAÇÃO ACIMA DA ÁREA DE VALOR", "buy"
+        elif fechamento < val:
+            estado, direcao = "ACEITAÇÃO ABAIXO DA ÁREA DE VALOR", "sell"
+        else:
+            estado, direcao = "ACEITAÇÃO DENTRO DA ÁREA DE VALOR", "neutro"
+
+        m15 = _tendencia_ema(df["Close"])
+        h1 = _tendencia_h1_a_partir_m15(df)
+        tendencia_esperada = "alta" if direcao == "buy" else "baixa"
+        if estado.startswith("REJEIÇÃO"):
+            # Rejeição das bordas procura rotação de volta ao valor justo.
+            lado_vwap = (fechamento <= vwap) if direcao == "buy" else (fechamento >= vwap)
+        else:
+            # Aceitação fora da área procura continuação para longe da VWAP.
+            lado_vwap = (fechamento >= vwap) if direcao == "buy" else (fechamento <= vwap)
+        tem_direcao = direcao in ("buy", "sell")
+        pontos = 0
+        pontos += 20 if tem_direcao else 0
+        pontos += 20 if tem_direcao and m15 == tendencia_esperada else 0
+        pontos += 20 if tem_direcao and h1 == tendencia_esperada else 0
+        pontos += 15 if tem_direcao and lado_vwap else 0
+        pontos += 15 if estado.startswith("REJEIÇÃO") else 0
+        pontos += 10 if eficiencia >= .60 or volume_rel >= 1.20 else 0
+
+        alvos = None
+        rr = 0.0
+        if estado.startswith("REJEIÇÃO"):
+            margem = .25 * atr_atual
+            if direcao == "buy":
+                sl, tp1, tp2 = min(float(vela["Low"]), val) - margem, poc, vah
+            else:
+                sl, tp1, tp2 = max(float(vela["High"]), vah) + margem, poc, val
+            risco = abs(fechamento - sl)
+            recompensa = tp1 - fechamento if direcao == "buy" else fechamento - tp1
+            rr = max(0.0, recompensa) / risco if risco > 0 else 0.0
+            passo, unidade = unidade_movimento(ativo)
+            alvos = {
+                "entrada": round(fechamento, 6), "sl": round(sl, 6),
+                "tp1": round(tp1, 6), "tp2": round(tp2, 6),
+                "risco_pips": round(risco / passo, 1), "risco_unidade": unidade,
+            }
+        sinal_estudo = bool(
+            estado.startswith("REJEIÇÃO") and pontos >= 70 and alvos and rr >= 1.2
+        )
+        checklist = [
+            {"nome": "Rejeição em VAH/VAL", "ok": estado.startswith("REJEIÇÃO")},
+            {"nome": "M15 alinhado", "ok": tem_direcao and m15 == tendencia_esperada},
+            {"nome": "H1 alinhado", "ok": tem_direcao and h1 == tendencia_esperada},
+            {"nome": "Preço do lado correto da VWAP", "ok": tem_direcao and lado_vwap},
+            {"nome": "R:R até POC ≥ 1.2", "ok": bool(alvos and rr >= 1.2)},
+        ]
+        return {
+            "disponivel": True, "sessao": sessao, "fonte_volume": fonte_volume,
+            "estado": estado, "direcao": direcao, "m15": m15, "h1": h1,
+            "vwap": round(vwap, 6), "poc": round(poc, 6),
+            "vah": round(vah, 6), "val": round(val, 6),
+            "volume_relativo": round(volume_rel, 2),
+            "movimento_atr": round(movimento_atr, 2),
+            "eficiencia": round(eficiencia, 2),
+            "eficiencia_estado": eficiencia_estado,
+            "qualidade": int(pontos), "rr": round(rr, 2),
+            "sinal_estudo": sinal_estudo, "alvos": alvos,
+            "checklist": checklist,
+            "motivo": (
+                "Confluência de rejeição, tendência e VWAP; registrar em sombra."
+                if sinal_estudo else
+                "Leitura de contexto; aguarde uma rejeição alinhada com R:R suficiente."
+            ),
+        }
+    except (ValueError, TypeError, IndexError, KeyError):
+        return indisponivel
+
+
+def plano_orb_sessao(df: pd.DataFrame, atr: pd.Series, ativo: str) -> dict:
+    """ORB Londres/NY com FVG de três candles, somente como estudo sombra.
+
+    A fonte atual entrega candles M15. Portanto, esta é uma adaptação objetiva
+    do modelo de abertura: primeira vela M15 da sessão, fechamento além da
+    faixa e desequilíbrio M15. Não é apresentada como a versão M1 do NQ nem
+    como estratégia validada para Forex.
+    """
+    base = {
+        "disponivel": False, "sinal_estudo": False,
+        "estado": "ORB INDISPONÍVEL", "motivo": "Aguardando sessão e candles.",
+    }
+    if CLASSE.get(ativo) == "crypto":
+        return {
+            **base,
+            "motivo": "Cripto funciona 24/7; ORB Londres/NY não será inventado para esta classe.",
+        }
+    if len(df) < 40 or atr.empty:
+        return base
+    try:
+        dados = df[["Open", "High", "Low", "Close"]].apply(
+            pd.to_numeric, errors="coerce"
+        ).dropna()
+        if len(dados) < 40:
+            return base
+        agora = pd.Timestamp(dados.index[-1])
+        inicio_dia = agora.normalize()
+        hora = int(agora.hour)
+        if 7 <= hora < 13:
+            sessao, inicio = "LONDRES", inicio_dia + pd.Timedelta(hours=7)
+        elif 13 <= hora < 22:
+            sessao, inicio = "NOVA YORK", inicio_dia + pd.Timedelta(hours=13)
+        else:
+            return {
+                **base,
+                "estado": "FORA DA JANELA ORB",
+                "motivo": "O estudo observa Londres 07:00–12:45 e Nova York 13:00–21:45 UTC.",
+            }
+
+        abertura = dados[(dados.index >= inicio) &
+                         (dados.index < inicio + pd.Timedelta(minutes=15))]
+        posteriores = dados[dados.index >= inicio + pd.Timedelta(minutes=15)]
+        if abertura.empty or len(posteriores) < 3:
+            return {
+                **base, "disponivel": True, "sessao": sessao,
+                "estado": "FORMANDO ORB",
+                "motivo": "Aguardando três candles M15 depois da faixa de abertura.",
+            }
+
+        orh = float(abertura["High"].max())
+        orl = float(abertura["Low"].min())
+        trio = posteriores.tail(3)
+        primeira, ultima = trio.iloc[0], trio.iloc[-1]
+        fechamento = float(ultima["Close"])
+        rompe_buy = fechamento > orh
+        rompe_sell = fechamento < orl
+        fvg_buy = float(ultima["Low"]) > float(primeira["High"])
+        fvg_sell = float(ultima["High"]) < float(primeira["Low"])
+        direcao = "buy" if rompe_buy else "sell" if rompe_sell else "neutro"
+        tem_fvg = fvg_buy if direcao == "buy" else fvg_sell if direcao == "sell" else False
+
+        h1 = _tendencia_h1_a_partir_m15(df)
+        h4_fechamentos = df["Close"].resample("4h").last().dropna()
+        h4 = _tendencia_ema(h4_fechamentos.iloc[:-1])
+        esperada = "alta" if direcao == "buy" else "baixa"
+        vies_ok = direcao in ("buy", "sell") and h1 == esperada and h4 == esperada
+        atr_atual = float(atr.reindex(df.index).iloc[-1])
+        if not np.isfinite(atr_atual) or atr_atual <= 0:
+            return base
+
+        zona_inf = zona_sup = None
+        alvos = None
+        rr = 0.0
+        if tem_fvg:
+            if direcao == "buy":
+                zona_inf, zona_sup = float(primeira["High"]), float(ultima["Low"])
+                sl = min(float(trio["Low"].min()), zona_inf) - .15 * atr_atual
+            else:
+                zona_inf, zona_sup = float(ultima["High"]), float(primeira["Low"])
+                sl = max(float(trio["High"].max()), zona_sup) + .15 * atr_atual
+            risco = abs(fechamento - sl)
+            if risco > 0:
+                sinal = 1.0 if direcao == "buy" else -1.0
+                tp1, tp2 = fechamento + sinal * risco, fechamento + sinal * 2.0 * risco
+                rr = 2.0
+                passo, unidade = unidade_movimento(ativo)
+                alvos = {
+                    "entrada": round(fechamento, 6), "sl": round(sl, 6),
+                    "tp1": round(tp1, 6), "tp2": round(tp2, 6),
+                    "risco_pips": round(risco / passo, 1), "risco_unidade": unidade,
+                }
+
+        sinal_estudo = bool(direcao in ("buy", "sell") and tem_fvg and vies_ok and alvos)
+        if sinal_estudo:
+            estado = "ORB + FVG — SOMBRA"
+            motivo = "Fechamento fora da abertura, FVG M15 e H1/H4 alinhados. Registrar em sombra."
+        elif direcao == "neutro":
+            estado, motivo = "DENTRO DA ORB", "Aguardar fechamento além da máxima ou mínima da abertura."
+        elif not tem_fvg:
+            estado, motivo = "ROMPIMENTO SEM FVG", "Rompimento ocorreu, mas falta desequilíbrio M15 de três candles."
+        else:
+            estado, motivo = "ROMPIMENTO CONTRA O VIÉS", "H1 e H4 não confirmam a direção; não registrar entrada."
+        checklist = [
+            {"nome": "Fechamento fora da ORB", "ok": direcao in ("buy", "sell")},
+            {"nome": "FVG M15 de 3 candles", "ok": bool(tem_fvg)},
+            {"nome": "H1 alinhado", "ok": h1 == esperada if direcao != "neutro" else False},
+            {"nome": "H4 alinhado", "ok": h4 == esperada if direcao != "neutro" else False},
+            {"nome": "Alvo 2R calculado", "ok": bool(alvos and rr >= 2.0)},
+        ]
+        return {
+            "disponivel": True, "sessao": sessao, "estado": estado,
+            "motivo": motivo, "direcao": direcao, "orh": round(orh, 6),
+            "orl": round(orl, 6), "inicio": str(inicio), "h1": h1, "h4": h4,
+            "fvg": bool(tem_fvg),
+            "fvg_inf": round(zona_inf, 6) if zona_inf is not None else None,
+            "fvg_sup": round(zona_sup, 6) if zona_sup is not None else None,
+            "rr": rr, "alvos": alvos, "checklist": checklist,
+            "sinal_estudo": sinal_estudo,
+        }
+    except (ValueError, TypeError, IndexError, KeyError):
+        return base
+
+
+def decisao_entrada(acumulacao: bool, rompeu_piso: bool, janela_validada: bool) -> dict:
+    """Expõe as regras objetivas sem transformar contexto em sinal.
+
+    O estado e a checklist são apresentados ao usuário e também gravados no
+    histórico, para que fique claro por que um mesmo desenho foi só estudo ou
+    uma entrada elegível.
+    """
+    sinal = bool(acumulacao and rompeu_piso)
+    checklist = [
+        {"nome": "Acumulação: amplitude das 10 velas comprimida", "ok": bool(acumulacao)},
+        {"nome": "Fechamento abaixo do piso das 10 velas", "ok": bool(rompeu_piso)},
+        {"nome": "Janela validada para o ativo", "ok": bool(janela_validada)},
+    ]
+    if sinal and janela_validada:
+        return {
+            "sinal": True, "entrada_valida": True, "estado_entrada": "ENTRADA VÁLIDA",
+            "motivo_entrada": "BUY: falso rompimento de baixa após acumulação, na janela testada.",
+            "checklist": checklist,
+        }
+    if sinal:
+        return {
+            "sinal": True, "entrada_valida": False, "estado_entrada": "ESTUDO — NÃO OPERAR",
+            "motivo_entrada": "O falso rompimento apareceu fora da janela testada; registrar, não executar.",
+            "checklist": checklist,
+        }
+    return {
+        "sinal": False, "entrada_valida": False, "estado_entrada": "AGUARDAR",
+        "motivo_entrada": "Ainda não há falso rompimento completo.", "checklist": checklist,
+    }
+
+
 class Estado:
-    def __init__(self, pasta: Path):
+    def __init__(self, pasta: Path, arquivo_aprendizado: Path | None = None,
+                 banco_aprendizado: Path | None = None):
         self.pasta = pasta
-        self.dados: dict[str, dict] = {}
+        # A lista completa precisa existir antes da primeira varredura. A IQ é
+        # consultada em série e uma passagem pode levar minutos; começar vazio
+        # fazia os ativos do fim da fila desaparecerem do painel a cada restart.
+        self.dados: dict[str, dict] = {
+            ativo: self._ativo_aguardando(ativo) for ativo in ATIVOS
+        }
         self.status = "iniciando"
         # Historico das ultimas 24h. Sem isso o painel so mostra o instante
         # atual, e quem nao estava olhando na hora do sinal nao ve nada.
-        self.historico: list[dict] = []
-        self._arquivo_aprendizado = Path(__file__).resolve().parent / "diario" / "monitor_mercado" / "sinais_aprendizado.json"
+        self._arquivo_aprendizado = (
+            arquivo_aprendizado
+            or Path(__file__).resolve().parent / "diario" / "monitor_mercado" / "sinais_aprendizado.json"
+        )
+        self._banco_aprendizado = (
+            banco_aprendizado or self._arquivo_aprendizado.with_name("monitor_mercado.sqlite3")
+        )
+        self._store = MonitorEventStore(self._banco_aprendizado, self._arquivo_aprendizado)
         self._aprendizado = self._carregar_aprendizado()
+        corte = time.time() - 24 * 3600
+        self.historico: list[dict] = [
+            item for item in self._aprendizado
+            if self._timestamp_recente(item.get("quando"), corte)
+        ][-60:]
         self._vistos: set[str] = {str(h.get("id")) for h in self._aprendizado if h.get("id")}
         self._lock = threading.Lock()
+        self._garantir_arquivos_grafico()
+
+    @staticmethod
+    def _timestamp_recente(valor: object, corte: float) -> bool:
+        try:
+            return datetime.fromisoformat(str(valor)).timestamp() > corte
+        except (TypeError, ValueError):
+            return False
+
+    @staticmethod
+    def _ativo_aguardando(ativo: str, motivo: str = "Aguardando dados da IQ Option.") -> dict:
+        return {
+            "classe": CLASSE[ativo], "disponivel": False,
+            "estado_entrada": "CARREGANDO", "motivo_entrada": motivo,
+            "sinal": False, "entrada_valida": False, "prox": 0,
+            "regime": "indefinido", "preco": None,
+        }
+
+    def _garantir_arquivos_grafico(self) -> None:
+        """Troca somente gráficos ausentes/corrompidos por JSON vazio válido."""
+        vazio = {"candles": [], "sup": [], "inf": [], "estado": "aguardando_dados"}
+        self.pasta.mkdir(parents=True, exist_ok=True)
+        for ativo in ATIVOS:
+            arq = self.pasta / f"mkt_{ativo}.json"
+            valido = False
+            try:
+                atual = json.loads(arq.read_text(encoding="utf-8"))
+                valido = isinstance(atual, dict) and isinstance(atual.get("candles"), list)
+            except (OSError, UnicodeError, json.JSONDecodeError):
+                pass
+            if valido:
+                continue
+            tmp = arq.with_name(
+                f".{arq.name}.{os.getpid()}.{threading.get_ident()}.tmp"
+            )
+            tmp.write_text(json.dumps(vazio), encoding="utf-8")
+            os.replace(tmp, arq)
 
     def _carregar_aprendizado(self) -> list[dict]:
+        itens_banco = self._store.carregar()
         try:
-            bruto = json.loads(self._arquivo_aprendizado.read_text(encoding="utf-8"))
-            return [item for item in bruto if isinstance(item, dict)][-1500:]
+            bruto = itens_banco or json.loads(self._arquivo_aprendizado.read_text(encoding="utf-8"))
+            itens = [item for item in bruto if isinstance(item, dict)]
+            # Mantém o histórico antigo compatível com os novos campos. Para
+            # resultados já resolvidos, a conclusão pode ser derivada sem
+            # reprocessar candles; a vela exata permanece desconhecida.
+            for item in itens:
+                simulacao = item.get("simulacao")
+                if not isinstance(simulacao, dict):
+                    simulacao = {"desfecho": "aguardando"}
+                    item["simulacao"] = simulacao
+                desfecho = simulacao.get("desfecho", "aguardando")
+                if "bateu_tp1_sem_stop" not in simulacao:
+                    simulacao["bateu_tp1_sem_stop"] = (
+                        True if desfecho == "win_tp1"
+                        else False if desfecho in ("loss_sl", "ambíguo_mesma_vela")
+                        else None
+                    )
+                simulacao.setdefault(
+                    "primeiro_toque",
+                    "tp1" if desfecho == "win_tp1"
+                    else "stop" if desfecho == "loss_sl"
+                    else "tp1_e_stop_mesma_vela" if desfecho == "ambíguo_mesma_vela"
+                    else None,
+                )
+                simulacao.setdefault("vela_desfecho", None)
+            return itens
         except (OSError, json.JSONDecodeError):
             return []
 
     def _salvar_aprendizado(self) -> None:
+        self._store.salvar(self._aprendizado)
         try:
             self._arquivo_aprendizado.parent.mkdir(parents=True, exist_ok=True)
             temporario = self._arquivo_aprendizado.with_suffix(".tmp")
@@ -165,7 +887,10 @@ class Estado:
             return {"amostra": 0, "wins": 0, "losses": 0, "winrate": None}
         pontuados = []
         for outro in historico:
-            if outro.get("id") == item.get("id") or outro.get("classe") != item.get("classe"):
+            if (outro.get("id") == item.get("id")
+                    or outro.get("classe") != item.get("classe")
+                    or outro.get("tipo", "falso_rompimento") != item.get("tipo", "falso_rompimento")
+                    or outro.get("direcao", "buy") != item.get("direcao", "buy")):
                 continue
             desfecho = (outro.get("simulacao") or {}).get("desfecho")
             if desfecho not in ("win_tp1", "loss_sl"):
@@ -193,21 +918,44 @@ class Estado:
 
     def atualiza(self, ativo: str, info: dict) -> None:
         with self._lock:
-            self.dados[ativo] = info
+            self.dados[ativo] = {"disponivel": True, **info}
 
-    def registrar_sinal(self, ativo: str, vela: str, info: dict) -> None:
-        chave = f"{ativo}:{vela}"
+    def registrar_sinal(self, ativo: str, vela: str, info: dict,
+                        tipo: str = "falso_rompimento") -> None:
+        """Salva sinais de estudo por tipo, sem misturar Fibo e falso rompimento."""
+        chave = f"{tipo}:{ativo}:{vela}"
         with self._lock:
             if chave in self._vistos:
                 return
             self._vistos.add(chave)
             item = {
-                "id": chave, "ativo": ativo, "classe": info.get("classe"), "vela": vela,
+                "schema_versao": SCHEMA_VERSAO, "origem": "monitor_mercado",
+                "modo": "entrada_validada" if info.get("entrada_valida") else "estudo",
+                "timeframe": TF,
+                "id": chave, "tipo": tipo, "ativo": ativo, "classe": info.get("classe"), "vela": vela,
+                "direcao": info.get("direcao", "buy"),
                 "quando": datetime.now(timezone.utc).isoformat(timespec="seconds"),
                 "preco": info.get("preco"), "regime": info.get("regime"),
                 "hora": info.get("hora"), "janela_boa": info.get("janela_boa"),
-                "alvos": info.get("alvos"), "dossie": info.get("dossie", {}),
-                "resultado": None, "simulacao": {"desfecho": "aguardando"},
+                "entrada_valida": info.get("entrada_valida", False),
+                "estado_entrada": info.get("estado_entrada"),
+                "motivo_entrada": info.get("motivo_entrada"),
+                "checklist": info.get("checklist", []),
+                # Os alvos de estudo continuam no arquivo para medir o sinal
+                # fora da janela, mas nunca aparecem como ordem sugerida.
+                "alvos": info.get("alvos"),
+                "alvos_estudo": info.get("alvos_estudo"),
+                "dossie": info.get("dossie", {}),
+                "fibo": info.get("fibo"),
+                "fluxo": info.get("fluxo"),
+                "orb": info.get("orb"),
+                "resultado": None,
+                "simulacao": {
+                    "versao": SIMULADOR_VERSAO, "desfecho": "aguardando",
+                    "bateu_tp1_sem_stop": None,
+                    "primeiro_toque": None,
+                    "vela_desfecho": None,
+                },
             }
             item["comparaveis"] = self._comparaveis(item, self._aprendizado)
             self.historico.append(item)
@@ -220,8 +968,25 @@ class Estado:
     def resolver(self, ativo: str, df: pd.DataFrame) -> None:
         """Registra reação e simulação TP1/SL; não é resultado de ordem real."""
         with self._lock:
-            pend = [h for h in self.historico
-                    if h["ativo"] == ativo and h["resultado"] is None]
+            pend = []
+            for h in self._aprendizado:
+                if h.get("ativo") != ativo:
+                    continue
+                simulacao = h.get("simulacao") or {}
+                desfecho = simulacao.get("desfecho", "aguardando")
+                expiracao_prematura = (
+                    desfecho == "expirado_6h"
+                    and int(simulacao.get("velas") or 0) < 24
+                )
+                precisa_resultado_r = (
+                    desfecho in ("win_tp1", "loss_sl", "expirado_6h")
+                    and simulacao.get("resultado_r") is None
+                )
+                versao_antiga = int(simulacao.get("versao") or 0) < SIMULADOR_VERSAO
+                if (desfecho in ("aguardando", "sem_dados")
+                        or expiracao_prematura or precisa_resultado_r or versao_antiga):
+                    pend.append(h)
+        alterou = False
         for h in pend:
             try:
                 ts = pd.Timestamp(h["vela"]) + pd.Timedelta(seconds=TF)
@@ -233,35 +998,202 @@ class Estado:
                 simulacao = self._resolver_tp_sl(h, df)
                 with self._lock:
                     h["resultado"] = reacao
-                    h["var_pips"] = round((c - o) / M.pip(ativo), 1)
+                    passo, unidade = unidade_movimento(ativo)
+                    h["var_pips"] = round((c - o) / passo, 1)
+                    h["var_unidade"] = unidade
                     h["simulacao"] = simulacao
-                    for salvo in self._aprendizado:
-                        if salvo.get("id") == h.get("id"):
-                            salvo.update(h)
+                    for visivel in self.historico:
+                        if visivel.get("id") == h.get("id") and visivel is not h:
+                            visivel.update(h)
                             break
-                    self._salvar_aprendizado()
+                    alterou = True
             except Exception:
                 continue
+        if alterou:
+            self._salvar_aprendizado()
 
     @staticmethod
     def _resolver_tp_sl(h: dict, df: pd.DataFrame, horizonte_velas: int = 24) -> dict:
-        alvo = h.get("alvos") or {}
+        alvo = h.get("alvos_estudo") or h.get("alvos") or {}
         if not alvo or not h.get("vela"):
-            return {"desfecho": "sem_dados"}
+            return {
+                "versao": SIMULADOR_VERSAO, "desfecho": "sem_dados",
+                "bateu_tp1_sem_stop": None,
+                "primeiro_toque": None, "vela_desfecho": None,
+            }
         inicio = pd.Timestamp(h["vela"])
         futuras = df[df.index > inicio].head(horizonte_velas)
         if futuras.empty:
-            return {"desfecho": "aguardando"}
+            return {
+                "versao": SIMULADOR_VERSAO, "desfecho": "aguardando",
+                "bateu_tp1_sem_stop": None,
+                "primeiro_toque": None, "vela_desfecho": None,
+            }
         sl, tp = float(alvo["sl"]), float(alvo["tp1"])
-        for numero, (_, vela) in enumerate(futuras.iterrows(), start=1):
-            tocou_sl, tocou_tp = float(vela["Low"]) <= sl, float(vela["High"]) >= tp
+        entrada = float(alvo.get("entrada", h.get("preco", 0.0)) or 0.0)
+        venda = h.get("direcao") == "sell"
+        modo_entrada = alvo.get("modo_entrada")
+        ordem_pendente = modo_entrada in ("limite", "stop") or h.get("tipo") == "fibo_m15"
+        preenchida = not ordem_pendente
+        vela_preenchimento = None
+
+        def resultado_r(saida: float) -> float | None:
+            risco = abs(entrada - sl)
+            if not entrada or risco <= 0:
+                return None
+            movimento = entrada - saida if venda else saida - entrada
+            return round(movimento / risco, 3)
+
+        for numero, (instante, vela) in enumerate(futuras.iterrows(), start=1):
+            acabou_de_preencher = False
+            if not preenchida:
+                if modo_entrada == "stop":
+                    tocou_entrada = (
+                        float(vela["Low"]) <= entrada if venda
+                        else float(vela["High"]) >= entrada
+                    )
+                else:
+                    tocou_entrada = float(vela["Low"]) <= entrada <= float(vela["High"])
+                if not tocou_entrada:
+                    continue
+                preenchida = True
+                acabou_de_preencher = True
+                vela_preenchimento = str(instante)
+            tocou_sl = float(vela["High"]) >= sl if venda else float(vela["Low"]) <= sl
+            tocou_tp = float(vela["Low"]) <= tp if venda else float(vela["High"]) >= tp
             if tocou_sl and tocou_tp:
-                return {"desfecho": "ambíguo_mesma_vela", "velas": numero}
+                return {
+                    "versao": SIMULADOR_VERSAO,
+                    "desfecho": "ambíguo_mesma_vela", "velas": numero,
+                    "bateu_tp1_sem_stop": False,
+                    "primeiro_toque": "tp1_e_stop_mesma_vela",
+                    "vela_desfecho": str(instante),
+                    "preco_saida": None, "resultado_r": None,
+                    "preenchida": preenchida,
+                    "vela_preenchimento": vela_preenchimento,
+                }
+            if acabou_de_preencher and tocou_tp:
+                return {
+                    "versao": SIMULADOR_VERSAO,
+                    "desfecho": "ambíguo_entrada_tp_mesma_vela", "velas": numero,
+                    "bateu_tp1_sem_stop": None,
+                    "primeiro_toque": "entrada_e_tp1_mesma_vela",
+                    "vela_desfecho": str(instante),
+                    "preco_saida": None, "resultado_r": None,
+                    "preenchida": True,
+                    "vela_preenchimento": vela_preenchimento,
+                }
+            if acabou_de_preencher and modo_entrada == "stop" and tocou_sl:
+                return {
+                    "versao": SIMULADOR_VERSAO,
+                    "desfecho": "ambíguo_entrada_stop_mesma_vela", "velas": numero,
+                    "bateu_tp1_sem_stop": None,
+                    "primeiro_toque": "entrada_e_stop_mesma_vela",
+                    "vela_desfecho": str(instante),
+                    "preco_saida": None, "resultado_r": None,
+                    "preenchida": True,
+                    "vela_preenchimento": vela_preenchimento,
+                }
             if tocou_tp:
-                return {"desfecho": "win_tp1", "velas": numero}
+                return {
+                    "versao": SIMULADOR_VERSAO,
+                    "desfecho": "win_tp1", "velas": numero,
+                    "bateu_tp1_sem_stop": True, "primeiro_toque": "tp1",
+                    "vela_desfecho": str(instante),
+                    "preco_saida": tp, "resultado_r": resultado_r(tp),
+                    "preenchida": preenchida,
+                    "vela_preenchimento": vela_preenchimento,
+                }
             if tocou_sl:
-                return {"desfecho": "loss_sl", "velas": numero}
-        return {"desfecho": "expirado_6h", "velas": len(futuras)}
+                return {
+                    "versao": SIMULADOR_VERSAO,
+                    "desfecho": "loss_sl", "velas": numero,
+                    "bateu_tp1_sem_stop": False, "primeiro_toque": "stop",
+                    "vela_desfecho": str(instante),
+                    "preco_saida": sl, "resultado_r": -1.0,
+                    "preenchida": preenchida,
+                    "vela_preenchimento": vela_preenchimento,
+                }
+        if len(futuras) < horizonte_velas:
+            return {
+                "versao": SIMULADOR_VERSAO,
+                "desfecho": "aguardando", "velas": len(futuras),
+                "bateu_tp1_sem_stop": None, "primeiro_toque": None,
+                "vela_desfecho": str(futuras.index[-1]),
+                "preco_saida": None, "resultado_r": None,
+                "preenchida": preenchida,
+                "vela_preenchimento": vela_preenchimento,
+            }
+        if not preenchida:
+            return {
+                "versao": SIMULADOR_VERSAO,
+                "desfecho": "nao_executada_6h", "velas": len(futuras),
+                "bateu_tp1_sem_stop": None, "primeiro_toque": None,
+                "vela_desfecho": str(futuras.index[-1]),
+                "preco_saida": None, "resultado_r": None,
+                "preenchida": False, "vela_preenchimento": None,
+            }
+        preco_saida = float(futuras.iloc[-1]["Close"])
+        return {
+            "versao": SIMULADOR_VERSAO,
+            "desfecho": "expirado_6h", "velas": len(futuras),
+            "bateu_tp1_sem_stop": None, "primeiro_toque": None,
+            "vela_desfecho": str(futuras.index[-1]),
+            "preco_saida": preco_saida, "resultado_r": resultado_r(preco_saida),
+            "preenchida": preenchida,
+            "vela_preenchimento": vela_preenchimento,
+        }
+
+    @staticmethod
+    def _resumo_simulacoes(itens: list[dict]) -> dict:
+        desfechos = [str((h.get("simulacao") or {}).get("desfecho", "aguardando")) for h in itens]
+        wins, losses = desfechos.count("win_tp1"), desfechos.count("loss_sl")
+        resolvidos = wins + losses
+        resultados_r = [
+            float((h.get("simulacao") or {}).get("resultado_r"))
+            for h in itens
+            if (h.get("simulacao") or {}).get("resultado_r") is not None
+        ]
+        return {
+            "sinais": len(itens), "wins": wins, "losses": losses,
+            "expirados": desfechos.count("expirado_6h"),
+            "pendentes": desfechos.count("aguardando"),
+            "ambiguos": sum(d.startswith("ambíguo") for d in desfechos),
+            "nao_executadas": desfechos.count("nao_executada_6h"),
+            "winrate": round(wins * 100 / resolvidos, 1) if resolvidos else None,
+            "avaliados_r": len(resultados_r),
+            "saldo_r": round(sum(resultados_r), 3) if resultados_r else None,
+            "media_r": round(sum(resultados_r) / len(resultados_r), 3) if resultados_r else None,
+        }
+
+    def _amostra_entrada_validada(self) -> dict:
+        """Resumo pequeno e honesto da amostra elegível do monitor."""
+        validos = [
+            h for h in self._aprendizado
+            if (h.get("tipo", "falso_rompimento") == "falso_rompimento"
+                and h.get("entrada_valida", h.get("janela_boa", False)))
+        ]
+        return self._resumo_simulacoes(validos)
+
+    def _amostra_fibo(self) -> dict:
+        """Amostra separada: Fibo não pode contaminar o sinal já validado."""
+        itens = [h for h in self._aprendizado if h.get("tipo") == "fibo_m15"]
+        return self._resumo_simulacoes(itens)
+
+    def _amostra_fluxo(self) -> dict:
+        """Amostra isolada da leitura de fluxo; nunca vira entrada validada."""
+        itens = [h for h in self._aprendizado if h.get("tipo") == "fluxo_m15"]
+        return self._resumo_simulacoes(itens)
+
+    def _amostra_orb(self) -> dict:
+        """Amostra isolada do ORB/FVG adaptado ao M15."""
+        itens = [h for h in self._aprendizado if h.get("tipo") == "orb_fvg_m15"]
+        return self._resumo_simulacoes(itens)
+
+    def _amostra_liquidez(self) -> dict:
+        """Amostra isolada da varredura v2; permanece sempre em sombra."""
+        itens = [h for h in self._aprendizado if h.get("tipo") == "liquidity_sweep_v2"]
+        return self._resumo_simulacoes(itens)
 
     def salvar(self) -> None:
         with self._lock:
@@ -274,8 +1206,15 @@ class Estado:
                 item["comparaveis"] = self._comparaveis(item, self._aprendizado)
                 historico_saida.append(item)
             payload = {"ts": int(time.time()), "status": self.status,
+                       "schemaVersao": SCHEMA_VERSAO,
+                       "saudeDados": self._store.resumo(),
                        "historico": historico_saida,
-                       "ativos": dict(self.dados)}
+                       "ativos": dict(self.dados),
+                       "amostraEntrada": self._amostra_entrada_validada(),
+                       "amostraFibo": self._amostra_fibo(),
+                       "amostraFluxo": self._amostra_fluxo(),
+                       "amostraOrb": self._amostra_orb(),
+                       "amostraLiquidez": self._amostra_liquidez()}
         try:
             arq = self.pasta / "mercado.json"
             tmp = arq.with_suffix(".tmp")
@@ -288,14 +1227,30 @@ class Estado:
     def salvar_candles(self, ativo: str, df: pd.DataFrame, r: pd.DataFrame) -> None:
         u = df.tail(60)
         ru = r.tail(60)
+        minimo = float(u["Low"].min())
+        maximo = float(u["High"].max())
+        amplitude = maximo - minimo
+        centro = (maximo + minimo) / 2
+        # Uma regressão instável pode projetar bandas milhares de pontos para
+        # fora do preço (ocorreu no XAUUSD) e achatar todos os candles. A banda
+        # é só auxílio visual: valores muito além da janela visível viram
+        # lacuna, enquanto os candles reais permanecem intactos.
+        margem = max(amplitude * 1.5, abs(centro) * 0.001, 1e-9)
+        limite_inf = minimo - margem
+        limite_sup = maximo + margem
+
+        def banda_visivel(valor) -> float | None:
+            if not np.isfinite(valor):
+                return None
+            numero = float(valor)
+            return round(numero, 6) if limite_inf <= numero <= limite_sup else None
+
         out = {
             "candles": [{"t": int(ts.timestamp()), "o": float(x["Open"]),
                          "h": float(x["High"]), "l": float(x["Low"]),
                          "c": float(x["Close"])} for ts, x in u.iterrows()],
-            "sup": [None if not np.isfinite(v) else round(float(v), 6)
-                    for v in ru["banda_sup"]],
-            "inf": [None if not np.isfinite(v) else round(float(v), 6)
-                    for v in ru["banda_inf"]],
+            "sup": [banda_visivel(v) for v in ru["banda_sup"]],
+            "inf": [banda_visivel(v) for v in ru["banda_inf"]],
         }
         try:
             arq = self.pasta / f"mkt_{ativo}.json"
@@ -310,6 +1265,19 @@ def loop(api, cfg, estado: Estado, calendario: CalendarioEconomico | None = None
     hist: dict[str, pd.DataFrame] = {}
     for a in ATIVOS:
         df = backtest.carregar_cache(cfg, a)
+        if df is None or len(df) < 600:
+            try:
+                # Ativos adicionados recentemente não possuem cache. Antes eles
+                # eram descartados para sempre e nunca chegavam a ser baixados.
+                print(f"  {a}: preparando histórico inicial...")
+                df = backtest.baixar_historico(api, cfg, a, 600)
+            except Exception as erro:
+                motivo = f"Sem candles normais disponíveis: {erro}"
+                estado.atualiza(a, Estado._ativo_aguardando(a, motivo))
+                estado.dados[a]["disponivel"] = False
+                estado.salvar()
+                print(f"  {a}: indisponível — {erro}")
+                continue
         if df is not None and len(df) >= 600:
             hist[a] = df
             print(f"  {a}: {len(df)} velas")
@@ -326,6 +1294,7 @@ def loop(api, cfg, estado: Estado, calendario: CalendarioEconomico | None = None
                 novo = backtest.baixar_historico(api, cfg, a, 60)
                 if novo is None or novo.empty:
                     continue
+                novo_grafico = novo.copy()
                 novo = novo.iloc[:-1]
                 if novo.empty:
                     continue
@@ -371,6 +1340,10 @@ def loop(api, cfg, estado: Estado, calendario: CalendarioEconomico | None = None
                 av = float(atr.iloc[-1]) if np.isfinite(atr.iloc[-1]) else None
                 agora = datetime.now(timezone.utc)
                 noticia = contexto_noticia(calendario, a, agora)
+                fibo = plano_fibo(df, atr, a, noticia)
+                fluxo = leitura_fluxo_sessao(df, atr, a)
+                orb = plano_orb_sessao(df, atr, a)
+                liquidez = plano_varredura_liquidez(df, atr, a, noticia)
 
                 # Alvos medidos em 01/09/2026 (janela 21-22h UTC, SL=1 ATR,
                 # holdout confirma em todos os niveis). O EV cresce com o alvo
@@ -381,21 +1354,30 @@ def loop(api, cfg, estado: Estado, calendario: CalendarioEconomico | None = None
                 # Alvos ESTRUTURAIS ficaram todos piores: meio do range +0.2932R,
                 # topo do range +0.3251R, maxima da vela de rompimento +0.2553R.
                 # Por isso o alvo aqui e multiplo de ATR, nao nivel de preco.
-                alvos = None
+                alvos_estudo = None
                 if av and av > 0:
                     ent = preco
-                    alvos = {
+                    passo, unidade = unidade_movimento(a)
+                    alvos_estudo = {
                         "entrada": round(ent, 6),
                         "sl": round(ent - 1.0 * av, 6),
                         "tp1": round(ent + 2.5 * av, 6),
                         "tp2": round(ent + 5.0 * av, 6),
-                        "risco_pips": round(av / M.pip(a), 1),
+                        "risco_pips": round(av / passo, 1),
+                        "risco_unidade": unidade,
                     }
                 bi = float(r["banda_inf"].iloc[-1]) if np.isfinite(r["banda_inf"].iloc[-1]) else None
                 bs = float(r["banda_sup"].iloc[-1]) if np.isfinite(r["banda_sup"].iloc[-1]) else None
                 pos_canal = None
                 if bi is not None and bs is not None and bs > bi:
                     pos_canal = round((preco - bi) / (bs - bi) * 100, 1)
+                rompeu_piso = bool(
+                    np.isfinite(rlo_s.iloc[-1]) and float(df["Close"].iloc[-1]) < float(rlo_s.iloc[-1])
+                )
+                # Forex só tem janela comprovada em 21-22 UTC; cripto foi
+                # estudado 24h. Ouro fica em estudo até ter amostra própria.
+                janela_validada = janela_validada_para(CLASSE[a], int(df.index[-1].hour))
+                leitura_entrada = decisao_entrada(acum, rompeu_piso, janela_validada)
 
                 estado.atualiza(a, {
                     "classe": CLASSE[a],
@@ -409,27 +1391,43 @@ def loop(api, cfg, estado: Estado, calendario: CalendarioEconomico | None = None
                     "banda_sup": round(bs, 6) if bs else None,
                     "pos_canal": pos_canal,
                     "dia": tendencia_dia(df),
-                    "atr_pips": round(float(atr.iloc[-1]) / M.pip(a), 1)
+                    "atr_pips": round(float(atr.iloc[-1]) / unidade_movimento(a)[0], 1)
                                 if np.isfinite(atr.iloc[-1]) else None,
-                    "sinal": bool(lo.iloc[-1]),
+                    "unidade_movimento": unidade_movimento(a)[1],
+                    **leitura_entrada,
                     "acumulacao": acum,
+                    "rompeu_piso": rompeu_piso,
+                    "piso_acumulacao": round(float(rlo_s.iloc[-1]), 6)
+                                       if np.isfinite(rlo_s.iloc[-1]) else None,
                     "aperto": round(aperto, 2) if aperto is not None else None,
                     "dist_atr": round(dist, 2) if dist is not None else None,
                     # 0-100: quao perto de disparar. So para ordenar a tabela.
                     "prox": (0 if not acum or dist is None
                              else int(max(0, min(100, 100 - dist * 50)))),
-                    "alvos": alvos,
+                    # Só a entrada validada recebe preços operacionais. O
+                    # plano de estudo é separado e não deve ser executado.
+                    "alvos": alvos_estudo if leitura_entrada["entrada_valida"] else None,
+                    "alvos_estudo": alvos_estudo,
                     # O edge de forex so aparece em 21-22h UTC (+0.41R); nas
                     # demais horas o EV e negativo em TODOS os alvos testados.
                     # Em crypto essa janela nao significa nada (opera 24/7) —
                     # o efeito e de sessao de forex.
-                    "janela_boa": int(df.index[-1].hour) in (21, 22)
-                                  and CLASSE[a] == "forex",
+                    "janela_boa": janela_validada,
                     "hora": int(df.index[-1].hour),
                     "vela": str(df.index[-1]),
                     "dossie": dossie_candle(df, atr, a, noticia),
+                    "fibo": fibo,
+                    "fluxo": fluxo,
+                    "orb": orb,
+                    "liquidez": liquidez,
                 })
-                estado.salvar_candles(a, dfr, r)
+                # A análise continua usando somente candles fechados, mas o
+                # desenho recebe também a vela atual para se mover como na IQ.
+                atual = novo_grafico.tail(1)
+                df_grafico = pd.concat([
+                    df[~df.index.isin(atual.index)], atual
+                ]).sort_index().tail(300)
+                estado.salvar_candles(a, df_grafico, regressao(df_grafico))
                 estado.resolver(a, df)
                 # Heartbeat POR ATIVO, nao so no fim da passada. Antes, um
                 # unico ativo lento (download travado) fazia o supervisor achar
@@ -437,10 +1435,72 @@ def loop(api, cfg, estado: Estado, calendario: CalendarioEconomico | None = None
                 # depois de percorrer os 17.
                 estado.status = f"lendo {a} — {datetime.now(timezone.utc):%H:%M:%S} UTC"
                 estado.salvar()
-                if bool(lo.iloc[-1]):
+                if leitura_entrada["sinal"]:
                     estado.registrar_sinal(a, str(df.index[-1]), estado.dados[a])
                     print(f"[SINAL] {a} LONG @ {df.index[-1]} preco={preco} "
                           f"regime={cls.iloc[-1]}")
+                # Fibo é um segundo estudo, independente do falso rompimento:
+                # registra somente quando a retração e a rejeição se completam.
+                # Não altera ``entrada_valida`` nem envia qualquer posição.
+                if fibo.get("qualificada"):
+                    estudo_fibo = {
+                        **estado.dados[a],
+                        "sinal": True, "direcao": fibo["direcao"],
+                        "entrada_valida": False,
+                        "estado_entrada": "FIBO — ESTUDO",
+                        "motivo_entrada": fibo["motivo"],
+                        "checklist": fibo["checklist"],
+                        "alvos": None, "alvos_estudo": fibo["alvos"],
+                    }
+                    estado.registrar_sinal(a, str(df.index[-1]), estudo_fibo, tipo="fibo_m15")
+                    print(f"[FIBO — ESTUDO] {a} {fibo['direcao'].upper()} @ {df.index[-1]} "
+                          f"RR={fibo['rr']}")
+                if fluxo.get("sinal_estudo"):
+                    estudo_fluxo = {
+                        **estado.dados[a],
+                        "sinal": True, "direcao": fluxo["direcao"],
+                        "entrada_valida": False,
+                        "estado_entrada": "FLUXO — ESTUDO",
+                        "motivo_entrada": fluxo["motivo"],
+                        "checklist": fluxo["checklist"],
+                        "alvos": None, "alvos_estudo": fluxo["alvos"],
+                    }
+                    estado.registrar_sinal(
+                        a, str(df.index[-1]), estudo_fluxo, tipo="fluxo_m15"
+                    )
+                    print(f"[FLUXO — ESTUDO] {a} {fluxo['direcao'].upper()} @ {df.index[-1]} "
+                          f"qualidade={fluxo['qualidade']} RR={fluxo['rr']}")
+                if orb.get("sinal_estudo"):
+                    estudo_orb = {
+                        **estado.dados[a],
+                        "sinal": True, "direcao": orb["direcao"],
+                        "entrada_valida": False,
+                        "estado_entrada": "ORB/FVG — ESTUDO",
+                        "motivo_entrada": orb["motivo"],
+                        "checklist": orb["checklist"],
+                        "alvos": None, "alvos_estudo": orb["alvos"],
+                    }
+                    estado.registrar_sinal(
+                        a, str(df.index[-1]), estudo_orb, tipo="orb_fvg_m15"
+                    )
+                    print(f"[ORB/FVG — ESTUDO] {a} {orb['direcao'].upper()} "
+                          f"@ {df.index[-1]} sessão={orb['sessao']} RR={orb['rr']}")
+                if liquidez.get("sinal_estudo"):
+                    estudo_liquidez = {
+                        **estado.dados[a],
+                        "sinal": True, "direcao": "buy",
+                        "entrada_valida": False,
+                        "estado_entrada": "LIQUIDEZ V2 — ESTUDO",
+                        "motivo_entrada": liquidez["motivo"],
+                        "checklist": liquidez["checklist"],
+                        "alvos": None, "alvos_estudo": liquidez["alvos"],
+                    }
+                    estado.registrar_sinal(
+                        a, str(df.index[-1]), estudo_liquidez,
+                        tipo="liquidity_sweep_v2",
+                    )
+                    print(f"[LIQUIDEZ V2 — ESTUDO] {a} BUY @ {df.index[-1]} "
+                          f"RR={liquidez['rr']}")
             except Exception as e:
                 print(f"[{a}] {e!r}")
         estado.status = f"OK — {datetime.now(timezone.utc):%H:%M:%S} UTC"
@@ -461,6 +1521,7 @@ table{width:100%;border-collapse:collapse;font-size:.75rem}
 th,td{text-align:left;padding:.28rem .45rem;border-bottom:1px solid #1e293b;white-space:nowrap}
 th{color:#64748b;font-weight:600;font-size:.68rem}
 tr.sig{background:#052e1a}
+tr.study{background:#2b210b}
 tr:hover{background:#16203450;cursor:pointer}
 .lat{color:#94a3b8}.ca{color:#4ade80}.cb{color:#f87171}.tend{color:#fbbf24}.ind{color:#475569}
 .up{color:#4ade80}.dn{color:#f87171}
@@ -478,6 +1539,11 @@ tr:hover{background:#16203450;cursor:pointer}
 .card{background:#151f33;border-radius:.4rem;padding:.7rem;margin:.4rem 0;border-left:4px solid #334155}
 .card.okjan{border-left-color:#22c55e}
 .card.nojan{border-left-color:#64748b;opacity:.75}
+.checklist{display:flex;flex-wrap:wrap;gap:.3rem;margin:.45rem 0}
+.check{font-size:.64rem;border:1px solid #334155;border-radius:.25rem;padding:.18rem .35rem;color:#94a3b8}
+.check.ok{border-color:#166534;color:#86efac;background:#052e1a}.check.no{border-color:#854d0e;color:#fcd34d;background:#2b210b}
+.estado{font-size:.68rem;font-weight:800;padding:.18rem .4rem;border-radius:.25rem}.estado.go{color:#052e1a;background:#22c55e}.estado.study{color:#fcd34d;background:#3b2a08}.estado.wait{color:#94a3b8;background:#26364e}
+.amostra{font-size:.7rem;color:#cbd5e1;background:#0c2a3e;border-left:3px solid #38bdf8;padding:.35rem .5rem;border-radius:.2rem;margin:.45rem 0}
 .alvos{display:grid;grid-template-columns:repeat(auto-fit,minmax(110px,1fr));gap:.4rem;margin-top:.5rem}
 .alvos label{display:block;font-size:.62rem;color:#94a3b8}
 .alvos span{font-size:.92rem;font-weight:700}
@@ -490,40 +1556,115 @@ tr:hover{background:#16203450;cursor:pointer}
 .dossie span{font-size:.76rem;font-weight:700}
 .dossie-nota{font-size:.68rem;line-height:1.45;color:#cbd5e1;margin-top:.5rem;background:#0c2a3e;padding:.4rem .5rem;border-radius:.25rem}
 .dossie-aviso{color:#fbbf24}.dossie-win{color:#4ade80}.dossie-loss{color:#f87171}
+.fibo-zona{color:#c4b5fd;border-color:#6d28d9;background:#251145}
+.fibo-card{border-left-color:#8b5cf6}.fibo-card.ok{border-left-color:#22c55e}
+.orb-card{border-left-color:#f59e0b}.orb-card.ok{border-left-color:#22c55e}
+.nav{display:flex;gap:.35rem;position:sticky;top:0;z-index:5;background:#0b1220;padding:.35rem 0}
+.nav button,.filtro{background:#17233a;color:#94a3b8;border:1px solid #334155;border-radius:.3rem;padding:.3rem .55rem;font:inherit;font-size:.7rem}
+.nav button.on{color:#fff;border-color:#38bdf8;background:#0f4c75}.view{display:none}.view.on{display:block}
+.filtros{display:flex;gap:.4rem;align-items:center;flex-wrap:wrap;margin:.4rem 0}
+.saude-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:.45rem}
+.saude-item{background:#101a2c;border:1px solid #26364e;border-radius:.35rem;padding:.55rem}
+.saude-item label{display:block;color:#64748b;font-size:.64rem}.saude-item b{font-size:1rem;color:#7dd3fc}
 </style></head><body>
-<h1>Monitor Mercado — Forex + Crypto</h1>
+<h1>Monitor Mercado — Forex + Cripto + Ouro</h1>
 <div class="sub"><span id="status">carregando...</span> &nbsp;·&nbsp; <span id="relogio"></span></div>
 
 <div class="aviso">
-<b>Sinal</b> = falso rompimento LONG, unico validado (forex 55.44%, crypto 57.66%, ambos EDGE).<br>
+<b>Sinal</b> = falso rompimento LONG, único validado em Forex (55.44%) e Cripto (57.66%). Ouro fica em estudo até ter amostra própria.<br>
 <b>Regime, canal e tendencia do dia</b> = contexto para leitura, <b>nao sao sinal</b>.
 Testado em 01/09/2026: operar a favor do canal (51.14%) rende o mesmo que contra (51.11%)
 — a classificacao nao tem conteudo direcional.
 </div>
 
+<div class="nav" id="nav">
+  <button data-view="agora" onclick="mudarVisao('agora')">Agora</button>
+  <button data-view="grafico" onclick="mudarVisao('grafico')">Gráfico</button>
+  <button data-view="entradas" onclick="mudarVisao('entradas')">Entradas</button>
+  <button data-view="estudos" onclick="mudarVisao('estudos')">Estudos</button>
+  <button data-view="dados" onclick="mudarVisao('dados')">Dados</button>
+</div>
+
+<section class="view" data-view="grafico">
+
 <div class="sec">GRAFICO</div>
 <div class="tabs" id="tabs"></div>
 <canvas id="cv"></canvas>
+</section>
+
+<section class="view" data-view="estudos">
+<div class="amostra" id="amostra">Amostra validada: carregando…</div>
+
+<div class="sec">LEITURA DE FLUXO E SESSÃO — ESTUDO</div>
+<div id="fluxo"><span class="empty">Selecione um ativo.</span></div>
+
+<div class="sec">ORB LONDRES/NY + FVG M15 — ESTUDO SOMBRA</div>
+<div id="orb"><span class="empty">Selecione um ativo.</span></div>
+
+<div class="sec">VARREDURA DE LIQUIDEZ V2 — ESTUDO SOMBRA</div>
+<div id="liquidez"><span class="empty">Selecione um ativo.</span></div>
+
+<div class="sec">PLANO FIBO M15 — ESTUDO</div>
+<div id="fibo"><span class="empty">Selecione um ativo.</span></div>
+</section>
+
+<section class="view" data-view="agora">
 
 <div class="sec">SINAIS ATIVOS</div>
 <div id="sinais"></div>
 
 <div class="sec">CONTEXTO — ordenado por proximidade do sinal</div>
 <div id="tab"></div>
+</section>
+
+<section class="view" data-view="entradas">
+<div class="filtros">
+  <select class="filtro" id="filtro-tipo" onchange="render()"><option value="">Todos os tipos</option></select>
+  <select class="filtro" id="filtro-resultado" onchange="render()"><option value="">Todos os resultados</option><option value="aguardando">Pendentes</option><option value="win_tp1">TP1</option><option value="loss_sl">Stop</option><option value="ambíguo">Ambíguos</option></select>
+  <label><input type="checkbox" id="filtro-ativo" onchange="render()"> só ativo selecionado</label>
+</div>
 
 <div class="sec">SINAIS DAS ULTIMAS 24h</div>
 <div id="hist"></div>
 
 <div class="sec">DOSSIE DO SINAL</div>
 <div id="dossie"><span class="empty">Clique num sinal do histórico quando houver um.</span></div>
+</section>
+
+<section class="view" data-view="dados">
+<div class="sec">SAÚDE DOS DADOS</div>
+<div class="card"><div class="saude-grid" id="saude"></div><div class="nota">Use EXPORTAR_DADOS_PAINEIS.bat para gerar a planilha completa.</div></div>
+</section>
 
 <script>
 let D={}, sel=null, dossieSel=null;
+let visao=localStorage.getItem('monitorMercadoVisao')||'agora';
+let ultimaChaveAlerta='';
+function mudarVisao(nome){
+  visao=nome; localStorage.setItem('monitorMercadoVisao',nome);
+  document.querySelectorAll('.view').forEach(e=>e.classList.toggle('on',e.dataset.view===nome));
+  document.querySelectorAll('#nav button').forEach(e=>e.classList.toggle('on',e.dataset.view===nome));
+  if(nome==='grafico') setTimeout(grafico,0);
+}
 const RC={LATERAL:'lat',CANAL_ALTA:'ca',CANAL_BAIXA:'cb',TENDENCIA:'tend',indefinido:'ind'};
 const RN={LATERAL:'lateral',CANAL_ALTA:'canal alta',CANAL_BAIXA:'canal baixa',
           TENDENCIA:'tendencia',indefinido:'—'};
+const FMT_HORA_BRT=new Intl.DateTimeFormat('pt-BR',{timeZone:'America/Sao_Paulo',hour:'2-digit',minute:'2-digit',hour12:false});
+const FMT_DATA_BRT=new Intl.DateTimeFormat('pt-BR',{timeZone:'America/Sao_Paulo',day:'2-digit',month:'2-digit',hour:'2-digit',minute:'2-digit',hour12:false});
+function instanteUtc(valor){
+  if(!valor) return null;
+  const texto=String(valor).replace(' ','T');
+  return new Date(/[zZ]|[+-][0-9][0-9]:[0-9][0-9]$/.test(texto)?texto:texto+'Z');
+}
+function horaBrt(valor){const d=instanteUtc(valor);return d&&!isNaN(d)?FMT_HORA_BRT.format(d):'—';}
+function dataBrt(valor){const d=instanteUtc(valor);return d&&!isNaN(d)?FMT_DATA_BRT.format(d):'—';}
 
 function linha(a,x){
+  if(x.disponivel===false){
+    return `<tr onclick="pick('${a}')"><td><b>${a}</b></td>
+      <td><span class="estado wait">SEM DADOS</span></td><td>${x.classe||'—'}</td>
+      <td colspan="9" class="ind">${x.motivo_entrada||'Aguardando dados da IQ Option.'}</td></tr>`;
+  }
   const pc = x.pos_canal;
   const bar = pc==null?'—':`<span class="bar"><i style="left:${Math.max(0,Math.min(100,pc))*0.57}px"></i></span> ${pc}%`;
   const d = x.dia||{};
@@ -537,16 +1678,22 @@ function linha(a,x){
   } else if(x.aperto!=null){
     prox = `<span class="ind">${x.aperto.toFixed(2)}x limiar</span>`;
   }
-  return `<tr class="${x.sinal?'sig':''}" onclick="pick('${a}')">
-    <td><b>${a}</b> ${x.sinal?'<span class="badge b-sig">SINAL</span>':''}</td>
+  const estado=x.entrada_valida?'<span class="estado go">ENTRAR</span>':x.sinal?'<span class="estado study">ESTUDO</span>':'<span class="estado wait">AGUARDAR</span>';
+  const linhaClasse=x.entrada_valida?'sig':x.sinal?'study':'';
+  const fl=x.fluxo||{};
+  const fluxo=fl.disponivel?`${fl.estado}<br><span class="ind">${fl.qualidade}/100 · ${fl.sessao}</span>`:'—';
+  return `<tr class="${linhaClasse}" onclick="pick('${a}')">
+    <td><b>${a}</b></td>
+    <td>${estado}</td>
     <td>${x.classe}</td>
+    <td>${fluxo}</td>
     <td>${prox}</td>
     <td class="${RC[x.regime]||'ind'}">${RN[x.regime]||'—'}</td>
     <td>${x.r2==null?'—':x.r2}</td>
     <td>${bar}</td>
     <td class="${dc}">${d.dir||'—'} ${d.pct>0?'+':''}${d.pct==null?'':d.pct}%</td>
     <td class="${d.ema==='alta'?'up':'dn'}">${d.ema||'—'}</td>
-    <td>${x.atr_pips==null?'—':x.atr_pips+'p'}</td>
+    <td>${x.atr_pips==null?'—':x.atr_pips+' '+(x.unidade_movimento||'pips')}</td>
     <td>${x.preco}</td></tr>`;
 }
 
@@ -554,21 +1701,34 @@ function histLinha(h){
   const r=h.resultado;
   const cor = r==='subiu'?'up':(r==='caiu'?'dn':'ind');
   const res = r==null?'<span class="ind">aguardando</span>'
-            : `<span class="${cor}">${r} ${h.var_pips>0?'+':''}${h.var_pips??''}p</span>`;
-  const hh = (h.quando||'').slice(11,16);
+            : `<span class="${cor}">${r} ${h.var_pips>0?'+':''}${h.var_pips??''} ${h.var_unidade||'pips'}</span>`;
+  const hh = horaBrt(h.quando);
+  const estado=h.entrada_valida?'<span class="estado go">válida</span>':'<span class="estado study">estudo</span>';
+  const tipo=h.tipo==='fibo_m15'?'FIBO':h.tipo==='fluxo_m15'?'FLUXO':h.tipo==='orb_fvg_m15'?'ORB/FVG':h.tipo==='liquidity_sweep_v2'?'LIQUIDEZ V2':'SINAL';
   return `<tr onclick="dossie('${h.id||''}')"><td>${hh}</td><td><b>${h.ativo}</b></td>
-    <td>${h.janela_boa?'<span class="badge b-ok">21-22h</span>':h.hora+'h'}</td>
+    <td>${estado}</td>
+    <td>${tipo}</td>
+    <td>${h.janela_boa?'<span class="badge b-ok">18–19h BRT</span>':hh+' BRT'}</td>
     <td class="${RC[h.regime]||'ind'}">${RN[h.regime]||'—'}</td>
     <td>${h.preco}</td><td>${res}</td></tr>`;
 }
 
+function checklist(x){
+  const itens=x.checklist||[];
+  if(!itens.length) return '<span class="ind">Checklist indisponível neste registro antigo.</span>';
+  return `<div class="checklist">${itens.map(i=>`<span class="check ${i.ok?'ok':'no'}">${i.ok?'✓':'✗'} ${i.nome}</span>`).join('')}</div>`;
+}
+
 function textoSimulacao(s){
   const d=(s||{}).desfecho||'aguardando';
-  if(d==='win_tp1') return '<span class="dossie-win">TP1 atingido (simulado)</span>';
-  if(d==='loss_sl') return '<span class="dossie-loss">SL atingido (simulado)</span>';
+  const rr=s&&s.resultado_r!=null?` · ${Number(s.resultado_r).toFixed(2)}R`:'';
+  if(d==='win_tp1') return `<span class="dossie-win">TP1 atingido (simulado)${rr}</span>`;
+  if(d==='loss_sl') return `<span class="dossie-loss">SL atingido (simulado)${rr}</span>`;
   if(d==='ambíguo_mesma_vela') return '<span class="dossie-aviso">TP e SL na mesma vela — ordem desconhecida</span>';
-  if(d==='expirado_6h') return '<span class="dossie-aviso">nem TP1 nem SL em 6h</span>';
-  return '<span class="ind">aguardando candles futuros</span>';
+  if(d==='ambíguo_entrada_tp_mesma_vela') return '<span class="dossie-aviso">entrada e TP na mesma vela — sequência desconhecida</span>';
+  if(d==='nao_executada_6h') return '<span class="ind">preço de entrada não foi tocado em 6h</span>';
+  if(d==='expirado_6h') return `<span class="dossie-aviso">fechado por tempo após 6h${rr}</span>`;
+  return `<span class="ind">aguardando candles futuros (${(s&&s.velas)||0}/24)</span>`;
 }
 
 function renderDossie(H){
@@ -581,9 +1741,12 @@ function renderDossie(H){
   const comp=c.amostra
     ? `<span class="${c.winrate>=55?'dossie-win':'dossie-aviso'}">${c.wins}W / ${c.losses}L · ${c.winrate}%</span>`
     : '<span class="ind">amostra ainda pequena</span>';
-  const reacao=h.resultado==null?'aguardando':`${h.resultado} ${h.var_pips>0?'+':''}${h.var_pips||0}p`;
+  const reacao=h.resultado==null?'aguardando':`${h.resultado} ${h.var_pips>0?'+':''}${h.var_pips||0} ${h.var_unidade||'pips'}`;
+  const estado=h.entrada_valida?'ENTRADA VÁLIDA':'ESTUDO — NÃO OPERAR';
+  const direcao=h.direcao==='sell'?'SELL':'BUY';
   el.innerHTML=`<div class="card">
-    <b>${h.ativo} LONG</b> · ${String(h.vela||'').replace('T',' ').slice(0,16)} UTC
+    <b>${h.ativo} ${direcao}</b> · ${dataBrt(h.vela)} BRT · <span class="estado ${h.entrada_valida?'go':'study'}">${estado}</span>
+    ${checklist(h)}
     <div class="dossie">
       <div class="item"><label>vela de sinal</label><span>${a.tipo||'—'} · corpo ${a.corpo_pct??'—'}%</span></div>
       <div class="item"><label>pavios</label><span>sup ${a.pavio_sup_pct??'—'}% · inf ${a.pavio_inf_pct??'—'}%</span></div>
@@ -594,7 +1757,7 @@ function renderDossie(H){
       <div class="item"><label>casos parecidos (${c.amostra||0})</label>${comp}</div>
       <div class="item"><label>notícia no contexto</label><span class="${n.estado==='janela_risco'?'dossie-aviso':''}">${n.texto||'sem calendário'}</span></div>
     </div>
-    <div class="dossie-nota">Tags: ${(a.tags||[]).join(' · ')||'sem dados'}. Comparação usa só sinais antigos da mesma classe (forex ou cripto) com contexto parecido. Isto descreve padrões; não prova a causa de win ou loss.</div>
+    <div class="dossie-nota">Tags: ${(a.tags||[]).join(' · ')||'sem dados'}. Comparação usa apenas sinais antigos da mesma classe e com contexto parecido. Isto descreve padrões; não prova a causa de win ou loss.</div>
   </div>`;
 }
 
@@ -627,25 +1790,139 @@ function bip(){
 }
 
 function cardSinal(a,x){
-  const v=x.alvos;
-  if(!v) return `<div class="card"><b>${a}</b> — sinal (sem ATR ainda)</div>`;
-  const boa=x.janela_boa;
-  return `<div class="card ${boa?'okjan':'nojan'}">
+  const v=x.alvos_estudo||x.alvos;
+  const entrar=Boolean(x.entrada_valida && x.alvos);
+  if(!v) return `<div class="card nojan"><b>${a}</b> — ${x.estado_entrada||'AGUARDAR'} (ATR indisponível)</div>`;
+  return `<div class="card ${entrar?'okjan':'nojan'}">
     <div style="display:flex;justify-content:space-between;align-items:center">
       <b style="font-size:.95rem">${a} LONG</b>
-      <span class="badge ${boa?'b-ok':'b-no'}">${boa?'JANELA 21-22h':x.hora+'h — fora da janela'}</span>
+      <span class="estado ${entrar?'go':'study'}">${x.estado_entrada||'ESTUDO — NÃO OPERAR'}</span>
     </div>
-    <div class="alvos">
+    ${checklist(x)}
+    ${entrar ? `<div class="alvos">
       <div><label>entrada</label><span>${v.entrada}</span></div>
       <div><label>stop (1 ATR)</label><span class="dn">${v.sl}</span></div>
       <div><label>alvo 1 (2.5 ATR)</label><span class="up">${v.tp1}</span></div>
       <div><label>alvo 2 (5 ATR)</label><span class="up">${v.tp2}</span></div>
-      <div><label>risco</label><span>${v.risco_pips}p</span></div>
-      <div><label>regime</label><span class="${RC[x.regime]||'ind'}" style="font-size:.8rem">${RN[x.regime]||'—'}</span></div>
+      <div><label>risco</label><span>${v.risco_pips} ${v.risco_unidade||'pips'}</span></div>
+      <div><label>regime (contexto)</label><span class="${RC[x.regime]||'ind'}" style="font-size:.8rem">${RN[x.regime]||'—'}</span></div>
+    </div><div class="nota">TP1: 40.4% de acerto, EV +0.41R. TP2: 24.6%, EV +0.48R. Medido na janela validada.</div>`
+    : `<div class="nota">NÃO ABRIR operação. ${x.motivo_entrada||'Sinal salvo apenas para estudo.'} Alvos permanecem ocultos para não sugerir uma entrada fora do teste.</div>`}
+  </div>`;
+}
+
+function renderAmostra(){
+  const a=D.amostraEntrada||{};
+  const el=document.getElementById('amostra'); if(!el) return;
+  const resultado=a.winrate==null?'ainda sem TP/SL resolvido':`${a.wins} TP / ${a.losses} SL · ${a.winrate}%`;
+  const f=D.amostraFibo||{};
+  const fibo=f.winrate==null?'sem TP/SL resolvido':`${f.wins} TP / ${f.losses} SL · ${f.winrate}%`;
+  const q=D.amostraFluxo||{};
+  const fluxo=q.winrate==null?'sem TP/SL resolvido':`${q.wins} TP / ${q.losses} SL · ${q.winrate}%`;
+  const o=D.amostraOrb||{};
+  const orb=o.winrate==null?'sem TP/SL resolvido':`${o.wins} TP / ${o.losses} SL · ${o.winrate}%`;
+  const l=D.amostraLiquidez||{};
+  const liquidez=l.winrate==null?'sem TP/SL resolvido':`${l.wins} TP / ${l.losses} SL · ${l.winrate}%`;
+  const saldo=x=>x.saldo_r==null?'R aguardando':`${x.saldo_r>0?'+':''}${x.saldo_r}R em ${x.avaliados_r} saídas`;
+  el.innerHTML=`<b>Amostra de entradas válidas:</b> ${a.sinais||0} sinais · ${resultado} · ${saldo(a)} · ${a.expirados||0} fechados por tempo · ${a.pendentes||0} pendentes.<br><b>Fibo M15 em estudo:</b> ${f.sinais||0} sinais · ${fibo} · ${saldo(f)} · ${f.nao_executadas||0} não executados · ${f.expirados||0} fechados por tempo.<br><b>Fluxo M15 em estudo:</b> ${q.sinais||0} sinais · ${fluxo} · ${saldo(q)} · ${q.expirados||0} fechados por tempo.<br><b>ORB/FVG M15 em estudo:</b> ${o.sinais||0} sinais · ${orb} · ${saldo(o)} · ${o.expirados||0} fechados por tempo.<br><b>Liquidez V2 em estudo:</b> ${l.sinais||0} sinais · ${liquidez} · ${saldo(l)} · ${l.nao_executadas||0} não executados. Estudos não são misturados ao sinal validado.`;
+}
+
+function renderFluxo(){
+  const el=document.getElementById('fluxo');
+  const x=(D.ativos||{})[sel]||{}, f=x.fluxo||{};
+  if(!f.disponivel){
+    el.innerHTML=`<div class="card"><b>${f.estado||'FLUXO INDISPONÍVEL'}</b><div class="nota">${f.motivo||'Aguardando dados.'}</div></div>`;
+    return;
+  }
+  const a=f.alvos||{}, dir=f.direcao==='buy'?'COMPRA':f.direcao==='sell'?'VENDA':'NEUTRO';
+  const cor=f.sinal_estudo?'go':'study';
+  el.innerHTML=`<div class="card ${f.sinal_estudo?'okjan':'nojan'}">
+    <div style="display:flex;justify-content:space-between;align-items:center"><b>${sel} — ${f.sessao}</b><span class="estado ${cor}">${f.sinal_estudo?'SOMBRA '+dir:f.estado}</span></div>
+    ${checklist(f)}
+    <div class="alvos">
+      <div><label>VWAP da sessão</label><span>${f.vwap}</span></div>
+      <div><label>POC / preço de controle</label><span>${f.poc}</span></div>
+      <div><label>área de valor</label><span>${f.val} — ${f.vah}</span></div>
+      <div><label>tendência H1 / M15</label><span>${f.h1} / ${f.m15}</span></div>
+      <div><label>eficiência</label><span>${f.eficiencia_estado} · ${f.eficiencia}</span></div>
+      <div><label>atividade</label><span>${f.volume_relativo}× · ${f.movimento_atr} ATR</span></div>
+      <div><label>qualidade experimental</label><span>${f.qualidade}/100</span></div>
+      <div><label>R:R até POC</label><span>${f.rr||'—'}x</span></div>
+      ${a.entrada!=null?`<div><label>entrada sombra</label><span>${a.entrada}</span></div><div><label>SL sombra</label><span class="dn">${a.sl}</span></div><div><label>TP1 POC</label><span class="up">${a.tp1}</span></div><div><label>TP2 área oposta</label><span class="up">${a.tp2}</span></div>`:''}
     </div>
-    <div class="nota">${boa
-      ? 'alvo 1: acerta 40.4%, EV +0.41R &bull; alvo 2: acerta 24.6%, EV +0.48R (medido 21-22h UTC)'
-      : 'fora de 21-22h o EV foi NEGATIVO em todos os alvos testados — contexto, nao entrada'}</div>
+    <div class="nota">${f.motivo} Fonte: ${f.fonte_volume}. É contexto experimental; não abre posição.</div>
+  </div>`;
+}
+
+function renderOrb(){
+  const el=document.getElementById('orb');
+  const x=(D.ativos||{})[sel]||{}, o=x.orb||{};
+  if(!o.disponivel){
+    el.innerHTML=`<div class="card orb-card"><b>${o.estado||'ORB INDISPONÍVEL'}</b><div class="nota">${o.motivo||'Aguardando dados.'}</div></div>`;
+    return;
+  }
+  const a=o.alvos||{}, dir=o.direcao==='buy'?'COMPRA':o.direcao==='sell'?'VENDA':'NEUTRO';
+  el.innerHTML=`<div class="card orb-card ${o.sinal_estudo?'okjan ok':'nojan'}">
+    <div style="display:flex;justify-content:space-between;align-items:center"><b>${sel} — ${o.sessao||'—'}</b><span class="estado ${o.sinal_estudo?'go':'study'}">${o.sinal_estudo?'SOMBRA '+dir:o.estado}</span></div>
+    ${checklist(o)}
+    <div class="alvos">
+      <div><label>faixa ORB</label><span>${o.orl??'—'} — ${o.orh??'—'}</span></div>
+      <div><label>tendência H1 / H4</label><span>${o.h1||'—'} / ${o.h4||'—'}</span></div>
+      <div><label>FVG M15</label><span>${o.fvg?`${o.fvg_inf} — ${o.fvg_sup}`:'não formado'}</span></div>
+      <div><label>direção observada</label><span>${dir}</span></div>
+      <div><label>entrada sombra</label><span>${a.entrada??'—'}</span></div>
+      <div><label>SL estrutural</label><span class="dn">${a.sl??'—'}</span></div>
+      <div><label>TP1</label><span class="up">${a.tp1??'—'} ${a.tp1!=null?'(1R)':''}</span></div>
+      <div><label>TP2</label><span class="up">${a.tp2??'—'} ${a.tp2!=null?'(2R)':''}</span></div>
+    </div>
+    <div class="nota">${o.motivo} Adaptação M15 para pesquisa; não envia ordem.</div>
+  </div>`;
+}
+
+function renderLiquidez(){
+  const el=document.getElementById('liquidez');
+  const x=(D.ativos||{})[sel]||{}, l=x.liquidez||{}, a=l.alvos||{};
+  if(!l.disponivel){
+    el.innerHTML=`<div class="card"><b>${l.estado||'SEM VARREDURA'}</b><div class="nota">${l.motivo||'Aguardando dados.'}</div></div>`;
+    return;
+  }
+  el.innerHTML=`<div class="card ${l.sinal_estudo?'okjan ok':'nojan'}">
+    <div style="display:flex;justify-content:space-between;align-items:center"><b>${sel} — BUY</b><span class="estado ${l.sinal_estudo?'go':'study'}">${l.estado}</span></div>
+    ${checklist(l)}
+    <div class="alvos">
+      <div><label>range anterior</label><span>${l.piso_range} — ${l.teto_range}</span></div>
+      <div><label>penetração</label><span>${l.penetracao_atr} ATR</span></div>
+      <div><label>gatilho acima da máxima</label><span>${a.entrada??'—'}</span></div>
+      <div><label>SL abaixo do pavio</label><span class="dn">${a.sl??'—'}</span></div>
+      <div><label>TP1 no teto do range</label><span class="up">${a.tp1??'—'}</span></div>
+      <div><label>R:R estrutural</label><span>${l.rr??'—'}x</span></div>
+    </div><div class="nota">${l.motivo} Ainda é estudo e não envia ordem.</div>
+  </div>`;
+}
+
+function renderFibo(){
+  const el=document.getElementById('fibo');
+  const x=(D.ativos||{})[sel]||{}, f=x.fibo||{};
+  if(!f.disponivel){
+    el.innerHTML=`<div class="card fibo-card"><b>${f.estado||'SEM PLANO FIBO'}</b><div class="nota">${f.motivo||'Ainda não há impulso M15 limpo e alinhado para desenhar a retração.'}</div></div>`;
+    return;
+  }
+  const a=f.alvos||{}, dir=f.direcao==='sell'?'VENDA':'COMPRA';
+  const cls=f.qualificada?'okjan ok':'nojan';
+  el.innerHTML=`<div class="card fibo-card ${cls}">
+    <div style="display:flex;justify-content:space-between;align-items:center"><b>${sel} — ${dir}</b><span class="estado ${f.qualificada?'go':'study'}">${f.estado}</span></div>
+    ${checklist(f)}
+    <div class="alvos">
+      <div><label>zona Fibo</label><span class="fibo-zona">${f.zona_inf} — ${f.zona_sup}</span></div>
+      <div><label>melhor entrada (61.8%)</label><span>${a.entrada??'—'}</span></div>
+      <div><label>invalidação (78.6%)</label><span class="dn">${f.fib786??'—'}</span></div>
+      <div><label>SL + margem ATR</label><span class="dn">${a.sl??'—'}</span></div>
+      <div><label>TP1: extremo anterior</label><span class="up">${a.tp1??'—'}</span></div>
+      <div><label>TP2: extensão 127.2%</label><span class="up">${a.tp2??'—'}</span></div>
+      <div><label>TP3: extensão 161.8%</label><span class="up">${a.tp3??'—'}</span></div>
+      <div><label>R:R até TP1</label><span>${f.rr}x</span></div>
+    </div>
+    <div class="nota">Impulso: ${String(f.impulso_inicio||'').slice(0,16)} → ${String(f.impulso_fim||'').slice(0,16)} · ${f.amplitude_atr} ATR. Fibo é leitura em estudo: não abre posição e ainda não altera o sinal validado.</div>
   </div>`;
 }
 
@@ -659,40 +1936,93 @@ function render(){
   // ordena por proximidade do sinal: o que esta perto de disparar sobe
   const ord=[...ks].sort((x,y)=>(A[y].prox||0)-(A[x].prox||0));
   document.getElementById('tab').innerHTML =
-    '<table><tr><th>ativo</th><th>classe</th><th>proximidade</th><th>regime</th><th>R2</th><th>pos. no canal</th><th>dia</th><th>EMA 4h/1d</th><th>ATR</th><th>preco</th></tr>'
+    '<table><tr><th>ativo</th><th>decisão</th><th>classe</th><th>fluxo / sessão</th><th>proximidade</th><th>regime</th><th>R2</th><th>pos. no canal</th><th>dia</th><th>EMA 4h/1d</th><th>ATR</th><th>preço</th></tr>'
     + ord.map(k=>linha(k,A[k])).join('') + '</table>';
 
-  const H=D.historico||[];
+  const todos=D.historico||[];
+  const tipo=document.getElementById('filtro-tipo')?.value||'';
+  const resultado=document.getElementById('filtro-resultado')?.value||'';
+  const soAtivo=document.getElementById('filtro-ativo')?.checked;
+  const tipos=[...new Set(todos.map(h=>h.tipo||'falso_rompimento'))].sort();
+  const seletorTipo=document.getElementById('filtro-tipo');
+  if(seletorTipo && seletorTipo.options.length!==tipos.length+1){
+    seletorTipo.innerHTML='<option value="">Todos os tipos</option>'+tipos.map(x=>`<option value="${x}">${x}</option>`).join('');
+    seletorTipo.value=tipo;
+  }
+  const H=todos.filter(h=>(!tipo||(h.tipo||'falso_rompimento')===tipo)
+    &&(!resultado||String((h.simulacao||{}).desfecho||'').startsWith(resultado))
+    &&(!soAtivo||h.ativo===sel));
   document.getElementById('hist').innerHTML = H.length
-    ? '<table><tr><th>hora</th><th>ativo</th><th>janela</th><th>regime</th><th>preco</th><th>vela seguinte</th></tr>'
+    ? '<table><tr><th>hora</th><th>ativo</th><th>decisão</th><th>tipo</th><th>janela</th><th>regime</th><th>preço</th><th>vela seguinte</th></tr>'
       + H.map(histLinha).join('') + '</table>'
     : '<span style="color:#475569;font-style:italic;font-size:.8rem">nenhum sinal nas ultimas 24h</span>';
-  renderDossie(H);
-  if(sig.length) bip();
+  renderDossie(todos);
+  renderAmostra();
+  const entradas=ks.filter(k=>A[k].entrada_valida);
+  const chaveAlerta=entradas.join('|');
+  if(chaveAlerta && chaveAlerta!==ultimaChaveAlerta) bip();
+  ultimaChaveAlerta=chaveAlerta;
+  const s=D.saudeDados||{};
+  document.getElementById('saude').innerHTML=[
+    ['Armazenamento',s.armazenamento||'—'],['Eventos',s.eventos??0],
+    ['Entradas válidas',s.entradas_validas??0],['Pendentes',s.pendentes??0],
+    ['Ambíguos',s.ambiguos??0],['Schema',D.schemaVersao??'—']
+  ].map(([a,b])=>`<div class="saude-item"><label>${a}</label><b>${b}</b></div>`).join('');
   const t=document.getElementById('tabs');
   if(t.children.length!==ks.length){
     t.innerHTML = ks.map(k=>`<button class="tab" data-a="${k}" onclick="pick('${k}')">${k}</button>`).join('');
     if(!sel && ks.length) sel=ks[0];
   }
   [...t.children].forEach(b=>b.className='tab'+(b.dataset.a===sel?' on':''));
+  renderFluxo();
+  renderOrb();
+  renderLiquidez();
+  renderFibo();
 }
 
 async function pick(a){ sel=a; render(); await grafico(); }
 
 async function grafico(){
   if(!sel) return;
-  let d; try{ d=await (await fetch('mkt_'+sel+'.json?t='+Date.now())).json(); }catch(e){ return; }
   const cv=document.getElementById('cv'), W=cv.clientWidth, H=300;
   cv.width=W; cv.height=H;
   const c=cv.getContext('2d');
   c.fillStyle='#0d1526'; c.fillRect(0,0,W,H);
-  const K=d.candles||[]; if(!K.length) return;
+  let d;
+  try{
+    const resposta=await fetch('mkt_'+sel+'.json?t='+Date.now());
+    if(!resposta.ok) throw new Error('HTTP '+resposta.status);
+    d=await resposta.json();
+  }catch(e){
+    c.fillStyle='#94a3b8'; c.font='12px monospace';
+    c.fillText(sel+' — gráfico indisponível; aguardando dados válidos',16,30); return;
+  }
+  const K=Array.isArray(d.candles)?d.candles:[];
+  if(!K.length){
+    c.fillStyle='#94a3b8'; c.font='12px monospace';
+    c.fillText(sel+' — aguardando candles do mercado normal',16,30); return;
+  }
   const P={l:6,r:56,t:16,b:18};
   const cw=(W-P.l-P.r)/K.length, bw=Math.max(1,cw*.6);
-  let vals=K.flatMap(k=>[k.h,k.l]).concat((d.sup||[]).filter(v=>v!=null)).concat((d.inf||[]).filter(v=>v!=null));
+  const A=(D.ativos||{})[sel]||{}, F=A.fibo||{}, FA=F.alvos||{}, FL=A.fluxo||{}, FLA=FL.alvos||{}, O=A.orb||{}, OA=O.alvos||{}, L=A.liquidez||{}, LA=L.alvos||{};
+  const niveisNumericos=xs=>xs.filter(v=>v!==null&&v!==undefined&&v!=='').map(Number).filter(Number.isFinite);
+  const fibValores=niveisNumericos([F.zona_inf,F.zona_sup,F.fib382,F.fib500,F.fib618,F.fib786,FA.entrada,FA.sl,FA.tp1,FA.tp2,FA.tp3]);
+  const fluxoValores=niveisNumericos([FL.vwap,FL.poc,FL.vah,FL.val,FLA.sl,FLA.tp1,FLA.tp2]);
+  const orbValores=niveisNumericos([O.orh,O.orl,O.fvg_inf,O.fvg_sup,OA.entrada,OA.sl,OA.tp1,OA.tp2]);
+  const liquidezValores=niveisNumericos([L.piso_range,L.teto_range,LA.entrada,LA.sl,LA.tp1]);
+  const candleVals=K.flatMap(k=>[Number(k.h),Number(k.l)]).filter(Number.isFinite);
+  const candleMax=Math.max(...candleVals), candleMin=Math.min(...candleVals);
+  const faixa=Math.max(candleMax-candleMin,Math.abs(candleMax)*1e-6,1e-9);
+  // Um alvo distante não pode achatar os candles. Níveis fora de 35% da
+  // janela continuam no cartão de leitura, mas não participam da escala.
+  const perto=v=>Number.isFinite(v)&&v>=candleMin-faixa*.35&&v<=candleMax+faixa*.35;
+  const sobreposicoes=fibValores.concat(fluxoValores,orbValores,liquidezValores).filter(perto);
+  let vals=candleVals.concat((d.sup||[]).filter(v=>v!=null&&perto(Number(v))))
+    .concat((d.inf||[]).filter(v=>v!=null&&perto(Number(v)))).concat(sobreposicoes);
   let mx=Math.max(...vals), mn=Math.min(...vals);
   const pad=(mx-mn)*.06||1e-6; mx+=pad; mn-=pad;
   const Y=v=>P.t+(mx-v)/(mx-mn)*(H-P.t-P.b);
+  const rotulosNivel=[];
   c.strokeStyle='#1e293b';
   for(let i=0;i<=4;i++){const y=P.t+i*(H-P.t-P.b)/4;c.beginPath();c.moveTo(P.l,y);c.lineTo(W-P.r,y);c.stroke();
     c.fillStyle='#475569';c.font='9px monospace';c.textAlign='left';
@@ -705,6 +2035,77 @@ async function grafico(){
       if(!started){c.moveTo(x,y);started=true;} else c.lineTo(x,y); });
     c.stroke(); c.globalAlpha=1;
   });
+  function nivel(valor,cor,rotulo){
+    if(!perto(valor)) return;
+    const y=Y(valor); c.save(); c.setLineDash([4,3]); c.strokeStyle=cor; c.lineWidth=1;
+    c.beginPath(); c.moveTo(P.l,y); c.lineTo(W-P.r,y); c.stroke(); c.setLineDash([]);
+    rotulosNivel.push({y,cor,rotulo}); c.restore();
+  }
+  nivel(Number(A.piso_acumulacao),'#38bdf8','piso 10 velas');
+  if(FL.disponivel){
+    const val=Number(FL.val), vah=Number(FL.vah);
+    if(Number.isFinite(val) && Number.isFinite(vah)){
+      c.save(); c.fillStyle='#0ea5e914';
+      c.fillRect(P.l,Math.min(Y(val),Y(vah)),W-P.l-P.r,Math.abs(Y(val)-Y(vah)));
+      c.restore();
+    }
+    nivel(Number(FL.vwap),'#38bdf8','VWAP sessão');
+    nivel(Number(FL.poc),'#f59e0b','POC');
+    nivel(Number(FL.vah),'#60a5fa','VAH');
+    nivel(Number(FL.val),'#60a5fa','VAL');
+    if(FL.sinal_estudo && FLA){
+      nivel(Number(FLA.sl),'#ef4444','Fluxo SL sombra');
+      nivel(Number(FLA.tp1),'#22c55e','Fluxo TP1 POC');
+    }
+  }
+  if(O.disponivel){
+    const orh=Number(O.orh), orl=Number(O.orl);
+    if(Number.isFinite(orh) && Number.isFinite(orl)){
+      c.save(); c.fillStyle='#f59e0b12';
+      c.fillRect(P.l,Math.min(Y(orh),Y(orl)),W-P.l-P.r,Math.abs(Y(orh)-Y(orl)));
+      c.restore();
+      nivel(orh,'#f59e0b','ORB máxima');
+      nivel(orl,'#f59e0b','ORB mínima');
+    }
+    const fi=Number(O.fvg_inf), fs=Number(O.fvg_sup);
+    if(O.fvg && Number.isFinite(fi) && Number.isFinite(fs)){
+      c.save(); c.fillStyle='#22c55e1d';
+      c.fillRect(P.l,Math.min(Y(fi),Y(fs)),W-P.l-P.r,Math.abs(Y(fi)-Y(fs)));
+      c.fillStyle='#86efac'; c.font='9px monospace'; c.textAlign='left';
+      c.fillText('FVG M15',P.l+3,Math.min(Y(fi),Y(fs))+10); c.restore();
+    }
+    if(O.sinal_estudo && OA){
+      nivel(Number(OA.entrada),'#22c55e','ORB entrada sombra');
+      nivel(Number(OA.sl),'#ef4444','ORB SL');
+      nivel(Number(OA.tp1),'#86efac','ORB TP1 1R');
+      nivel(Number(OA.tp2),'#4ade80','ORB TP2 2R');
+    }
+  }
+  if(L.sinal_estudo && LA){
+    nivel(Number(L.piso_range),'#38bdf8','Liquidez: piso varrido');
+    nivel(Number(LA.entrada),'#22c55e','Liquidez: gatilho BUY');
+    nivel(Number(LA.sl),'#ef4444','Liquidez: SL sombra');
+    nivel(Number(LA.tp1),'#86efac','Liquidez: TP1 range');
+  }
+  if(F.disponivel){
+    const zi=Number(F.zona_inf), zs=Number(F.zona_sup);
+    if(Number.isFinite(zi) && Number.isFinite(zs)){
+      c.save(); c.fillStyle='#8b5cf622';
+      c.fillRect(P.l,Math.min(Y(zi),Y(zs)),W-P.l-P.r,Math.abs(Y(zi)-Y(zs)));
+      c.fillStyle='#c4b5fd'; c.font='9px monospace'; c.textAlign='left';
+      c.fillText('ZONA FIBO 38.2–61.8%',P.l+3,Math.min(Y(zi),Y(zs))+10); c.restore();
+    }
+    nivel(Number(FA.entrada),'#a78bfa','Fibo entrada 61.8%');
+    nivel(Number(F.fib786),'#f59e0b','Fibo invalida 78.6%');
+    nivel(Number(FA.tp1),'#22c55e','Fibo TP1');
+    nivel(Number(FA.tp2),'#86efac','Fibo TP2 127.2%');
+  }
+  if(A.entrada_valida && A.alvos){
+    nivel(Number(A.alvos.entrada),'#22c55e','entrada BUY');
+    nivel(Number(A.alvos.sl),'#ef4444','SL');
+    nivel(Number(A.alvos.tp1),'#22c55e','TP1');
+    nivel(Number(A.alvos.tp2),'#86efac','TP2');
+  }
   K.forEach((k,i)=>{
     const x=P.l+i*cw+cw/2, up=k.c>=k.o, col=up?'#22c55e':'#ef4444';
     c.strokeStyle=col; c.lineWidth=1;
@@ -713,7 +2114,20 @@ async function grafico(){
     const yt=Math.min(Y(k.o),Y(k.c));
     c.fillRect(x-bw/2,yt,bw,Math.max(1,Math.abs(Y(k.c)-Y(k.o))));
   });
-  const A=(D.ativos||{})[sel]||{};
+  // Níveis próximos são comuns; empilha os textos e liga cada um à sua linha.
+  const ordenados=rotulosNivel.sort((a,b)=>a.y-b.y);
+  let anterior=P.t-11;
+  ordenados.forEach(r=>{r.ly=Math.max(r.y,anterior+11);anterior=r.ly;});
+  const excesso=ordenados.length?Math.max(0,ordenados[ordenados.length-1].ly-(H-P.b-2)):0;
+  ordenados.forEach(r=>{
+    const ly=Math.max(P.t+7,r.ly-excesso);
+    c.save(); c.strokeStyle=r.cor; c.globalAlpha=.7; c.beginPath();
+    c.moveTo(W-P.r-16,r.y); c.lineTo(W-P.r-3,ly); c.stroke(); c.globalAlpha=1;
+    c.font='8px monospace'; c.textAlign='right';
+    const largura=c.measureText(r.rotulo).width+5;
+    c.fillStyle='#07101fee'; c.fillRect(W-P.r-4-largura,ly-8,largura+4,10);
+    c.fillStyle=r.cor; c.fillText(r.rotulo,W-P.r-3,ly); c.restore();
+  });
   c.fillStyle='#94a3b8'; c.font='11px monospace'; c.textAlign='left';
   c.fillText(`${sel} · ${RN[A.regime]||'—'} · R2 ${A.r2??'—'}`,P.l+2,11);
 }
@@ -721,34 +2135,40 @@ async function grafico(){
 async function tick(){
   try{
     D=await (await fetch('mercado.json?t='+Date.now())).json();
-    document.getElementById('status').textContent='Atualizado: '+D.status;
+    const atualizado=new Date(Number(D.ts||0)*1000);
+    document.getElementById('status').textContent='Atualizado: '+FMT_HORA_BRT.format(atualizado)+' BRT';
     render(); await grafico();
   }catch(e){ document.getElementById('status').textContent='Erro: '+e; }
 }
 tick(); setInterval(tick,30000);
+mudarVisao(visao);
 window.addEventListener('resize',grafico);
 </script></body></html>"""
 
 
 def main() -> int:
     import dataclasses
+    try:
+        trava_monitor = adquirir_trava_monitor()
+    except OSError:
+        print("Monitor Mercado já está em execução. Feche a janela antiga antes de reiniciar.")
+        return 2
     base = configuracao_scalping_m15()
     cfg = dataclasses.replace(base, timeframe_segundos=TF)
-    print("Conectando na IQ Option...")
-    api = MercadoIQ(base).conectar_somente_leitura()
-
     g = GraficoM5(dataclasses.replace(base, porta_grafico=PORTA,
                                       sufixo_banco="mercado"))
     g.iniciar(abrir_navegador=False)
     (g.pasta_web / "index.html").write_text(_HTML, encoding="utf-8")
 
     estado = Estado(g.pasta_web)
-    calendario = CalendarioEconomico(base.pasta_dados)
-    calendario.atualizar()
     estado.salvar()
     url = f"http://127.0.0.1:{PORTA}/index.html"
     print(f"Painel: {url}")
     webbrowser.open(url)
+    print("Conectando na IQ Option...")
+    api = MercadoIQ(base).conectar_somente_leitura()
+    calendario = CalendarioEconomico(base.pasta_dados)
+    calendario.atualizar()
     print(f"\nCarregando {len(ATIVOS)} ativos...")
     try:
         loop(api, cfg, estado, calendario)

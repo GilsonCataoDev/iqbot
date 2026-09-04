@@ -29,3 +29,12 @@ graphify-out/
 dados/bt_h1.pkl
 dados/_bt_m15.pkl
 *.pkl
+
+# Artefatos locais e relatorios gerados
+.artifact_runtime/
+diario/
+dados/
+relatorios/
+*.bak.bat
+/none
+/binaria)

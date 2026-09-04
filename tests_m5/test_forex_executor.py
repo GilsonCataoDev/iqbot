@@ -11,9 +11,31 @@ from iqoption_m5.forex_estrategia import (
 )
 from iqoption_m5.forex_executor import ExecutorForexSimulado
 from iqoption_m5.forex_modelos import PlanoForex
+from iqoption_m5.forex_backtest import simular_forex
 
 
 class TestExecutorForexSimulado(unittest.TestCase):
+    def test_backtest_ponta_a_ponta_reconhece_tp_obrigatorio(self):
+        import iqoption_m5.forex_backtest as modulo
+        indice = pd.date_range("2026-01-01", periods=63, freq="15min")
+        candles = pd.DataFrame({"Open": 1.1000, "High": 1.1002, "Low": 1.0998,
+                                "Close": 1.1000, "Volume": 1}, index=indice)
+        plano = self._plano()
+        planos = pd.Series([None] * len(candles), index=indice, dtype="object")
+        planos.iloc[60] = plano
+        original = modulo.planos_rompimento_reteste
+        modulo.planos_rompimento_reteste = lambda *args, **kwargs: planos
+        try:
+            candles.iloc[61, candles.columns.get_loc("High")] = 1.1030
+            candles.iloc[61, candles.columns.get_loc("Low")] = 1.0995
+            resultados, banca = simular_forex("EURUSD", candles, banca=1000,
+                                               risco_percentual=.01, spread=0)
+        finally:
+            modulo.planos_rompimento_reteste = original
+        self.assertEqual(len(resultados), 1)
+        self.assertEqual(resultados.iloc[0]["motivo_saida"], "alvo")
+        self.assertGreater(banca, 1000)
+
     def _plano(self):
         return PlanoForex(
             ativo="EURUSD",
@@ -41,6 +63,14 @@ class TestExecutorForexSimulado(unittest.TestCase):
 
         self.assertEqual(resultado.motivo_saida, "stop")
         self.assertAlmostEqual(resultado.lucro, -10.0)
+
+    def test_cenario_otimista_pode_assumir_alvo_no_candle_ambiguo(self):
+        executor = ExecutorForexSimulado(banca=1000, risco_percentual=0.01, spread=0,
+                                         ambiguidade_intrabar="alvo")
+        executor.abrir(self._plano(), 1.1000, datetime(2026, 1, 1, 0, 5))
+        resultado = executor.atualizar(datetime(2026, 1, 1, 0, 10), 1.1030, 1.0980)
+        self.assertEqual(resultado.motivo_saida, "alvo")
+        self.assertGreater(resultado.lucro, 0)
 
     def test_executor_rejeita_risco_acima_de_dois_porcento(self):
         with self.assertRaises(ValueError):

@@ -89,17 +89,31 @@ class TestRiscoEExecutor(unittest.TestCase):
     def tearDown(self):
         self.temp.cleanup()
 
+    def test_lucro_numerico_aceita_resultado_estimado_por_candle(self):
+        self.assertAlmostEqual(
+            ExecutorSeguro.lucro_numerico("win_estimado_por_candle", 5.0, 0.87),
+            4.35,
+        )
+        self.assertEqual(
+            ExecutorSeguro.lucro_numerico("loss_estimado_por_candle", 5.0, 0.87),
+            -5.0,
+        )
+        self.assertEqual(
+            ExecutorSeguro.lucro_numerico("equal_estimado_por_candle", 5.0, 0.87),
+            0.0,
+        )
+
     def test_valor_percentual_banca_calcula_pela_banca_atual(self):
         cfg = replace(self.config, valor_percentual_banca=0.03, banca_inicial=100.0)
         risco = GerenciadorRisco(cfg)
         registro = RegistroSQLite(cfg.banco_sqlite)
         executor = ExecutorSeguro(cfg, MercadoFalso(), risco, registro)
 
-        self.assertAlmostEqual(executor._valor_da_entrada(), 3.0)
+        self.assertAlmostEqual(executor._valor_da_entrada(self.decisao), 3.0)
 
         risco.reservar(self.snapshot, self.decisao)
         risco.registrar_resultado(50.0, self.decisao.ativo)  # banca sobe pra 150
-        self.assertAlmostEqual(executor._valor_da_entrada(), 4.5)
+        self.assertAlmostEqual(executor._valor_da_entrada(self.decisao), 4.5)
 
     def test_revalida_janela_imediatamente_antes_do_envio(self):
         base_candle = self.snapshot.timestamp_servidor
@@ -150,7 +164,7 @@ class TestRiscoEExecutor(unittest.TestCase):
         executor = ExecutorSeguro(cfg, MercadoFalso(), risco, registro)
 
         # 3% de R$10 = R$0.30, mas o minimo da IQ Option e R$2.
-        self.assertAlmostEqual(executor._valor_da_entrada(), 2.0)
+        self.assertAlmostEqual(executor._valor_da_entrada(self.decisao), 2.0)
 
     def test_payout_baixo_nao_bloqueia_com_minimo_zero(self):
         risco = GerenciadorRisco(replace(self.config, payout_minimo=0.0))
@@ -254,6 +268,36 @@ class TestRiscoEExecutor(unittest.TestCase):
         self.assertEqual(status, "resultado_desconhecido")
         self.assertIsNone(lucro)
 
+    def test_resultado_oficial_nao_usa_estimativa_do_candle(self):
+        class MercadoSemResultadoOficial(MercadoFalso):
+            resultado_por_candle_chamado = False
+
+            def aguardar_resultado(self, id_ordem, expiracao_minutos=None):
+                return None
+
+            def resultado_por_candle(self, *args, **kwargs):
+                self.resultado_por_candle_chamado = True
+                return "loss"
+
+        config = replace(self.config, verificar_resultado_por_candle=False)
+        mercado = MercadoSemResultadoOficial()
+        risco = GerenciadorRisco(config)
+        registro = RegistroSQLite(config.banco_sqlite)
+        executor = ExecutorSeguro(config, mercado, risco, registro)
+
+        self.assertTrue(executor.executar(self.snapshot, self.decisao))
+        executor.aguardar_ordens()
+
+        with closing(sqlite3.connect(config.banco_sqlite)) as db:
+            status, lucro, bruto = db.execute(
+                "SELECT status, lucro, resultado_bruto FROM operacoes "
+                "WHERE id_ordem='ordem-teste-1'"
+            ).fetchone()
+        self.assertFalse(mercado.resultado_por_candle_chamado)
+        self.assertEqual(status, "resultado_desconhecido")
+        self.assertIsNone(lucro)
+        self.assertTrue(bruto.startswith("resultado_desconhecido:"))
+
     def test_limites_do_dia_persistem_apos_reinicio(self):
         registro = RegistroSQLite(self.config.banco_sqlite)
         agora = datetime.now()
@@ -346,7 +390,11 @@ class TestRiscoEExecutor(unittest.TestCase):
         )
         registro = RegistroSQLite(config.banco_sqlite)
         registro.registrar_abertura(
-            "reinicio-1", self.decisao, 1.0, 0.85, datetime.now()
+            "reinicio-1",
+            self.decisao,
+            1.0,
+            0.85,
+            datetime.now() - timedelta(minutes=6),
         )
 
         class MercadoRecuperacao:

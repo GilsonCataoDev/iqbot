@@ -6,12 +6,13 @@ from pathlib import Path
 
 import pandas as pd
 
-from .calendario_swing import verificar_noticias
+from .calendario_swing import NoticiaSwing, avaliar_noticias_ativo, verificar_noticias
 from .config_swing import SwingConfig
 from .estrategia_swing import AnaliseSwing, EstrategiaSwing
 from .executor_swing import ExecutorSwing
 from .grafico_swing import GraficoSwing
 from .mercado_swing import MercadoSwing, MercadoSwingIndisponivel
+from .radar_swing import avaliar_radar, radar_para_alerta
 from .registro_swing import RegistroSwing
 
 
@@ -45,6 +46,9 @@ def main(config: SwingConfig) -> None:
 
     # Cache de estado anterior por ativo — detecta transições ESPERAR→ENTRAR etc.
     _estado_anterior: dict[str, str] = {}
+    _radar_anterior: dict[str, str] = {}
+    _noticia_bloqueada_atual = False
+    _noticia_desc_atual = ""
 
     def _imprimir_analise(analise: AnaliseSwing) -> None:
         icons = {"ENTRAR": "▶ ENTRAR", "ESPERAR": "◌ ESPERAR", "EVITAR": "✕ EVITAR"}
@@ -132,6 +136,8 @@ def main(config: SwingConfig) -> None:
 
     ultimo_m15 = 0
     reconexoes = 0
+    ultimo_check_monitor = 0.0
+    ultimo_refresh_grafico = 0.0
     # Cache dos dados estruturais (S/R, Fib, canal, indicadores H4) por ativo.
     # Preenchido no fechamento do H1; reutilizado nos refreshes de tick entre closes.
     _cache_estrutural: dict[str, dict] = {}
@@ -159,25 +165,90 @@ def main(config: SwingConfig) -> None:
             except Exception:
                 pass  # silencioso — refresh de tick é best-effort
 
+    def _radar_intravela() -> None:
+        if not _cache_estrutural:
+            return
+        for ativo, cached in _cache_estrutural.items():
+            analise = cached.get("analise")
+            if analise is None or analise.estado not in {"ENTRAR", "ESPERAR"}:
+                continue
+            try:
+                preco = mercado.preco_atual_forex(ativo)
+            except Exception:
+                preco = None
+            if preco is None or preco <= 0:
+                continue
+            radar = avaliar_radar(
+                analise,
+                preco,
+                noticia_bloqueada=cached.get("noticia", NoticiaSwing(False)).bloqueada,
+                noticia_desc=cached.get("noticia", NoticiaSwing(False)).descricao,
+                noticia_direcao=cached.get("noticia", NoticiaSwing(False)).direcao,
+                tolerancia_pips=config.radar_tolerancia_toque_pips,
+            )
+            if radar is None:
+                continue
+            if grafico is not None:
+                try:
+                    grafico.atualizar_alerta_tick(ativo, radar_para_alerta(radar, analise))
+                except Exception:
+                    pass
+            chave_ant = _radar_anterior.get(ativo)
+            if chave_ant != radar.chave_alerta:
+                dist = "" if radar.distancia_pips is None else f" | dist={radar.distancia_pips:.1f}p"
+                alvo = "" if radar.alvo_provavel is None else f" | busca={radar.alvo_provavel:.5f}"
+                print(
+                    f"[SWING-RADAR] {ativo} {radar.estado} "
+                    f"{radar.direcao or '-'} | preco={radar.preco_atual:.5f}"
+                    f"{alvo}{dist} | {radar.mensagem}"
+                )
+                _radar_anterior[ativo] = radar.chave_alerta
+
+    ultimo_check_conexao = 0.0
+
     while True:
         try:
+            agora_loop = time.time()
+
+            # Sonda de conexão a cada 60s. Sem isso o freeze é SILENCIOSO: com o
+            # socket morto, timestamp_servidor() devolve o último valor em cache
+            # (property da iqoptionapi, não levanta erro), então _m15_atual()
+            # congela, nenhum ciclo novo dispara e nada é impresso. Foi assim que
+            # o bot M15 ficou 25min parado em 2026-08-27.
+            if agora_loop - ultimo_check_conexao >= 60.0:
+                ultimo_check_conexao = agora_loop
+                if not mercado.conexao_viva():
+                    print("[SWING] Conexão morta detectada — reconectando...")
+                    mercado.reconectar_se_necessario(forcar=True)
+
             ts = mercado.timestamp_servidor()
             h1_corrente = _m15_atual(ts)
 
-            # Verifica ordens pendentes a cada ciclo
-            try:
-                executor.verificar_pendentes()
-            except Exception as e:
-                print(f"[SWING] Erro ao verificar pendentes: {e!r}")
+            # Verificacoes pesadas ficam cadenciadas; o radar intravela roda leve.
+            if agora_loop - ultimo_check_monitor >= config.intervalo_verificacao_monitor_segundos:
+                ultimo_check_monitor = agora_loop
+                try:
+                    executor.verificar_pendentes()
+                except Exception as e:
+                    print(f"[SWING] Erro ao verificar pendentes: {e!r}")
 
-            # Verifica outcomes de sinais pendentes a cada ciclo
-            try:
-                _verificar_sinais_monitor()
-            except Exception as e:
-                print(f"[SWING] Erro ao verificar monitor: {e!r}")
+                try:
+                    _verificar_sinais_monitor()
+                except Exception as e:
+                    print(f"[SWING] Erro ao verificar monitor: {e!r}")
 
-            # Entre ciclos M15: atualiza candle atual no dashboard
+            # Entre ciclos M15: radar de preco a cada segundo, candles do grafico em ritmo leve.
             if h1_corrente == ultimo_m15 and _cache_estrutural:
+                try:
+                    _radar_intravela()
+                except Exception as e:
+                    print(f"[SWING] Erro no radar intravela: {e!r}")
+            if (
+                h1_corrente == ultimo_m15
+                and _cache_estrutural
+                and agora_loop - ultimo_refresh_grafico >= config.intervalo_loop_segundos
+            ):
+                ultimo_refresh_grafico = agora_loop
                 try:
                     _refresh_tick_grafico()
                 except Exception as e:
@@ -190,11 +261,11 @@ def main(config: SwingConfig) -> None:
                 print(f"\n[SWING] === M15 close: {hora_utc} ===")
 
                 # Filtro de notícias — bloqueia hora inteira se evento de alto impacto
-                _noticia_bloqueada, _noticia_desc = verificar_noticias(janela_minutos=120)
-                if _noticia_bloqueada:
-                    print(f"[SWING] ⚠ NOTÍCIA ALTO IMPACTO: {_noticia_desc} — hora bloqueada")
-                    time.sleep(config.intervalo_loop_segundos)
-                    continue
+                _noticia_bloqueada_atual, _noticia_desc_atual = verificar_noticias(
+                    janela_minutos=config.janela_noticia_minutos
+                )
+                if _noticia_bloqueada_atual:
+                    print(f"[SWING] ⚠ NOTÍCIA ALTO IMPACTO: {_noticia_desc_atual} — entradas bloqueadas; radar continua")
 
                 # Sinais pendentes (aguardando SL/TP) por ativo — usados pra manter
                 # o alerta visivel no dashboard enquanto nao resolve, nao so no
@@ -215,6 +286,21 @@ def main(config: SwingConfig) -> None:
 
                         # Avalia primeiro — aproveita os cálculos no gráfico
                         analise = estrategia.avaliar(ativo, df_d1, df_h4, df_h1)
+                        noticia_ativo = avaliar_noticias_ativo(
+                            ativo,
+                            janela_minutos=config.janela_noticia_minutos,
+                        )
+                        try:
+                            preco_ref_registro = mercado.preco_atual_forex(ativo)
+                        except Exception:
+                            preco_ref_registro = float(df_h1["Close"].iloc[-1])
+                        registro.registrar_analise_monitor(
+                            analise,
+                            preco_atual=preco_ref_registro,
+                            noticia_bloqueada=noticia_ativo.bloqueada,
+                            noticia_desc=noticia_ativo.descricao,
+                            noticia_direcao=noticia_ativo.direcao,
+                        )
 
                         # Publica no dashboard: H1 (leitura fina) + S/R/Fib/canal do H4
                         if grafico is not None:
@@ -242,6 +328,7 @@ def main(config: SwingConfig) -> None:
                                     "zona_fib": zona_fib,
                                     "mercado_aberto": mercado.aberto(ativo),
                                     "analise": analise,
+                                    "noticia": noticia_ativo,
                                 }
                             except Exception as e:
                                 print(f"[SWING] {ativo}: falha ao atualizar gráfico — {e!r}")
@@ -279,6 +366,21 @@ def main(config: SwingConfig) -> None:
 
                 # Execução de ordens (apenas quando executar_ordens=True e validado)
                 for analise in analises_entrar:
+                    noticia_exec = _cache_estrutural.get(analise.ativo, {}).get(
+                        "noticia",
+                        NoticiaSwing(_noticia_bloqueada_atual, _noticia_desc_atual),
+                    )
+                    noticia_a_favor = (
+                        noticia_exec.bloqueada
+                        and noticia_exec.direcao in {"compra", "venda"}
+                        and noticia_exec.direcao == analise.direcao
+                    )
+                    if noticia_exec.bloqueada and not (
+                        config.permitir_entrada_a_favor_noticia and noticia_a_favor
+                    ):
+                        extra = " a favor, mas modo notícia está só em monitor" if noticia_a_favor else ""
+                        print(f"[SWING] {analise.ativo}: IGNORADO — notícia alto impacto{extra}")
+                        continue
                     if not config.executar_ordens:
                         continue
                     sinal_leg = analise.como_sinal_legado()
@@ -313,4 +415,4 @@ def main(config: SwingConfig) -> None:
         except Exception as e:
             print(f"[SWING] erro no loop: {e!r}")
 
-        time.sleep(config.intervalo_loop_segundos)
+        time.sleep(config.intervalo_radar_segundos)

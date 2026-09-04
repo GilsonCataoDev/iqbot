@@ -13,8 +13,15 @@ from iqoption_m5.config import (
     configuracao_scalping_60,
     configuracao_scalping_h1,
     configuracao_scalping_m1,
+    configuracao_ema920_m1_practice,
+    configuracao_ema921_rsi_m1_practice,
+    configuracao_ema921_rsi_m5_practice,
+    configuracao_ema921_rsi_m15_practice,
+    configuracao_ema921_rsi_intravela_m5_practice,
+    configuracao_ema921_rsi_intravela_m15_practice,
     configuracao_scalping_m15,
     configuracao_scalping_m15_r5,
+    configuracao_todas_practice,
 )
 from dataclasses import replace
 
@@ -45,6 +52,12 @@ def analisar_argumentos(argv=None):
         dest="scalping_practice",
         action="store_true",
         help="mesmo perfil scalping M5 R$60 mas na conta PRACTICE. Exige --confirmo.",
+    )
+    parser.add_argument(
+        "--todas-practice",
+        dest="todas_practice",
+        action="store_true",
+        help="PRACTICE: liga todos os setups/confluências e registra cada resultado.",
     )
     parser.add_argument(
         "--scalping-m15",
@@ -81,6 +94,42 @@ def analisar_argumentos(argv=None):
         dest="scalping_m1_practice",
         action="store_true",
         help="mesmo perfil scalping M1 mas na conta PRACTICE, sem limites de sessão. Exige --confirmo.",
+    )
+    parser.add_argument(
+        "--ema920-m1-practice",
+        dest="ema920_m1_practice",
+        action="store_true",
+        help="PRACTICE M1 usando somente EMA9/EMA20.",
+    )
+    parser.add_argument(
+        "--ema921-rsi-m1-practice",
+        dest="ema921_rsi_m1_practice",
+        action="store_true",
+        help="PRACTICE M1 usando somente EMA9/EMA21 + RSI14.",
+    )
+    parser.add_argument(
+        "--ema921-rsi-m5-practice",
+        dest="ema921_rsi_m5_practice",
+        action="store_true",
+        help="PRACTICE M5 usando somente EMA9/EMA21 + RSI14 (expiração 15min).",
+    )
+    parser.add_argument(
+        "--ema921-rsi-m15-practice",
+        dest="ema921_rsi_m15_practice",
+        action="store_true",
+        help="PRACTICE M15 usando somente EMA9/EMA21 + RSI14 (expiração 30min).",
+    )
+    parser.add_argument(
+        "--ema921-rsi-intravela-m5-practice",
+        dest="ema921_rsi_intravela_m5_practice",
+        action="store_true",
+        help="PRACTICE M5: entra no toque ao vivo da faixa EMA9/EMA21 + RSI14.",
+    )
+    parser.add_argument(
+        "--ema921-rsi-intravela-m15-practice",
+        dest="ema921_rsi_intravela_m15_practice",
+        action="store_true",
+        help="PRACTICE M15: entra no toque ao vivo da faixa EMA9/EMA21 + RSI14.",
     )
     parser.add_argument(
         "--scalping-h1",
@@ -135,9 +184,15 @@ def selecionar_configuracao(argumentos) -> Configuracao:
     perfis_execucao = sum(bool(v) for v in (
         argumentos.practice, argumentos.real,
         argumentos.scalping, argumentos.scalping_practice,
+        argumentos.todas_practice,
         argumentos.scalping_m15, argumentos.scalping_m15_practice,
         argumentos.scalping_m15_r5, argumentos.scalping_m15_r5_practice,
         argumentos.scalping_m1, argumentos.scalping_m1_practice,
+        argumentos.ema920_m1_practice,
+        argumentos.ema921_rsi_m1_practice,
+        argumentos.ema921_rsi_m5_practice, argumentos.ema921_rsi_m15_practice,
+        argumentos.ema921_rsi_intravela_m5_practice,
+        argumentos.ema921_rsi_intravela_m15_practice,
         argumentos.scalping_h1, argumentos.scalping_h1_practice,
     ))
     if perfis_execucao > 1:
@@ -149,10 +204,24 @@ def selecionar_configuracao(argumentos) -> Configuracao:
         )
     if argumentos.scalping_h1_practice:
         return replace(configuracao_scalping_h1(), **_PRATICA_SEM_LIMITES)
+    if argumentos.todas_practice:
+        return configuracao_todas_practice()
     if argumentos.scalping_h1:
         return configuracao_scalping_h1()
     if argumentos.scalping_m1_practice:
         return replace(configuracao_scalping_m1(), **_PRATICA_SEM_LIMITES)
+    if argumentos.ema920_m1_practice:
+        return configuracao_ema920_m1_practice()
+    if argumentos.ema921_rsi_m1_practice:
+        return configuracao_ema921_rsi_m1_practice()
+    if argumentos.ema921_rsi_m5_practice:
+        return configuracao_ema921_rsi_m5_practice()
+    if argumentos.ema921_rsi_m15_practice:
+        return configuracao_ema921_rsi_m15_practice()
+    if argumentos.ema921_rsi_intravela_m5_practice:
+        return configuracao_ema921_rsi_intravela_m5_practice()
+    if argumentos.ema921_rsi_intravela_m15_practice:
+        return configuracao_ema921_rsi_intravela_m15_practice()
     if argumentos.scalping_m1:
         return configuracao_scalping_m1()
     if argumentos.scalping_m15_r5_practice:

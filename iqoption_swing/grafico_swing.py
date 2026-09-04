@@ -8,12 +8,14 @@ referencia, sem o veredito automatico de entrada (edge negativo provado).
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+import json
 
 import numpy as np
 import pandas as pd
 
 from iqoption_m5.grafico import GraficoM5
 from .estrategia_swing import AnaliseSwing
+from .tocaia_swing import avaliar_tocaia, tocaia_para_alerta
 
 _JANELA_CANAL = 60  # candles H4 (~10 dias) usados pra ajustar o canal
 
@@ -159,14 +161,40 @@ class GraficoSwing:
             zona = analise.zona_entrada
             preco_entrada = ((zona[0] + zona[1]) / 2) if zona else preco_atual
             dados["alerta"] = {
+                "time": self._grafico._unix(df.index[-1]),
+                "preco": preco_atual,
                 "precoEntrada": preco_entrada,
                 "direcao": "call" if analise.direcao == "compra" else "put",
                 "entradaConfirmada": analise.estado == "ENTRAR",
                 "sl": analise.invalidacao or 0.0,
                 "tp": analise.tp1 or 0.0,
+                "setup": analise.setup or "",
                 "estado": analise.estado,
+                "fatores": list(analise.pendentes or []),
             }
+        elif len(df):
+            tocaia = avaliar_tocaia(
+                ativo,
+                df,
+                fib=dados.get("fib"),
+                canal=dados.get("canal"),
+                niveis_sr=niveis_sr,
+            )
+            if tocaia is not None:
+                dados["alerta"] = tocaia_para_alerta(tocaia)
         self._grafico.atualizar(ativo, dados)
+
+    def atualizar_alerta_tick(self, ativo: str, alerta: dict) -> None:
+        caminho = self._grafico.pasta_dados / f"{ativo}.json"
+        if not caminho.exists():
+            return
+        try:
+            dados = json.loads(caminho.read_text(encoding="utf-8"))
+        except Exception:
+            return
+        dados["alerta"] = alerta
+        dados["atualizado_em"] = float(alerta.get("time", 0)) or dados.get("atualizado_em")
+        self._grafico._json_atomico(caminho, dados)
 
     def fechar(self) -> None:
         self._grafico.fechar()

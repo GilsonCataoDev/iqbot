@@ -419,41 +419,231 @@ class EstrategiaReversaoM5:
     def _zona_fibonacci(
         self, df: pd.DataFrame, indice_recuo: int, tendencia: str
     ) -> tuple[float, float] | None:
+        mapa = self._mapa_fibonacci(df, indice_recuo, tendencia)
+        if mapa is None:
+            return None
+        return float(mapa["zona_inf"]), float(mapa["zona_sup"])
+
+    def _mapa_fibonacci(
+        self, df: pd.DataFrame, indice_recuo: int, tendencia: str
+    ) -> dict | None:
+        """Mapa estável usado pelas estratégias já avaliadas."""
+        c = self.config
+        inicio = max(0, indice_recuo - c.pullback_janela)
+        impulso = df.iloc[inicio:indice_recuo]
+        if len(impulso) < 10:
+            return None
+        if tendencia == "alta":
+            pos_extremo = int(np.argmax(impulso["High"].to_numpy()))
+            if pos_extremo == 0:
+                return None
+            pos_origem = int(np.argmin(impulso.iloc[:pos_extremo]["Low"].to_numpy()))
+            origem = float(impulso.iloc[pos_origem]["Low"])
+            extremo = float(impulso.iloc[pos_extremo]["High"])
+            amplitude = extremo - origem
+            preco_nivel = lambda nivel: extremo - amplitude * nivel
+        elif tendencia == "baixa":
+            pos_extremo = int(np.argmin(impulso["Low"].to_numpy()))
+            if pos_extremo == 0:
+                return None
+            pos_origem = int(np.argmax(impulso.iloc[:pos_extremo]["High"].to_numpy()))
+            origem = float(impulso.iloc[pos_origem]["High"])
+            extremo = float(impulso.iloc[pos_extremo]["Low"])
+            amplitude = origem - extremo
+            preco_nivel = lambda nivel: extremo + amplitude * nivel
+        else:
+            return None
+        atr = float(df.iloc[indice_recuo]["ATR"])
+        if amplitude <= 0 or atr <= 0 or amplitude < c.pullback_amplitude_min_atr * atr:
+            return None
+        return self._finalizar_mapa_fibonacci(
+            impulso, pos_origem, pos_extremo, tendencia, origem, extremo,
+            amplitude, atr, preco_nivel,
+        )
+
+    def _mapa_fibonacci_visual(
+        self, df: pd.DataFrame, indice_recuo: int, tendencia: str
+    ) -> dict | None:
+        """Fibonacci visual da perna estrutural ainda em andamento."""
         c = self.config
         inicio = max(0, indice_recuo - c.pullback_janela)
         impulso = df.iloc[inicio:indice_recuo]
         if len(impulso) < 10:
             return None
 
+        atr = float(df.iloc[indice_recuo]["ATR"])
+        if atr <= 0:
+            return None
+        amplitude_minima = c.pullback_amplitude_min_atr * atr
+        raio = c.pullback_pivo_raio
+        fundos = self._fundos_swing(impulso["Low"], raio)
+        topos = self._topos_swing(impulso["High"], raio)
+        pos_origem: int | None = None
+        pos_extremo: int | None = None
+
         if tendencia == "alta":
-            pos_extremo = int(np.argmax(impulso["High"].to_numpy()))
-            if pos_extremo == 0:
-                return None
-            antes_extremo = impulso.iloc[:pos_extremo]
-            pos_origem = int(np.argmin(antes_extremo["Low"].to_numpy()))
-            origem = float(antes_extremo.iloc[pos_origem]["Low"])
+            # A origem precisa ser um fundo estrutural confirmado. O extremo,
+            # porém, acompanha a perna em andamento até o último candle fechado;
+            # exigir um topo confirmado fazia a Fibo parar antes do preço.
+            encontrou_par = False
+            for fundo in reversed(fundos):
+                depois_origem = impulso.iloc[fundo + 1 :]
+                if depois_origem.empty:
+                    continue
+                encontrou_par = True
+                topo = fundo + 1 + int(np.argmax(depois_origem["High"].to_numpy()))
+                candidato_amplitude = float(impulso.iloc[topo]["High"]) - float(
+                    impulso.iloc[fundo]["Low"]
+                )
+                duracao = topo - fundo
+                if candidato_amplitude >= amplitude_minima and duracao >= 2 * raio + 1:
+                    pos_origem, pos_extremo = fundo, topo
+                    break
+            if pos_extremo is None:
+                if encontrou_par or fundos or topos:
+                    return None
+                pos_extremo = int(np.argmax(impulso["High"].to_numpy()))
+                if pos_extremo == 0:
+                    return None
+                antes_extremo = impulso.iloc[:pos_extremo]
+                pos_origem = int(np.argmin(antes_extremo["Low"].to_numpy()))
+            origem = float(impulso.iloc[pos_origem]["Low"])
             extremo = float(impulso.iloc[pos_extremo]["High"])
             amplitude = extremo - origem
-            zona_baixa = extremo - amplitude * c.pullback_fib_max
-            zona_alta = extremo - amplitude * c.pullback_fib_min
+            preco_nivel = lambda nivel: extremo - amplitude * nivel
         elif tendencia == "baixa":
-            pos_extremo = int(np.argmin(impulso["Low"].to_numpy()))
-            if pos_extremo == 0:
-                return None
-            antes_extremo = impulso.iloc[:pos_extremo]
-            pos_origem = int(np.argmax(antes_extremo["High"].to_numpy()))
-            origem = float(antes_extremo.iloc[pos_origem]["High"])
+            encontrou_par = False
+            for topo in reversed(topos):
+                depois_origem = impulso.iloc[topo + 1 :]
+                if depois_origem.empty:
+                    continue
+                encontrou_par = True
+                fundo = topo + 1 + int(np.argmin(depois_origem["Low"].to_numpy()))
+                candidato_amplitude = float(impulso.iloc[topo]["High"]) - float(
+                    impulso.iloc[fundo]["Low"]
+                )
+                duracao = fundo - topo
+                if candidato_amplitude >= amplitude_minima and duracao >= 2 * raio + 1:
+                    pos_origem, pos_extremo = topo, fundo
+                    break
+            if pos_extremo is None:
+                if encontrou_par or fundos or topos:
+                    return None
+                pos_extremo = int(np.argmin(impulso["Low"].to_numpy()))
+                if pos_extremo == 0:
+                    return None
+                antes_extremo = impulso.iloc[:pos_extremo]
+                pos_origem = int(np.argmax(antes_extremo["High"].to_numpy()))
+            origem = float(impulso.iloc[pos_origem]["High"])
             extremo = float(impulso.iloc[pos_extremo]["Low"])
             amplitude = origem - extremo
-            zona_baixa = extremo + amplitude * c.pullback_fib_min
-            zona_alta = extremo + amplitude * c.pullback_fib_max
+            preco_nivel = lambda nivel: extremo + amplitude * nivel
         else:
             return None
 
-        atr = float(df.iloc[indice_recuo]["ATR"])
         if amplitude <= 0 or atr <= 0 or amplitude < c.pullback_amplitude_min_atr * atr:
             return None
-        return float(zona_baixa), float(zona_alta)
+        return self._finalizar_mapa_fibonacci(
+            impulso, pos_origem, pos_extremo, tendencia, origem, extremo,
+            amplitude, atr, preco_nivel,
+        )
+
+    def _finalizar_mapa_fibonacci(
+        self, impulso: pd.DataFrame, pos_origem: int, pos_extremo: int,
+        tendencia: str, origem: float, extremo: float, amplitude: float,
+        atr: float, preco_nivel,
+    ) -> dict:
+        c = self.config
+        niveis = [
+            {
+                "nivel": nivel,
+                "preco": float(preco_nivel(nivel)),
+                "papel": (
+                    "zona" if nivel in (c.pullback_fib_min, 0.5, c.pullback_fib_max)
+                    else "extremo" if nivel in (0.0, 1.0)
+                    else "secundario"
+                ),
+            }
+            for nivel in (0.0, 0.236, c.pullback_fib_min, 0.5, c.pullback_fib_max, 0.786, 1.0)
+        ]
+        zona_a = float(preco_nivel(c.pullback_fib_min))
+        zona_b = float(preco_nivel(c.pullback_fib_max))
+        return {
+            "tendencia": tendencia,
+            "direcao": "call" if tendencia == "alta" else "put",
+            "origem": origem,
+            "extremo": extremo,
+            "amplitude": amplitude,
+            "amplitude_atr": round(amplitude / atr, 2),
+            "inicio": impulso.index[pos_origem],
+            "fim": impulso.index[pos_extremo],
+            "zona_inf": min(zona_a, zona_b),
+            "zona_sup": max(zona_a, zona_b),
+            "fib786": float(preco_nivel(0.786)),
+            "niveis": niveis,
+        }
+
+    def mapa_fibonacci_atual(self, df: pd.DataFrame, indice: int | None = None) -> dict | None:
+        """Estado visual da retração atual: distância, S/R e confirmação."""
+        if df.empty:
+            return None
+        indice = len(df) - 1 if indice is None else indice
+        if indice < 10 or indice >= len(df):
+            return None
+        vela = df.iloc[indice]
+        tendencia = str(vela.get("TendenciaMacro", "lateral"))
+        mapa = self._mapa_fibonacci_visual(df, indice, tendencia)
+        if mapa is None:
+            return None
+        try:
+            abertura = float(vela["Open"])
+            maxima = float(vela["High"])
+            minima = float(vela["Low"])
+            fechamento = float(vela["Close"])
+            atr = float(vela["ATR"])
+        except (KeyError, TypeError, ValueError):
+            return None
+        tolerancia = self.config.pullback_tolerancia_atr * atr
+        zona_inf, zona_sup = mapa["zona_inf"], mapa["zona_sup"]
+        tocou_zona = minima <= zona_sup + tolerancia and maxima >= zona_inf - tolerancia
+        suportes, resistencias = self._pivos(df, indice)
+        if mapa["direcao"] == "call":
+            nivel_sr = min(suportes, key=lambda p: abs(p - minima), default=None)
+            sr_ok = nivel_sr is not None and abs(nivel_sr - minima) <= tolerancia
+            rejeitou = fechamento > abertura
+            retracao_profunda = fechamento < zona_inf - tolerancia
+            invalidada = fechamento < mapa["fib786"] - tolerancia
+        else:
+            nivel_sr = min(resistencias, key=lambda p: abs(p - maxima), default=None)
+            sr_ok = nivel_sr is not None and abs(nivel_sr - maxima) <= tolerancia
+            rejeitou = fechamento < abertura
+            retracao_profunda = fechamento > zona_sup + tolerancia
+            invalidada = fechamento > mapa["fib786"] + tolerancia
+        distancia = max(zona_inf - fechamento, fechamento - zona_sup, 0.0)
+        confirmado = bool(tocou_zona and sr_ok and rejeitou)
+        if confirmado:
+            estado = "CONFIRMADA — FIBO + S/R + REJEIÇÃO"
+        elif tocou_zona and not sr_ok:
+            estado = "NA ZONA — SEM S/R"
+        elif tocou_zona:
+            estado = "NA ZONA — ESPERAR REJEIÇÃO"
+        elif invalidada:
+            estado = "IMPULSO INVALIDADO"
+        elif retracao_profunda:
+            estado = "RETRAÇÃO PROFUNDA — ESPERAR"
+        else:
+            estado = "AGUARDAR RETRAÇÃO"
+        return {
+            **mapa,
+            "preco_atual": fechamento,
+            "tocou_zona": bool(tocou_zona),
+            "sr_confluente": bool(sr_ok),
+            "nivel_sr": float(nivel_sr) if sr_ok else None,
+            "rejeicao": bool(rejeitou),
+            "confirmado": confirmado,
+            "distancia_zona_atr": round(distancia / atr, 2) if atr > 0 else None,
+            "estado": estado,
+        }
 
     def _contexto_pullback(self, df: pd.DataFrame, indice_recuo: int) -> dict | None:
         obrigatorias = {"Open", "High", "Low", "Close", "RSI", "ATR", "TendenciaMacro"}
@@ -940,6 +1130,7 @@ class EstrategiaReversaoM5:
                 "tendencia": contexto["tendencia"],
                 "fatores": contexto["fatores"],
                 "nivel_sr": contexto["nivel_sr"],
+                "zona_fib": list(contexto["zona_fib"]) if contexto.get("zona_fib") else None,
                 "atr": round(float(vela["ATR"]), 6),
                 "razao": [
                     f"Preço retraiu para zona de confluência: {_fatores_str}",

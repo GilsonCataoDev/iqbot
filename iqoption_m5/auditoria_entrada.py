@@ -79,6 +79,43 @@ def enriquecer_decisao(decisao: Decisao, indicadores: pd.DataFrame) -> Decisao:
         return decisao
 
 
+def qualificar_leitura_m5(decisao: Decisao) -> Decisao:
+    """Marca, sem bloquear, a leitura M5 que será validada em sombra.
+
+    A hipótese veio das operações M5 já encerradas: o fechamento no extremo
+    favorável e ATR em regime normal tiveram resultado melhor que a base.
+    Isto é uma etiqueta de estudo, não uma nova autorização para enviar ordem.
+    """
+    auditoria = decisao.detalhes.get("auditoria") or {}
+    if not auditoria:
+        return decisao
+
+    try:
+        fechamento = float(auditoria.get("fechamento_posicao"))
+        atr_relativo = float(auditoria.get("atr_relativo"))
+    except (TypeError, ValueError):
+        return decisao
+
+    fechou_a_favor = (
+        fechamento >= 0.75 if decisao.direcao == "call" else fechamento <= 0.25
+    )
+    volatilidade_normal = 0.70 < atr_relativo < 1.35
+    criterios = [
+        ("Fechou no extremo favorável" if fechou_a_favor
+         else "Não fechou no extremo favorável"),
+        ("Volatilidade normal" if volatilidade_normal
+         else "Volatilidade fora do normal"),
+    ]
+    detalhes = dict(decisao.detalhes)
+    detalhes["leitura_m5"] = {
+        "modo": "sombra",
+        "qualificada": fechou_a_favor and volatilidade_normal,
+        "criterios": criterios,
+        "observacao": "Filtro em validação: não bloqueia nem cria ordem extra.",
+    }
+    return replace(decisao, detalhes=detalhes)
+
+
 def resumo_contexto(detalhes: dict) -> list[str]:
     """Frases curtas, estritamente derivadas do contexto salvo."""
     auditoria = detalhes.get("auditoria") or {}

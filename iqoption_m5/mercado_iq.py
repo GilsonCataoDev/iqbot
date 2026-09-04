@@ -21,8 +21,22 @@ class MercadoIQ:
         self.config = config
         self._api = None
         self._buffers: dict[str, pd.DataFrame] = {}
+        # Streams adicionais pertencem ao laboratório multi-timeframe. Mantêm
+        # buffers próprios para que M5 e M15 não sobrescrevam um ao outro.
+        self._buffers_extras: dict[tuple[str, int], pd.DataFrame] = {}
+        self._streams_extras: dict[int, int] = {}
+        # Quando o stream WebSocket da IQ congela mas a conexão continua
+        # marcada como aberta, usa get_candles pontualmente para manter a tela
+        # viva. O intervalo evita uma rajada de chamadas para todos os pares.
+        self._ultimo_fallback_stream: dict[tuple[str, int], float] = {}
         self._lock_api = threading.RLock()
+        # Lock separado do _lock_api: a reconexão PRECISA rodar mesmo quando
+        # uma thread está pendurada segurando _lock_api numa chamada morta.
+        self._lock_reconexao = threading.Lock()
         self._lock_buffers = threading.Lock()
+        # Sem este lock os 7 workers veem o cache vencido no mesmo instante e
+        # disparam 7 refreshes simultaneos contra a IQ.
+        self._lock_cache = threading.Lock()
         self._mercado_aberto: dict[str, bool] = {}
         self._payouts: dict[str, float | None] = {}
         self._ids_ativos: dict[str, int] = {}
@@ -113,33 +127,130 @@ class MercadoIQ:
             raise MercadoIndisponivel(f"Sem dados para {ativo} tf={tf}")
         return result[0]
 
+    def _buscar_realtime_com_timeout(
+        self, ativo: str, tf: int, timeout: float = 3.0
+    ) -> dict:
+        """Lê o stream sem deixar a iqoptionapi prender o ciclo do Lab.
+
+        ``get_realtime_candles`` parece local, mas pode ficar bloqueada quando
+        o WebSocket entra em half-open. Sem limite, o primeiro par trava a
+        atualização de todos os gráficos e impede o watchdog de receber
+        progresso. A thread é daemon de propósito: uma chamada velha nunca
+        pode impedir a reconexão para uma API nova.
+        """
+        api = self._api
+        if api is None:
+            raise MercadoIndisponivel("IQ não conectada.")
+        result: list[dict | None] = [None]
+        exc: list[Exception | None] = [None]
+
+        def _run() -> None:
+            try:
+                result[0] = api.get_realtime_candles(ativo, tf)
+            except Exception as erro:
+                exc[0] = erro
+
+        thread = threading.Thread(target=_run, daemon=True)
+        thread.start()
+        thread.join(timeout)
+        if thread.is_alive():
+            raise MercadoIndisponivel(
+                f"Timeout ({timeout:.0f}s) no stream ao vivo de {ativo} tf={tf}"
+            )
+        if exc[0] is not None:
+            raise MercadoIndisponivel(str(exc[0]))
+        if not isinstance(result[0], dict):
+            raise MercadoIndisponivel(f"Stream inválido para {ativo} tf={tf}")
+        return result[0]
+
+    @staticmethod
+    def _somente_fechados(
+        candles: pd.DataFrame, timeframe_segundos: int, timestamp_servidor: float
+    ) -> pd.DataFrame:
+        """Remove o último candle superior enquanto ele ainda estiver formando."""
+        limite = pd.to_datetime(timestamp_servidor, unit="s")
+        fechamentos = candles.index + pd.to_timedelta(timeframe_segundos, unit="s")
+        return candles.loc[fechamentos <= limite]
+
+    def _buscar_contexto_fechado(self, ativo: str, tf: int, n: int) -> pd.DataFrame:
+        # Busca um candle extra porque o mais recente normalmente ainda está aberto.
+        df = self._candles_para_df(self._buscar_com_timeout(ativo, tf, n + 1))
+        agora = float(self._api.get_server_timestamp())
+        return self._somente_fechados(df, tf, agora).tail(n)
+
     def buscar_h4(self, ativo: str, n: int | None = None) -> pd.DataFrame:
         """Busca N candles H4 sem stream (leitura pontual para tendência macro)."""
         n = n if n is not None else self.config.h4_num_candles
-        return self._candles_para_df(self._buscar_com_timeout(ativo, 14400, n))
+        return self._buscar_contexto_fechado(ativo, 14400, n)
 
     def buscar_h1(self, ativo: str, n: int | None = None) -> pd.DataFrame:
         """Busca N candles H1 sem stream (leitura pontual para contexto H1)."""
         n = n if n is not None else self.config.h1_num_candles
-        return self._candles_para_df(self._buscar_com_timeout(ativo, 3600, n))
+        return self._buscar_contexto_fechado(ativo, 3600, n)
 
     def buscar_m5(self, ativo: str, n: int | None = None) -> pd.DataFrame:
         """Busca N candles M5 sem stream (leitura pontual para estrutura M5)."""
         n = n if n is not None else self.config.m5_num_candles
-        return self._candles_para_df(self._buscar_com_timeout(ativo, 300, n))
+        return self._buscar_contexto_fechado(ativo, 300, n)
 
     def buscar_m15(self, ativo: str, n: int | None = None) -> pd.DataFrame:
         """Busca N candles M15 sem stream (leitura pontual para contexto M15)."""
         n = n if n is not None else self.config.m15_num_candles
-        return self._candles_para_df(self._buscar_com_timeout(ativo, 900, n))
+        return self._buscar_contexto_fechado(ativo, 900, n)
 
     def _iniciar_streams(self) -> None:
         for ativo in self.config.ativos:
-            self._api.start_candles_stream(
-                ativo,
-                self.config.timeframe_segundos,
-                self.config.limite_candles,
-            )
+            try:
+                self._api.start_candles_stream(
+                    ativo,
+                    self.config.timeframe_segundos,
+                    self.config.limite_candles,
+                )
+            except Exception as erro:
+                # Um símbolo que a IQ não disponibiliza não pode impedir os
+                # demais pares de iniciar.
+                print(f" [mercado] {ativo}: stream indisponível ({erro})")
+
+    def iniciar_timeframes_extras(self, timeframes: dict[int, int]) -> None:
+        """Ativa streams adicionais em uma única conexão IQ.
+
+        Interface pequena do laboratório: ``{timeframe_em_segundos: candles}``.
+        O stream principal continua intacto para os monitores atuais.
+        """
+        extras = {
+            int(tf): int(limite)
+            for tf, limite in timeframes.items()
+            if int(tf) != self.config.timeframe_segundos
+        }
+        if not extras:
+            return
+        with self._lock_api:
+            if self._api is None:
+                raise MercadoIndisponivel("Conecte antes de iniciar timeframes extras.")
+            self._iniciar_timeframes_extras_sem_lock(extras)
+
+    def _iniciar_timeframes_extras_sem_lock(
+        self, extras: dict[int, int], recarregar_historico: bool = True
+    ) -> None:
+        """Inicia extras sem adquirir ``_lock_api`` novamente.
+
+        A reconexão de emergência pode ocorrer enquanto uma chamada antiga da
+        IQ segura esse lock. Nesse caso, tentar chamar o método público aqui
+        recriaria o deadlock e o gráfico continuaria congelado.
+        """
+        if self._api is None:
+            raise MercadoIndisponivel("Conecte antes de iniciar timeframes extras.")
+        for tf, limite in extras.items():
+            for ativo in self.config.ativos:
+                try:
+                    chave = (ativo, tf)
+                    if recarregar_historico or chave not in self._buffers_extras:
+                        dados = self._buscar_com_timeout(ativo, tf, limite)
+                        self._buffers_extras[chave] = self._candles_para_df(dados)
+                    self._api.start_candles_stream(ativo, tf, limite)
+                except Exception as erro:
+                    print(f" [mercado] {ativo} tf={tf}s: stream indisponível ({erro})")
+        self._streams_extras.update(extras)
 
     def conectar_somente_leitura(self):
         """Conexão crua para ferramentas que apenas leem histórico (backtest)."""
@@ -150,12 +261,60 @@ class MercadoIQ:
         with self._lock_api:
             self._api = self._nova_conexao()
             for ativo in self.config.ativos:
-                self._buffers[ativo] = self._historico(ativo)
+                try:
+                    # get_candles pode ficar pendurado quando um ativo OTC não
+                    # existe na sessão. Limitar e isolar a falha por ativo.
+                    dados = self._buscar_com_timeout(
+                        ativo,
+                        self.config.timeframe_segundos,
+                        self.config.limite_candles,
+                    )
+                    self._buffers[ativo] = self._candles_para_df(dados)
+                except Exception as erro:
+                    print(f" [mercado] {ativo}: histórico indisponível ({erro})")
             self._iniciar_streams()
             self._atualizar_cache_forcado()
 
-    def _obter_abertura_turbo(self) -> dict[str, bool]:
+    @staticmethod
+    def _payout_de(detalhe: dict) -> float | None:
+        """Payout a partir de option.profit.commission, mesma conta que a lib faz."""
+        opcao = detalhe.get("option")
+        if not isinstance(opcao, dict):
+            return None
+        lucro = opcao.get("profit")
+        if not isinstance(lucro, dict):
+            return None
+        comissao = lucro.get("commission")
+        if not isinstance(comissao, (int, float)):
+            return None
+        return (100.0 - float(comissao)) / 100.0
+
+    @staticmethod
+    def _nome_e_otc(detalhe: dict) -> tuple[str, str, bool]:
+        """(nome_bruto, nome_do_ativo, é_otc) a partir do 'name' da resposta.
+
+        A IQ distingue os mercados assim: GBPUSD-OTC = sintético OTC;
+        GBPUSD-op = mercado normal. Tratar "-op" como OTC troca o instrumento
+        no buyv3.
+        """
+        nome = str(detalhe.get("name", "")).split(".", 1)[-1].upper()
+        if nome.endswith("-OTC"):
+            return nome, nome, True
+        if nome.endswith("-OP"):
+            return nome, nome[: -len("-OP")], False
+        return nome, nome, False
+
+    def _obter_estado_mercado(self) -> tuple[dict[str, bool], dict[str, float | None]]:
+        """Abertura e payout dos ativos, de uma única resposta get_all_init_v2.
+
+        O get_all_profit() da lib usa o endpoint v1 (get_all_init), que a IQ
+        parou de responder: ele fica em busy-wait de 30s e retenta pra sempre,
+        sem NUNCA levantar exceção — travava a thread e enchia o log de
+        "get_all_init late 30 sec". O v2 traz o mesmo option.profit.commission,
+        então o payout sai daqui e o v1 não é mais tocado.
+        """
         abertos = {ativo: False for ativo in self.config.ativos}
+        payouts: dict[str, float | None] = {a: None for a in self.config.ativos}
         try:
             dados = self._api.get_all_init_v2()
             if not isinstance(dados, dict):
@@ -163,35 +322,39 @@ class MercadoIQ:
                 dados = {}
             # Busca em turbo e binary (OTC aparece em qualquer uma dependendo da hora)
             secoes = {}
+            # Payout fica separado por seção: turbo é a preferência, binary o fallback.
+            payout_secao: dict[str, dict[str, float]] = {"turbo": {}, "binary": {}}
             for secao in ("turbo", "binary"):
                 parte = dados.get(secao, {}).get("actives", {})
-                if isinstance(parte, dict):
-                    secoes.update(parte)
+                if not isinstance(parte, dict):
+                    continue
+                secoes.update(parte)
+                for detalhe in parte.values():
+                    if not isinstance(detalhe, dict):
+                        continue
+                    _, ativo_nome, _ = self._nome_e_otc(detalhe)
+                    valor = self._payout_de(detalhe)
+                    if valor is not None:
+                        payout_secao[secao][ativo_nome] = valor
             if not secoes:
                 print(f" [mercado] get_all_init_v2 sem actives. Mantendo estados anteriores.")
                 # Resposta vazia — não resetar pares normais para fechado
                 for ativo in self.config.ativos:
                     abertos[ativo] = self._mercado_aberto.get(ativo, ativo.upper().endswith("-OTC"))
-                return abertos
+                    payouts[ativo] = self._payouts.get(ativo)
+                return abertos, payouts
+            for ativo in self.config.ativos:
+                valor = payout_secao["turbo"].get(ativo)
+                if valor is None:
+                    valor = payout_secao["binary"].get(ativo)
+                payouts[ativo] = valor
             nomes_vistos = []
             resolvidos = set()
             for chave, detalhe in secoes.items():
                 if not isinstance(detalhe, dict):
                     continue
-                nome = str(detalhe.get("name", "")).split(".", 1)[-1].upper()
+                nome, candidato, is_otc_entry = self._nome_e_otc(detalhe)
                 nomes_vistos.append(nome)
-                # A resposta atual da IQ distingue os mercados assim:
-                # GBPUSD-OTC = sintético OTC; GBPUSD-op = mercado normal.
-                # Tratar "-op" como OTC troca o instrumento no buyv3.
-                if nome.endswith("-OTC"):
-                    candidato = nome
-                    is_otc_entry = True
-                elif nome.endswith("-OP"):
-                    candidato = nome[: -len("-OP")]
-                    is_otc_entry = False
-                else:
-                    candidato = nome
-                    is_otc_entry = False
                 enabled = bool(detalhe.get("enabled", False))
                 # OTC: is_suspended é frequentemente incorreto — a IQ marca suspended
                 # quando o mercado regular equivalente está aberto, mas o OTC pode
@@ -223,48 +386,25 @@ class MercadoIQ:
                     print(f" [mercado] nomes parecidos com '{ativo_faltante}': {parecidos or 'NENHUM'}")
         except Exception as erro:
             print(f" [mercado] falha ao consultar abertura turbo, marcando tudo como fechado: {erro!r}")
-        return abertos
+        return abertos, payouts
 
     def _atualizar_cache_forcado(self) -> None:
-        novos_abertos = self._obter_abertura_turbo()
-        try:
-            lucros = self._api.get_all_profit()
-        except Exception as erro:
-            print(f" [mercado] falha ao consultar payout (get_all_profit): {erro!r}")
-            lucros = {}
-        novos_payouts = {}
-        faltando_payout = []
-        for ativo in self.config.ativos:
-            # Para OTC (ex: "EURUSD-OTC") a API retorna a chave como "EURUSD-op".
-            # Tentamos: nome-exato → base+"-op" → base → nome+"-op" → variantes lowercase.
-            base = ativo[:-4] if ativo.upper().endswith("-OTC") else ativo
-            entrada = None
-            for chave in (ativo, f"{base}-op", base, f"{ativo}-op",
-                          ativo.lower(), f"{base.lower()}-op", base.lower()):
-                candidato = lucros.get(chave)
-                if isinstance(candidato, dict):
-                    entrada = candidato
-                    break
-            # Tenta "turbo" primeiro (opção de 5 min); fallback para "binary"
-            if isinstance(entrada, dict):
-                valor = entrada.get("turbo") if entrada.get("turbo") is not None else entrada.get("binary")
-            else:
-                valor = None
-            novos_payouts[ativo] = float(valor) if isinstance(valor, (int, float)) else None
-            if novos_payouts[ativo] is None:
-                faltando_payout.append(ativo)
-        if faltando_payout and lucros:
+        novos_abertos, novos_payouts = self._obter_estado_mercado()
+        faltando_payout = [a for a, v in novos_payouts.items() if v is None]
+        if faltando_payout:
             print(f" [mercado] payout indisponivel pra: {faltando_payout}")
-            for ativo_faltante in faltando_payout:
-                busca = ativo_faltante.split("-")[0].lower()
-                parecidos = [k for k in lucros.keys() if busca in k.lower()]
-                print(f" [mercado] chaves de payout parecidas com '{ativo_faltante}': {parecidos or 'NENHUM'}")
         self._mercado_aberto = novos_abertos
         self._payouts = novos_payouts
         self._cache_atualizado = time.time()
 
     def _atualizar_cache_se_preciso(self) -> None:
-        if time.time() - self._cache_atualizado >= self.config.cache_mercado_segundos:
+        if time.time() - self._cache_atualizado < self.config.cache_mercado_segundos:
+            return
+        # Double-checked: sem o lock, os 7 workers passam pela checagem acima no
+        # mesmo instante e disparam 7 refreshes simultaneos contra a IQ.
+        with self._lock_cache:
+            if time.time() - self._cache_atualizado < self.config.cache_mercado_segundos:
+                return
             self._atualizar_cache_forcado()
 
     def _reconectar(self) -> None:
@@ -272,6 +412,18 @@ class MercadoIQ:
         api_antiga = self._api
         self._api = api_nova
         self._iniciar_streams()
+        if self._streams_extras:
+            # Reabre os dois streams sem criar uma segunda sessão IQ.
+            extras = dict(self._streams_extras)
+            self._streams_extras.clear()
+            # Não use o método público: a reconexão pode estar acontecendo
+            # justamente porque outra thread travou segurando _lock_api.
+            # Os buffers anteriores continuam válidos. Baixar novamente o
+            # histórico de cada ativo aqui podia segurar o lock por minutos e
+            # impedir a primeira atualização do Lab após o watchdog.
+            self._iniciar_timeframes_extras_sem_lock(
+                extras, recarregar_historico=False
+            )
         self._cache_atualizado = 0.0
         try:
             if api_antiga:
@@ -286,7 +438,7 @@ class MercadoIQ:
         self._atualizar_cache_se_preciso()
 
         with self._lock_api:
-            bruto = self._api.get_realtime_candles(ativo, self.config.timeframe_segundos)
+            bruto = self._buscar_realtime_com_timeout(ativo, self.config.timeframe_segundos)
             timestamp_servidor = int(self._api.get_server_timestamp())
 
         linhas = [
@@ -300,6 +452,12 @@ class MercadoIQ:
             }
             for ts, candle in bruto.items()
         ]
+        tf = self.config.timeframe_segundos
+        ultimo_stream = max((int(item["from"]) for item in linhas), default=0)
+        stream_atrasado = (
+            self._mercado_aberto.get(ativo, False)
+            and (not ultimo_stream or timestamp_servidor - ultimo_stream > tf * 2)
+        )
 
         with self._lock_buffers:
             if linhas:
@@ -311,10 +469,34 @@ class MercadoIQ:
                 raise MercadoIndisponivel(f"Sem candles suficientes para {ativo}.")
             buffer_local = self._buffers[ativo].copy()
 
+        if stream_atrasado:
+            chave_fallback = (ativo, tf)
+            agora_monotonico = time.monotonic()
+            fallbacks = getattr(self, "_ultimo_fallback_stream", {})
+            self._ultimo_fallback_stream = fallbacks
+            ult_fallback = fallbacks.get(chave_fallback, float("-inf"))
+            if agora_monotonico - ult_fallback >= 5.0:
+                # O stream não avançou; get_candles costuma continuar
+                # respondendo. Atualiza no máximo uma vez a cada 5s por ativo.
+                fallbacks[chave_fallback] = agora_monotonico
+                try:
+                    direto = self._candles_para_df(
+                        self._buscar_com_timeout(ativo, tf, self.config.limite_candles)
+                    )
+                    with self._lock_buffers:
+                        combinado = pd.concat([self._buffers[ativo], direto])
+                        combinado = combinado[~combinado.index.duplicated(keep="last")]
+                        self._buffers[ativo] = combinado.sort_index().tail(self.config.limite_candles)
+                        buffer_local = self._buffers[ativo].copy()
+                except Exception as erro:
+                    # A mensagem de atraso abaixo preserva a causa operacional
+                    # sem encerrar todo o laboratório por uma leitura ruim.
+                    print(f" [mercado] {ativo}: stream atrasado; fallback falhou ({erro})")
+
         if self._mercado_aberto.get(ativo, False):
             ultimo = pd.Timestamp(buffer_local.index[-1])
             ultimo_epoch = int(ultimo.tz_localize("UTC").timestamp()) if ultimo.tzinfo is None else int(ultimo.timestamp())
-            if timestamp_servidor - ultimo_epoch > self.config.timeframe_segundos * 2:
+            if timestamp_servidor - ultimo_epoch > tf * 2:
                 raise MercadoIndisponivel(f"Stream de {ativo} está atrasado.")
 
         return SnapshotMercado(
@@ -331,23 +513,150 @@ class MercadoIQ:
         except Exception as erro:
             raise MercadoIndisponivel(f"Falha ao ler snapshot de {ativo}: {erro}") from erro
 
+    def snapshot_timeframe(self, ativo: str, timeframe_segundos: int) -> SnapshotMercado:
+        """Snapshot ao vivo de um stream extra, na mesma conexão IQ.
+
+        O chamador deve ativar o timeframe antes por ``iniciar_timeframes_extras``.
+        """
+        tf = int(timeframe_segundos)
+        if tf == self.config.timeframe_segundos:
+            return self.snapshot(ativo)
+        if ativo not in self.config.ativos:
+            raise ValueError(f"Ativo fora da configuração: {ativo}")
+        limite = self._streams_extras.get(tf)
+        if limite is None:
+            raise MercadoIndisponivel(f"Stream tf={tf}s não foi iniciado.")
+        self._atualizar_cache_se_preciso()
+        try:
+            with self._lock_api:
+                bruto = self._buscar_realtime_com_timeout(ativo, tf)
+                timestamp_servidor = int(self._api.get_server_timestamp())
+            linhas = [
+                {
+                    "from": ts,
+                    "open": candle["open"],
+                    "close": candle["close"],
+                    "min": candle["min"],
+                    "max": candle["max"],
+                    "volume": candle.get("volume", 0),
+                }
+                for ts, candle in bruto.items()
+            ]
+            chave = (ativo, tf)
+            with self._lock_buffers:
+                if linhas:
+                    recentes = self._candles_para_df(linhas)
+                    anterior = self._buffers_extras.get(chave)
+                    combinado = pd.concat([anterior, recentes]) if anterior is not None else recentes
+                    combinado = combinado[~combinado.index.duplicated(keep="last")]
+                    self._buffers_extras[chave] = combinado.sort_index().tail(limite)
+                buffer = self._buffers_extras.get(chave)
+                if buffer is None or len(buffer) < 3:
+                    raise MercadoIndisponivel(f"Sem candles suficientes tf={tf}s para {ativo}.")
+                buffer_local = buffer.copy()
+            if self._mercado_aberto.get(ativo, False):
+                ultimo = pd.Timestamp(buffer_local.index[-1])
+                ultimo_epoch = int(ultimo.tz_localize("UTC").timestamp()) if ultimo.tzinfo is None else int(ultimo.timestamp())
+                if timestamp_servidor - ultimo_epoch > tf * 2:
+                    raise MercadoIndisponivel(f"Stream tf={tf}s de {ativo} está atrasado.")
+            return SnapshotMercado(
+                ativo=ativo,
+                candles=buffer_local,
+                payout=self._payouts.get(ativo),
+                mercado_aberto=self._mercado_aberto.get(ativo, False),
+                timestamp_servidor=timestamp_servidor,
+            )
+        except Exception as erro:
+            raise MercadoIndisponivel(
+                f"Falha ao ler snapshot tf={tf}s de {ativo}: {erro}"
+            ) from erro
+
     def timestamp_servidor(self) -> float:
         """Lê o relógio atual da IQ no último instante antes de uma ordem."""
         with self._lock_api:
             return float(self._api.get_server_timestamp())
 
-    def reconectar_se_necessario(self) -> bool:
-        """Tenta reconectar se a conexão parece morta. Thread-safe."""
-        with self._lock_api:
-            try:
-                self._api.get_server_timestamp()
-                return True
-            except Exception:
+    # Tolerância de atraso do timestamp do servidor antes de considerar o
+    # socket morto. O timesync chega a cada poucos segundos; 90s é folgado.
+    _MAX_ATRASO_TIMESTAMP = 90.0
+
+    def conexao_viva(self) -> bool:  # NÃO pega _lock_api: ver reconectar_se_necessario
+        """Liveness real do WebSocket.
+
+        NÃO usar get_server_timestamp() sozinho como sonda: é uma property que
+        devolve o último valor recebido em cache e NUNCA levanta exceção com o
+        socket morto (iqoptionapi/stable_api.py: `return
+        self.api.timesync.server_timestamp`). Foi exatamente isso que deixou o
+        bot 25min travado em 2026-08-27 — a sonda respondia "vivo" a cada 60s
+        enquanto o socket estava fechado desde as 10:31, então _reconectar()
+        nunca era chamado e o watchdog só imprimia alerta.
+
+        Duas checagens complementares:
+        - check_connect(): lê o flag que o handler de on_close zera. Pega
+          desconexão limpa.
+        - frescura do timestamp: pega o caso do socket tecnicamente aberto mas
+          sem tráfego (half-open), em que check_connect ainda diz True.
+        """
+        try:
+            if not self._api.check_connect():
+                return False
+        except Exception:
+            return False
+        try:
+            ts = float(self._api.get_server_timestamp())
+        except Exception:
+            return False
+        if ts <= 0:
+            return False
+        return abs(time.time() - ts) <= self._MAX_ATRASO_TIMESTAMP
+
+    # Quanto esperar pelo _lock_api antes de concluir que alguém travou com ele.
+    _TIMEOUT_LOCK_RECONEXAO = 5.0
+
+    def reconectar_se_necessario(self, forcar: bool = False) -> bool:
+        """Reconecta se a conexão estiver morta. Thread-safe.
+
+        forcar=True pula a sonda — usado pelo watchdog, que já provou que o
+        loop parou de progredir.
+
+        POR QUE NÃO USA `with self._lock_api`: quando o WebSocket morre, a
+        thread do loop principal fica pendurada dentro de uma chamada da
+        iqoptionapi SEGURANDO o _lock_api (ex.: get_realtime_candles em
+        _snapshot_uma_vez). Se a reconexão também esperasse esse lock, ela
+        nunca rodaria — deadlock. Foi o que aconteceu em 2026-08-27 11:18:
+        o socket caiu, a thread de reconexão de 60s ficou bloqueada no lock e
+        o bot congelou de vez.
+
+        Estratégia: tenta pegar o lock por alguns segundos. Se conseguir,
+        reconecta pelo caminho normal. Se NÃO conseguir, isso por si só prova
+        que alguém travou com ele — então reconecta assim mesmo, protegido por
+        um lock próprio. É seguro porque _reconectar() constrói um objeto de
+        API novo e só troca a referência: a thread pendurada continua com o
+        objeto velho (já inútil) e morre sozinha quando/se destravar.
+        """
+        if not forcar and self.conexao_viva():
+            return True
+
+        motivo = "forçada pelo watchdog" if forcar else "sonda detectou socket morto"
+        tem_lock = self._lock_api.acquire(timeout=self._TIMEOUT_LOCK_RECONEXAO)
+        if not tem_lock:
+            motivo += "; _lock_api preso (thread travada) — reconectando por fora"
+        try:
+            with self._lock_reconexao:
+                # Outra thread pode ter reconectado enquanto esperávamos.
+                if not forcar and self.conexao_viva():
+                    return True
+                print(f"[CONEXAO] Reconectando ({motivo})...")
                 try:
                     self._reconectar()
+                    print("[CONEXAO] Reconexão concluída.")
                     return True
-                except Exception:
+                except Exception as e:
+                    print(f"[CONEXAO] Reconexão FALHOU: {e!r}")
                     return False
+        finally:
+            if tem_lock:
+                self._lock_api.release()
 
     def comprar(self, valor: float, ativo: str, direcao: str, expiracao_minutos: int) -> tuple[bool, object]:
         """Tenta comprar com retry e logging detalhado de diagnóstico."""
@@ -437,7 +746,7 @@ class MercadoIQ:
         # ainda pode reverter nos segundos finais do candle.
         espera_inicial = minutos * 60 + 5
         time.sleep(espera_inicial)
-        limite = time.monotonic() + 120
+        limite = time.monotonic() + 600
         while time.monotonic() < limite:
             resultado = self.consultar_resultado(id_ordem, timeout_segundos=6.0)
             if resultado is not None:
@@ -501,7 +810,20 @@ class MercadoIQ:
                 dados.get("option_id"),
             )
             ids_compostos = dados.get("order_ids", [])
-            bate_id = any(str(valor) == id_ordem for valor in identificadores if valor is not None) or (
+            # A IQ devolve `id` como lista em closed_options (mesmo quando há
+            # uma única operação). Tratar a lista como IDs compostos; caso
+            # contrário resultados reais ficam para sempre como "aberta".
+            ids_listados = [
+                item
+                for valor in identificadores
+                if isinstance(valor, (list, tuple, set))
+                for item in valor
+            ]
+            bate_id = any(
+                str(valor) == id_ordem
+                for valor in identificadores
+                if valor is not None and not isinstance(valor, (list, tuple, set))
+            ) or any(str(valor) == id_ordem for valor in ids_listados) or (
                 isinstance(ids_compostos, list)
                 and any(str(valor) == id_ordem for valor in ids_compostos)
             )
@@ -560,3 +882,8 @@ class MercadoIQ:
                     self._api.stop_candles_stream(ativo, self.config.timeframe_segundos)
                 except Exception:
                     pass
+                for tf in self._streams_extras:
+                    try:
+                        self._api.stop_candles_stream(ativo, tf)
+                    except Exception:
+                        pass

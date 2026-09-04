@@ -38,7 +38,9 @@ class ExecutorSeguro:
         self._lock = threading.Lock()
         self._suspenso_ate: dict[str, float] = {}  # ativo → timestamp até quando está suspenso
 
-    def _validar_instante_envio(self) -> tuple[bool, str, float | None]:
+    def _validar_instante_envio(
+        self, decisao: Decisao | None = None
+    ) -> tuple[bool, str, float | None]:
         """Valida o relógio atual da IQ, sem reutilizar o snapshot antigo."""
         try:
             timestamp = float(self.mercado.timestamp_servidor())
@@ -47,7 +49,14 @@ class ExecutorSeguro:
             return False, "relogio_servidor_indisponivel_pre_envio", None
 
         segundo = timestamp % self.config.timeframe_segundos
-        if segundo >= self.config.entrada_max_segundos_no_candle:
+        setup = decisao.detalhes.get("setup", decisao.motivo) if decisao else ""
+        janela_setup = (
+            self.config.janela_entrada_por_setup.get(setup)
+            if self.config.janela_entrada_por_setup else None
+        )
+        limite = janela_setup if janela_setup is not None else self.config.entrada_max_segundos_no_candle
+        entrada_atrasada = segundo > limite if janela_setup is not None else segundo >= limite
+        if entrada_atrasada:
             return False, "entrada_atrasada_pre_envio", segundo
         return True, "ok", segundo
 
@@ -76,11 +85,11 @@ class ExecutorSeguro:
                 return None
             return lucro
         texto = str(resultado).strip().lower()
-        if texto in {"win", "won"}:
+        if texto in {"win", "won", "win_estimado_por_candle"}:
             return payout * valor
-        if texto in {"loss", "loose"}:
+        if texto in {"loss", "loose", "loss_estimado_por_candle"}:
             return -valor
-        if texto in {"equal", "draw"}:
+        if texto in {"equal", "draw", "equal_estimado_por_candle"}:
             return 0.0
         return None
 
@@ -94,7 +103,7 @@ class ExecutorSeguro:
         if time.time() < _suspenso_ate:
             return False  # silencioso — não gera log de falha
 
-        no_prazo, motivo_tempo, segundo = self._validar_instante_envio()
+        no_prazo, motivo_tempo, segundo = self._validar_instante_envio(decisao)
         if not no_prazo:
             self._registrar_bloqueio_tempo(decisao, motivo_tempo, segundo)
             return False
@@ -118,21 +127,38 @@ class ExecutorSeguro:
     def _expiracao_dinamica(self, snapshot: SnapshotMercado, decisao: Decisao | None = None) -> int:
         """Minutos de expiração para a ordem.
 
-        Se `expiracao_por_setup` estiver configurado e o setup da decisão estiver na tabela,
-        usa o valor fixo do setup (ex: pullback=30min, sr_rejeicao=15min).
-        Caso contrário, calcula dinamicamente com base no fechamento do candle atual.
+        `expiracao_por_setup` com valor > 0 fixa os minutos (ex: sr_rejeicao=15).
+
+        Valor **0 = FIM DA VELA ATUAL**: a opção expira no fechamento do candle
+        em que a entrada aconteceu. É o que a entrada intravela precisa — entrar
+        no meio do movimento e sair quando a vela fecha. Com minutos fixos isso
+        não acontece: a IQ escolhe o vencimento mais PRÓXIMO do alvo entre os
+        marcos :00/:15/:30/:45, então uma entrada aos 9min de um M15 pedindo
+        30min expira 3 velas depois (medido: 14:09 -> 14:45). Pedindo 15min
+        ainda quebra, porque aos 9min o marco da própria vela (5.9min) fica mais
+        longe do alvo que o marco seguinte (20.9min) e a IQ pula pro seguinte.
+
+        Sem entrada na tabela, usa o mesmo cálculo dinâmico limitado por
+        `expiracao_minutos`.
         """
+        fim_da_vela = False
         if decisao is not None and self.config.expiracao_por_setup:
             setup = decisao.detalhes.get("setup", "")
             override = self.config.expiracao_por_setup.get(setup)
             if override is not None:
-                return int(override)
+                if int(override) > 0:
+                    return int(override)
+                fim_da_vela = True
         tf = self.config.timeframe_segundos
         segundo_atual = snapshot.timestamp_servidor % tf
         restante = tf - segundo_atual
         if restante < 60:
             restante += tf
         minutos = math.ceil(restante / 60)
+        if fim_da_vela:
+            # Sem o teto de expiracao_minutos: o alvo aqui é o fechamento da
+            # vela, que por construção já cabe em um timeframe.
+            return max(1, minutos)
         return max(1, min(minutos, self.config.expiracao_minutos))
 
     def _multiplicador_setup(self, decisao: Decisao) -> float:
@@ -172,7 +198,7 @@ class ExecutorSeguro:
 
         # A thread pode começar depois da janela mesmo que a reserva tenha sido
         # feita a tempo. Revalida no último ponto antes de chamar a compra.
-        no_prazo, motivo_tempo, segundo = self._validar_instante_envio()
+        no_prazo, motivo_tempo, segundo = self._validar_instante_envio(decisao)
         if not no_prazo:
             self.risco.cancelar_reserva(decisao.ativo)
             self._registrar_bloqueio_tempo(decisao, motivo_tempo, segundo)
@@ -190,7 +216,7 @@ class ExecutorSeguro:
             # feed da IQ (não é suspensão real) — 1 retry rápido recupera o sinal
             # em vez de perder o candle inteiro.
             if not enviada and "not available" in str(id_ordem).lower():
-                no_prazo_retry, _, _ = self._validar_instante_envio()
+                no_prazo_retry, _, _ = self._validar_instante_envio(decisao)
                 if no_prazo_retry:
                     time.sleep(1.5)
                     print(f"    [retry] {decisao.ativo}: ativo indisponível, tentando de novo...")
@@ -219,7 +245,11 @@ class ExecutorSeguro:
             self.registro.registrar_falha(decisao, f"buy_recusado:{id_ordem}", valor=valor)
             return
 
-        self.registro.registrar_abertura(id_ordem, decisao, valor, payout, enviada_em)
+        self.registro.registrar_abertura(
+            id_ordem, decisao, valor, payout, enviada_em,
+            timeframe=self.config.timeframe_segundos,
+            expiracao_minutos=expiracao,
+        )
         # Slippage: candle aberto no momento da execução vs preço do sinal
         try:
             preco_execucao = snapshot.candles.iloc[-1]["Open"]
