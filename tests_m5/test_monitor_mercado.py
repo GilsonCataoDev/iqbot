@@ -3,12 +3,13 @@ from pathlib import Path
 
 import numpy as np
 import pandas as pd
+import pytest
 
 import monitor_mercado
 from monitor_mercado import (
     ATIVOS, CLASSE, Estado, adquirir_trava_monitor, decisao_entrada, janela_validada_para,
     leitura_fluxo_sessao, plano_fibo, plano_orb_sessao,
-    plano_varredura_liquidez, unidade_movimento,
+    plano_varredura_liquidez, unidade_movimento, wilson_ci,
 )
 
 
@@ -462,3 +463,147 @@ def test_orb_nao_inventa_abertura_para_cripto_24h():
 
     assert not orb["disponivel"]
     assert "24/7" in orb["motivo"]
+
+
+# ── Wilson CI ──────────────────────────────────────────────────────────────
+
+def test_wilson_ci_retorna_none_para_n_zero():
+    assert wilson_ci(0, 0) is None
+
+
+def test_wilson_ci_50pct_amostra_pequena_tem_intervalo_amplo():
+    lo, hi = wilson_ci(5, 10)
+    assert lo < 50.0 < hi
+    assert hi - lo > 30
+
+
+def test_wilson_ci_limite_fisico_nunca_extrapola_0_100():
+    lo, hi = wilson_ci(0, 1)
+    assert lo >= 0.0
+    hi2, lo2 = wilson_ci(1, 1)
+    assert hi2 <= 100.0
+
+
+def test_wilson_ci_amostra_grande_estreita_intervalo():
+    # WR 50% com n=2000: IC esperado ≈ [47.8, 52.2] → largura ≈ 4.4%
+    lo, hi = wilson_ci(1000, 2000)
+    assert hi - lo < 5
+
+
+def test_wilson_ci_coincide_aproximadamente_com_referencia_conhecida():
+    # 55 wins em 100: referência teórica ≈ [44.9, 64.7]
+    lo, hi = wilson_ci(55, 100)
+    assert 44.0 <= lo <= 46.0
+    assert 64.0 <= hi <= 66.0
+
+
+# ── _resumo_simulacoes com IC e maturidade ─────────────────────────────────
+
+def _itens_simulados(n_win: int, n_loss: int) -> list[dict]:
+    itens = []
+    for _ in range(n_win):
+        itens.append({"simulacao": {"desfecho": "win_tp1", "resultado_r": 2.5}})
+    for _ in range(n_loss):
+        itens.append({"simulacao": {"desfecho": "loss_sl", "resultado_r": -1.0}})
+    return itens
+
+
+def test_resumo_inclui_ic95_e_maturidade():
+    # 14 resolvidos: abaixo do limiar de 30 → INSUFICIENTE
+    itens = _itens_simulados(10, 4)
+    r = Estado._resumo_simulacoes(itens)
+
+    assert r["winrate"] == pytest.approx(71.4, abs=0.1)
+    assert r["ic_95"] is not None
+    lo, hi = r["ic_95"]
+    assert lo < 71.4 < hi
+    assert r["maturidade"] == "INSUFICIENTE"
+    assert r["amostra_suficiente"] is False
+
+
+def test_resumo_maturidade_observar_com_30_a_99_resolvidos():
+    itens = _itens_simulados(18, 17)  # 35 resolvidos
+    r = Estado._resumo_simulacoes(itens)
+
+    assert r["maturidade"] == "OBSERVAR"
+    assert r["amostra_suficiente"] is True
+
+
+def test_resumo_maturidade_candidata_com_100_a_299():
+    itens = _itens_simulados(80, 70)  # 150 resolvidos
+    r = Estado._resumo_simulacoes(itens)
+
+    assert r["maturidade"] == "CANDIDATA"
+
+
+def test_resumo_maturidade_aprovada_com_300_ou_mais():
+    itens = _itens_simulados(200, 150)  # 350 resolvidos
+    r = Estado._resumo_simulacoes(itens)
+
+    assert r["maturidade"] == "APROVADA"
+
+
+def test_resumo_sem_resolvidos_ic_none_e_insuficiente():
+    itens = [{"simulacao": {"desfecho": "aguardando"}}] * 5
+    r = Estado._resumo_simulacoes(itens)
+
+    assert r["ic_95"] is None
+    assert r["maturidade"] == "INSUFICIENTE"
+    assert r["amostra_suficiente"] is False
+    assert r["winrate"] is None
+
+
+def test_resumo_nao_inverte_resultado_desconhecido_em_loss():
+    itens = [{"simulacao": {"desfecho": "aguardando"}}]
+    r = Estado._resumo_simulacoes(itens)
+
+    assert r["losses"] == 0
+    assert r["wins"] == 0
+
+
+# ── HTML do Monitor ────────────────────────────────────────────────────────
+
+def test_html_tem_cartao_decisao_principal():
+    assert 'id="decisao-principal"' in monitor_mercado._HTML
+    assert "renderDecisaoPrincipal" in monitor_mercado._HTML
+
+
+def test_html_tem_entrada_sl_tp_na_tabela_de_historico():
+    assert "entrada · SL · TP" in monitor_mercado._HTML
+    assert "hist-alvos" in monitor_mercado._HTML
+
+
+def test_html_mostra_ic_e_maturidade_nos_estudos():
+    assert "maturidadeBadge" in monitor_mercado._HTML
+    assert "ic_95" in monitor_mercado._HTML
+    assert "AMOSTRA INSUFICIENTE" in monitor_mercado._HTML
+
+
+def test_html_dossie_exibe_plano_completo():
+    assert "PLANO (estudo" in monitor_mercado._HTML
+    assert "Invalidação / SL" in monitor_mercado._HTML or "Invalidação" in monitor_mercado._HTML
+    assert "textoSimulacao(h.simulacao)" in monitor_mercado._HTML
+
+
+def test_estado_publica_campos_ic_e_maturidade_no_json(tmp_path):
+    estado = Estado(
+        tmp_path / "web", arquivo_aprendizado=tmp_path / "sinais.json",
+        banco_aprendizado=tmp_path / "monitor.sqlite3",
+    )
+    for i in range(15):
+        desfecho = "win_tp1" if i < 9 else "loss_sl"
+        estado._aprendizado.append({
+            "id": f"fibo:EURUSD:{i}", "quando": "2026-09-04T12:00:00+00:00",
+            "ativo": "EURUSD", "tipo": "fibo_m15", "entrada_valida": False,
+            "simulacao": {"desfecho": desfecho, "resultado_r": 2.5 if desfecho == "win_tp1" else -1.0},
+        })
+    estado.salvar()
+
+    payload = json.loads((tmp_path / "web" / "mercado.json").read_text(encoding="utf-8"))
+    fibo = payload["amostraFibo"]
+
+    assert "maturidade" in fibo
+    assert fibo["maturidade"] == "INSUFICIENTE"
+    assert "amostra_suficiente" in fibo
+    assert fibo["amostra_suficiente"] is False
+    assert "ic_95" in fibo

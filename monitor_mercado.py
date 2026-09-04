@@ -384,6 +384,22 @@ def plano_varredura_liquidez(df: pd.DataFrame, atr: pd.Series, ativo: str,
     }
 
 
+def wilson_ci(wins: int, n: int, z: float = 1.96) -> tuple[float, float] | None:
+    """Wilson score interval [lower%, upper%] para uma proporção wins/n.
+
+    Retorna None quando n == 0.  Prefira esse intervalo ao de Wald porque ele
+    permanece dentro de [0, 100] mesmo com amostras muito pequenas ou WR perto
+    de 0%/100%.
+    """
+    if n <= 0:
+        return None
+    p = wins / n
+    denom = 1.0 + z * z / n
+    center = (p + z * z / (2 * n)) / denom
+    margin = z * (p * (1.0 - p) / n + z * z / (4.0 * n * n)) ** 0.5 / denom
+    return (round((center - margin) * 100, 1), round((center + margin) * 100, 1))
+
+
 def contexto_noticia(calendario: CalendarioEconomico | None, ativo: str,
                       agora: datetime) -> dict:
     """Salva um fato do calendário; nunca deriva direção sem dado publicado."""
@@ -1154,6 +1170,19 @@ class Estado:
             for h in itens
             if (h.get("simulacao") or {}).get("resultado_r") is not None
         ]
+        ic = wilson_ci(wins, resolvidos)
+        # Maturidade segue o mesmo critério do plano: nunca promover por
+        # amostra pequena. Menos de 30 resolvidos não sustenta nenhuma conclusão.
+        if resolvidos <= 0:
+            maturidade = "INSUFICIENTE"
+        elif resolvidos < 30:
+            maturidade = "INSUFICIENTE"
+        elif resolvidos < 100:
+            maturidade = "OBSERVAR"
+        elif resolvidos < 300:
+            maturidade = "CANDIDATA"
+        else:
+            maturidade = "APROVADA"
         return {
             "sinais": len(itens), "wins": wins, "losses": losses,
             "expirados": desfechos.count("expirado_6h"),
@@ -1161,6 +1190,9 @@ class Estado:
             "ambiguos": sum(d.startswith("ambíguo") for d in desfechos),
             "nao_executadas": desfechos.count("nao_executada_6h"),
             "winrate": round(wins * 100 / resolvidos, 1) if resolvidos else None,
+            "ic_95": list(ic) if ic else None,
+            "amostra_suficiente": resolvidos >= 30,
+            "maturidade": maturidade,
             "avaliados_r": len(resultados_r),
             "saldo_r": round(sum(resultados_r), 3) if resultados_r else None,
             "media_r": round(sum(resultados_r) / len(resultados_r), 3) if resultados_r else None,
@@ -1566,6 +1598,30 @@ tr:hover{background:#16203450;cursor:pointer}
 .saude-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:.45rem}
 .saude-item{background:#101a2c;border:1px solid #26364e;border-radius:.35rem;padding:.55rem}
 .saude-item label{display:block;color:#64748b;font-size:.64rem}.saude-item b{font-size:1rem;color:#7dd3fc}
+.decisao-hero{background:#0d1a2e;border:2px solid #334155;border-radius:.5rem;padding:.85rem 1rem;margin:.4rem 0}
+.decisao-hero.entrar{border-color:#22c55e;background:#041a0c}
+.decisao-hero.estudo{border-color:#f59e0b;background:#1a1000}
+.decisao-hero-topo{display:flex;justify-content:space-between;align-items:flex-start;gap:.5rem;margin-bottom:.55rem}
+.decisao-hero-ativo{font-size:1.3rem;font-weight:800;letter-spacing:.02em}
+.decisao-hero-dir{font-size:1.1rem;font-weight:700}
+.decisao-hero.entrar .decisao-hero-dir{color:#22c55e}
+.decisao-hero.estudo .decisao-hero-dir{color:#f59e0b}
+.decisao-hero-motivo{font-size:.72rem;color:#94a3b8;margin:.25rem 0 .5rem;line-height:1.4}
+.decisao-hero-alvos{display:grid;grid-template-columns:repeat(3,1fr);gap:.4rem;margin-top:.5rem}
+.decisao-hero-chip{background:#0b1220;border:1px solid #26364e;border-radius:.3rem;padding:.4rem .5rem;text-align:center}
+.decisao-hero-chip label{display:block;font-size:.6rem;color:#64748b;text-transform:uppercase;letter-spacing:.06em;margin-bottom:.2rem}
+.decisao-hero-chip .val{font-size:.88rem;font-weight:700;font-family:ui-monospace,monospace}
+.decisao-hero-chip .val.entrada{color:#38bdf8}
+.decisao-hero-chip .val.sl{color:#ef4444}
+.decisao-hero-chip .val.tp{color:#22c55e}
+.ic-badge{display:inline-block;font-size:.62rem;padding:.12rem .35rem;border-radius:.2rem;margin-left:.35rem;font-weight:700}
+.ic-badge.insuf{background:#1e293b;color:#64748b}
+.ic-badge.ok{background:#0c2a3e;color:#7dd3fc}
+.maturidade-insuf{color:#64748b;font-size:.68rem;font-weight:700}
+.maturidade-obs{color:#f59e0b;font-size:.68rem;font-weight:700}
+.maturidade-cand{color:#38bdf8;font-size:.68rem;font-weight:700}
+.maturidade-aprov{color:#22c55e;font-size:.68rem;font-weight:700}
+.hist-alvos{font-size:.64rem;color:#64748b;font-family:ui-monospace,monospace;white-space:nowrap}
 </style></head><body>
 <h1>Monitor Mercado — Forex + Cripto + Ouro</h1>
 <div class="sub"><span id="status">carregando...</span> &nbsp;·&nbsp; <span id="relogio"></span></div>
@@ -1609,6 +1665,8 @@ Testado em 01/09/2026: operar a favor do canal (51.14%) rende o mesmo que contra
 </section>
 
 <section class="view" data-view="agora">
+
+<div id="decisao-principal"></div>
 
 <div class="sec">SINAIS ATIVOS</div>
 <div id="sinais"></div>
@@ -1705,12 +1763,22 @@ function histLinha(h){
   const hh = horaBrt(h.quando);
   const estado=h.entrada_valida?'<span class="estado go">válida</span>':'<span class="estado study">estudo</span>';
   const tipo=h.tipo==='fibo_m15'?'FIBO':h.tipo==='fluxo_m15'?'FLUXO':h.tipo==='orb_fvg_m15'?'ORB/FVG':h.tipo==='liquidity_sweep_v2'?'LIQUIDEZ V2':'SINAL';
+  const av=h.alvos_estudo||h.alvos||{};
+  const simDesfecho=(h.simulacao||{}).desfecho||'aguardando';
+  const simCor=simDesfecho==='win_tp1'?'up':simDesfecho==='loss_sl'?'dn':'ind';
+  const simTexto=simDesfecho==='win_tp1'?'TP1':simDesfecho==='loss_sl'?'SL':simDesfecho==='nao_executada_6h'?'n/exec':simDesfecho==='expirado_6h'?'exp6h':simDesfecho.startsWith('ambíguo')?'ambíg':'?';
+  const alvosTexto=av.entrada!=null
+    ?`<span class="hist-alvos">E ${av.entrada} · <span class="dn">SL ${av.sl}</span> · <span class="up">TP ${av.tp1}</span></span>`
+    :'<span class="hist-alvos ind">—</span>';
   return `<tr onclick="dossie('${h.id||''}')"><td>${hh}</td><td><b>${h.ativo}</b></td>
     <td>${estado}</td>
     <td>${tipo}</td>
     <td>${h.janela_boa?'<span class="badge b-ok">18–19h BRT</span>':hh+' BRT'}</td>
     <td class="${RC[h.regime]||'ind'}">${RN[h.regime]||'—'}</td>
-    <td>${h.preco}</td><td>${res}</td></tr>`;
+    <td>${h.preco}</td>
+    <td>${alvosTexto}</td>
+    <td><span class="${simCor}">${simTexto}</span></td>
+    <td>${res}</td></tr>`;
 }
 
 function checklist(x){
@@ -1744,16 +1812,30 @@ function renderDossie(H){
   const reacao=h.resultado==null?'aguardando':`${h.resultado} ${h.var_pips>0?'+':''}${h.var_pips||0} ${h.var_unidade||'pips'}`;
   const estado=h.entrada_valida?'ENTRADA VÁLIDA':'ESTUDO — NÃO OPERAR';
   const direcao=h.direcao==='sell'?'SELL':'BUY';
+  const av=h.alvos_estudo||h.alvos||{};
+  const alvosHtml=av.entrada!=null?`
+    <div style="margin:.5rem 0">
+      <div class="sec" style="margin:.35rem 0 .2rem">PLANO (estudo — não executar)</div>
+      <div class="alvos">
+        <div><label>entrada</label><span style="color:#38bdf8">${av.entrada}</span></div>
+        <div><label>invalidação / SL</label><span class="dn">${av.sl}</span></div>
+        <div><label>alvo TP1</label><span class="up">${av.tp1}</span></div>
+        ${av.tp2!=null?`<div><label>alvo TP2</label><span class="up">${av.tp2}</span></div>`:''}
+        <div><label>risco</label><span>${av.risco_pips??'—'} ${av.risco_unidade||'pips'}</span></div>
+        <div><label>simulação</label>${textoSimulacao(h.simulacao)}</div>
+      </div>
+    </div>`
+    :`<div class="nota" style="margin:.4rem 0">Sem plano de alvos registrado para este sinal.</div>`;
   el.innerHTML=`<div class="card">
     <b>${h.ativo} ${direcao}</b> · ${dataBrt(h.vela)} BRT · <span class="estado ${h.entrada_valida?'go':'study'}">${estado}</span>
     ${checklist(h)}
+    ${alvosHtml}
     <div class="dossie">
       <div class="item"><label>vela de sinal</label><span>${a.tipo||'—'} · corpo ${a.corpo_pct??'—'}%</span></div>
       <div class="item"><label>pavios</label><span>sup ${a.pavio_sup_pct??'—'}% · inf ${a.pavio_inf_pct??'—'}%</span></div>
       <div class="item"><label>range / volatilidade</label><span>${a.range_atr??'—'} ATR · ${a.atr_relativo??'—'}×</span></div>
       <div class="item"><label>movimento anterior</label><span>${a.movimento_3_atr??'—'} ATR · vol ${vol}</span></div>
       <div class="item"><label>reação da vela seguinte</label><span>${reacao}</span></div>
-      <div class="item"><label>TP1 / SL em até 6h</label>${textoSimulacao(h.simulacao)}</div>
       <div class="item"><label>casos parecidos (${c.amostra||0})</label>${comp}</div>
       <div class="item"><label>notícia no contexto</label><span class="${n.estado==='janela_risco'?'dossie-aviso':''}">${n.texto||'sem calendário'}</span></div>
     </div>
@@ -1811,20 +1893,31 @@ function cardSinal(a,x){
   </div>`;
 }
 
+function maturidadeBadge(x){
+  const m=x.maturidade||'INSUFICIENTE';
+  const cls={INSUFICIENTE:'maturidade-insuf',OBSERVAR:'maturidade-obs',CANDIDATA:'maturidade-cand',APROVADA:'maturidade-aprov'}[m]||'maturidade-insuf';
+  const ic=x.ic_95;
+  const icTexto=ic?`<span class="ic-badge ok">IC95% ${ic[0]}–${ic[1]}%</span>`:`<span class="ic-badge insuf">IC indisponível</span>`;
+  const insuf=!x.amostra_suficiente?'<span style="color:#64748b;font-size:.64rem"> ⚠ AMOSTRA INSUFICIENTE (n&lt;30 resolvidos)</span>':'';
+  return `<span class="${cls}">${m}</span>${icTexto}${insuf}`;
+}
+function linhaEstudo(label,x){
+  const wr=x.winrate==null?'sem TP/SL resolvido':`${x.wins} TP / ${x.losses} SL · ${x.winrate}%`;
+  const saldo=x.saldo_r==null?'R aguardando':`${x.saldo_r>0?'+':''}${x.saldo_r}R`;
+  return `<div style="margin:.45rem 0;padding:.4rem .5rem;background:#0c1728;border-left:3px solid #334155;border-radius:.25rem">
+    <b>${label}</b> · ${x.sinais||0} sinais ${maturidadeBadge(x)}<br>
+    <span style="font-size:.7rem;color:#cbd5e1">${wr} · ${saldo} em ${x.avaliados_r||0} saídas · ${x.expirados||0} fechados por tempo · ${x.pendentes||0} pendentes · ${x.nao_executadas||0} não exec.</span>
+  </div>`;
+}
 function renderAmostra(){
-  const a=D.amostraEntrada||{};
   const el=document.getElementById('amostra'); if(!el) return;
-  const resultado=a.winrate==null?'ainda sem TP/SL resolvido':`${a.wins} TP / ${a.losses} SL · ${a.winrate}%`;
-  const f=D.amostraFibo||{};
-  const fibo=f.winrate==null?'sem TP/SL resolvido':`${f.wins} TP / ${f.losses} SL · ${f.winrate}%`;
-  const q=D.amostraFluxo||{};
-  const fluxo=q.winrate==null?'sem TP/SL resolvido':`${q.wins} TP / ${q.losses} SL · ${q.winrate}%`;
-  const o=D.amostraOrb||{};
-  const orb=o.winrate==null?'sem TP/SL resolvido':`${o.wins} TP / ${o.losses} SL · ${o.winrate}%`;
-  const l=D.amostraLiquidez||{};
-  const liquidez=l.winrate==null?'sem TP/SL resolvido':`${l.wins} TP / ${l.losses} SL · ${l.winrate}%`;
-  const saldo=x=>x.saldo_r==null?'R aguardando':`${x.saldo_r>0?'+':''}${x.saldo_r}R em ${x.avaliados_r} saídas`;
-  el.innerHTML=`<b>Amostra de entradas válidas:</b> ${a.sinais||0} sinais · ${resultado} · ${saldo(a)} · ${a.expirados||0} fechados por tempo · ${a.pendentes||0} pendentes.<br><b>Fibo M15 em estudo:</b> ${f.sinais||0} sinais · ${fibo} · ${saldo(f)} · ${f.nao_executadas||0} não executados · ${f.expirados||0} fechados por tempo.<br><b>Fluxo M15 em estudo:</b> ${q.sinais||0} sinais · ${fluxo} · ${saldo(q)} · ${q.expirados||0} fechados por tempo.<br><b>ORB/FVG M15 em estudo:</b> ${o.sinais||0} sinais · ${orb} · ${saldo(o)} · ${o.expirados||0} fechados por tempo.<br><b>Liquidez V2 em estudo:</b> ${l.sinais||0} sinais · ${liquidez} · ${saldo(l)} · ${l.nao_executadas||0} não executados. Estudos não são misturados ao sinal validado.`;
+  el.innerHTML=
+    linhaEstudo('Entradas válidas (falso rompimento)',D.amostraEntrada||{})+
+    linhaEstudo('Fibo M15 — estudo',D.amostraFibo||{})+
+    linhaEstudo('Fluxo de sessão — estudo',D.amostraFluxo||{})+
+    linhaEstudo('ORB/FVG M15 — estudo sombra',D.amostraOrb||{})+
+    linhaEstudo('Liquidez V2 — estudo sombra',D.amostraLiquidez||{})+
+    '<div class="nota">Estudos não são misturados ao sinal validado. IC95% de Wilson; amostras abaixo de 30 resolvidos não sustentam conclusões.</div>';
 }
 
 function renderFluxo(){
@@ -1926,6 +2019,44 @@ function renderFibo(){
   </div>`;
 }
 
+function renderDecisaoPrincipal(){
+  const el=document.getElementById('decisao-principal'); if(!el) return;
+  const A=D.ativos||{};
+  const ks=Object.keys(A);
+  // Prioridade: entrada_valida > sinal (estudo) > maior prox
+  const entrar=ks.filter(k=>A[k].entrada_valida);
+  const estudo=ks.filter(k=>A[k].sinal&&!A[k].entrada_valida);
+  const candidato=entrar.length
+    ? entrar.sort((a,b)=>(A[b].prox||0)-(A[a].prox||0))[0]
+    : estudo.length
+      ? estudo.sort((a,b)=>(A[b].prox||0)-(A[a].prox||0))[0]
+      : ks.sort((a,b)=>(A[b].prox||0)-(A[a].prox||0))[0];
+  if(!candidato){ el.innerHTML=''; return; }
+  const x=A[candidato];
+  const isEntrar=x.entrada_valida;
+  const isEstudo=x.sinal&&!x.entrada_valida;
+  const cls=isEntrar?'entrar':isEstudo?'estudo':'';
+  const estadoTexto=x.estado_entrada||'AGUARDAR';
+  const dir=(x.direcao||'buy')==='sell'?'SELL':'BUY';
+  const v=x.alvos||x.alvos_estudo||{};
+  const alvosHtml=v.entrada!=null?`<div class="decisao-hero-alvos">
+    <div class="decisao-hero-chip"><label>Entrada</label><div class="val entrada">${v.entrada}</div></div>
+    <div class="decisao-hero-chip"><label>Invalidação SL</label><div class="val sl">${v.sl}</div></div>
+    <div class="decisao-hero-chip"><label>Alvo TP1</label><div class="val tp">${v.tp1}</div></div>
+  </div>`:'';
+  el.innerHTML=`<div class="decisao-hero ${cls}">
+    <div class="decisao-hero-topo">
+      <div>
+        <div class="decisao-hero-ativo">${candidato} <span class="decisao-hero-dir">${dir}</span></div>
+        <div style="font-size:.68rem;color:#64748b;margin-top:.12rem">${x.classe||''} · ${x.preco??'—'}</div>
+      </div>
+      <span class="estado ${isEntrar?'go':isEstudo?'study':'wait'}" style="font-size:.8rem;white-space:nowrap">${estadoTexto}</span>
+    </div>
+    <div class="decisao-hero-motivo">${x.motivo_entrada||''}</div>
+    ${alvosHtml}
+  </div>`;
+}
+
 function render(){
   const A=D.ativos||{};
   const ks=Object.keys(A).sort();
@@ -1953,7 +2084,7 @@ function render(){
     &&(!resultado||String((h.simulacao||{}).desfecho||'').startsWith(resultado))
     &&(!soAtivo||h.ativo===sel));
   document.getElementById('hist').innerHTML = H.length
-    ? '<table><tr><th>hora</th><th>ativo</th><th>decisão</th><th>tipo</th><th>janela</th><th>regime</th><th>preço</th><th>vela seguinte</th></tr>'
+    ? '<table><tr><th>hora</th><th>ativo</th><th>decisão</th><th>tipo</th><th>janela</th><th>regime</th><th>preço</th><th>entrada · SL · TP</th><th>sim.</th><th>vela seguinte</th></tr>'
       + H.map(histLinha).join('') + '</table>'
     : '<span style="color:#475569;font-style:italic;font-size:.8rem">nenhum sinal nas ultimas 24h</span>';
   renderDossie(todos);
@@ -1974,6 +2105,7 @@ function render(){
     if(!sel && ks.length) sel=ks[0];
   }
   [...t.children].forEach(b=>b.className='tab'+(b.dataset.a===sel?' on':''));
+  renderDecisaoPrincipal();
   renderFluxo();
   renderOrb();
   renderLiquidez();
