@@ -281,6 +281,17 @@
   .seq-atraso { color: var(--yellow); }
   .ind-bloco { display: flex; flex-wrap: wrap; gap: 3px; margin: 4px 0; }
   .ind-chip { padding: 1px 5px; border-radius: 4px; background: #141d2b; border: 1px solid #2a3a55; font-size: 9px; color: #8ea8cc; }
+  /* Análise de atraso */
+  .atraso-tabela { width: 100%; border-collapse: collapse; font-size: 10px; }
+  .atraso-tabela th { color: var(--muted); font-weight: 400; text-align: left; padding: 2px 4px; border-bottom: 1px solid var(--border); }
+  .atraso-tabela td { padding: 2px 4px; border-bottom: 1px solid #11182a; }
+  .atraso-label { color: var(--fg); }
+  .atraso-diff-pos { color: var(--green); }
+  .atraso-diff-neg { color: var(--red); }
+  /* Navegação de data */
+  .nav-data { display: flex; align-items: center; justify-content: space-between; font-size: 10px; margin-bottom: 6px; color: var(--muted); }
+  .nav-data button { background: none; border: 1px solid var(--border); color: var(--accent); border-radius: 4px; padding: 1px 6px; cursor: pointer; font-size: 10px; }
+  .nav-data button:disabled { opacity: 0.35; cursor: default; }
   .entrada-hora { color: var(--muted); font-variant-numeric: tabular-nums; min-width: 34px; font-size: 10px; }
   .entrada-ativo { font-weight: 600; font-size: 11px; }
   .entrada-dir-call { color: var(--green); font-weight: 700; font-size: 10px; }
@@ -444,12 +455,18 @@
     <div class="cartao" id="cartao-setup">
       <h3>Por setup</h3>
       <div id="setup-corpo"><p style="color:var(--muted)">Sem dados.</p></div>
+      <div id="atraso-corpo" style="margin-top:8px"></div>
     </div>
 
     <!-- Entradas detalhadas -->
     <div class="cartao" id="cartao-entradas">
       <h3>Detalhes <span id="entradas-resumo" style="font-weight:400;color:var(--muted);font-size:10px;text-transform:none;letter-spacing:0"></span></h3>
-      <p>Sem entradas hoje ainda.</p>
+      <div class="nav-data" id="nav-data-entradas">
+        <button id="btn-data-ant" onclick="navegarData(-1)">←</button>
+        <span id="label-data-entradas">HOJE</span>
+        <button id="btn-data-prox" onclick="navegarData(+1)" disabled>→</button>
+      </div>
+      <div id="entradas-lista"><p>Sem entradas hoje ainda.</p></div>
     </div>
 
     <!-- Expansível: noticias, IA, funil, motivo -->
@@ -533,6 +550,51 @@ if (modoLab) {
   document.getElementById('cartao-dados').style.display = '';
   mudarVisaoLab(visaoLab);
 }
+// ── Navegação de data nas entradas ───────────────────────────────────────
+function _dataISO(d) {
+  return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`;
+}
+function _renderizarListaEntradas(lista) {
+  const el = document.getElementById('entradas-lista');
+  if (!el) return;
+  if (!lista || !lista.length) {
+    el.innerHTML = '<p>Sem entradas neste dia.</p>';
+  } else {
+    el.innerHTML = [...lista].reverse().map(renderEntradaDetalhada).join('');
+  }
+}
+function navegarData(delta) {
+  const hoje = _dataISO(new Date());
+  const baseStr = _dataEntradas || hoje;
+  const base = new Date(baseStr + 'T12:00:00');
+  base.setDate(base.getDate() + delta);
+  const alvo = _dataISO(base);
+  const btnProx = document.getElementById('btn-data-prox');
+  const labelData = document.getElementById('label-data-entradas');
+  if (alvo >= hoje) {
+    _dataEntradas = null;
+    if (labelData) labelData.textContent = 'HOJE';
+    if (btnProx) btnProx.disabled = true;
+    _renderizarListaEntradas(_entradasHoje);
+    return;
+  }
+  _dataEntradas = alvo;
+  if (labelData) labelData.textContent = alvo;
+  if (btnProx) btnProx.disabled = false;
+  const listaEl = document.getElementById('entradas-lista');
+  if (listaEl) listaEl.innerHTML = '<p style="color:var(--muted)">Carregando...</p>';
+  fetch(`${fonte}/historico_${alvo}.json`)
+    .then(r => r.ok ? r.json() : null)
+    .then(d => {
+      if (d && d.entradasDetalhadas && d.entradasDetalhadas.length) {
+        _renderizarListaEntradas(d.entradasDetalhadas);
+      } else if (listaEl) {
+        listaEl.innerHTML = `<p>Sem entradas registradas para ${alvo}.</p>`;
+      }
+    })
+    .catch(() => { if (listaEl) listaEl.innerHTML = `<p>Erro ao carregar ${alvo}.</p>`; });
+}
+
 const CHAVE_LS = `monitor_ativo_selecionado_${fonte}`;
 let ativoAtual = null;
 let listaAtivos = [];
@@ -544,6 +606,8 @@ let ultimoSinalId = null;      // para detectar novo sinal
 let tfSegundos = 900;          // atualizado pela api
 let ultimoAtualizadoEm = null; // timestamp servidor do ultimo update
 const entradasAbertas = new Set();
+let _dataEntradas = null;   // null = hoje (ao vivo); "YYYY-MM-DD" = histórico
+let _entradasHoje = [];     // cache do último ciclo para o dia atual
 
 // ── Web Audio ──
 let audioCtx = null;
@@ -1448,19 +1512,16 @@ function renderizarPainel(dados) {
 
   // Entradas detalhadas
   const entradas = dados.entradasDetalhadas;
-  const cartaoEntradas = document.getElementById('cartao-entradas');
-  // resumo inline no header
+  _entradasHoje = entradas || [];
+  // resumo inline no header (sempre reflete hoje)
   if (stats && (stats.normal.entradas > 0 || stats.otc.entradas > 0)) {
     const t = (stats.normal.entradas||0) + (stats.otc.entradas||0);
     const w = (stats.normal.wins||0) + (stats.otc.wins||0);
     const el = document.getElementById('entradas-resumo');
     if (el) el.textContent = `${w}/${t}`;
   }
-  if (!entradas || !entradas.length) {
-    cartaoEntradas.innerHTML = '<h3>Detalhes</h3><p>Sem entradas hoje ainda.</p>';
-  } else {
-    cartaoEntradas.innerHTML = '<h3>Detalhes</h3>' + [...entradas].reverse().map(renderEntradaDetalhada).join('');
-  }
+  // Só sobrescreve a lista se o usuário está no dia atual (não em modo histórico)
+  if (!_dataEntradas) _renderizarListaEntradas(_entradasHoje);
 
   // Notícias
   const noticias = dados.noticias || [];
@@ -1542,6 +1603,39 @@ function renderizarPainel(dados) {
     ]);
   }).filter(Boolean).join('');
   document.getElementById('setup-corpo').innerHTML = linhasSetup || '<p style="color:var(--muted)">Sem dados.</p>';
+
+  // Análise de atraso de envio
+  const atraso = dados.analiseAtraso || {};
+  const atrasoSetups = Object.keys(atraso);
+  const atrasoEl = document.getElementById('atraso-corpo');
+  if (atrasoEl) {
+    if (!atrasoSetups.length) {
+      atrasoEl.innerHTML = '';
+    } else {
+      let rows = '';
+      for (const setup of atrasoSetups) {
+        const tfs = atraso[setup];
+        for (const tf of Object.keys(tfs).map(Number).sort()) {
+          const b = tfs[tf];
+          const nr = b.rapido.n, nl = b.lento.n;
+          if (nr + nl < 3) continue;  // pouca amostra, não mostra
+          const wrr = b.rapido.winrate, wrl = b.lento.winrate;
+          const diff = (wrr != null && wrl != null) ? wrr - wrl : null;
+          const difCls = diff == null ? '' : diff > 5 ? ' class="atraso-diff-pos"' : diff < -5 ? ' class="atraso-diff-neg"' : '';
+          const difStr = diff != null ? `${diff > 0 ? '+' : ''}${diff.toFixed(1)}pp` : '—';
+          const nome = NOMES_SETUP[setup] || setup;
+          rows += `<tr><td class="atraso-label">${escapar(nome)} ${_tfLabel(tf)}</td>` +
+            `<td>${wrr != null ? wrr + '%' : '—'} (${nr}·${b.rapido.media_ms ?? '?'}ms)</td>` +
+            `<td>${wrl != null ? wrl + '%' : '—'} (${nl}·${b.lento.media_ms ?? '?'}ms)</td>` +
+            `<td${difCls}>${difStr}</td></tr>`;
+        }
+      }
+      atrasoEl.innerHTML = rows ? `<div style="font-size:9px;color:var(--muted);margin-bottom:4px;text-transform:uppercase;letter-spacing:.05em">Atraso de envio</div>` +
+        `<table class="atraso-tabela"><thead><tr>` +
+        `<th>Setup</th><th>Rápido &lt;500ms</th><th>Lento ≥500ms</th><th>Δ WR</th>` +
+        `</tr></thead><tbody>${rows}</tbody></table>` : '';
+    }
+  }
 
   // Funil
   const funil = dados.funil;

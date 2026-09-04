@@ -1137,16 +1137,68 @@ class RegistroSQLite:
             stats[chave]["lucro"] = round(stats[chave]["lucro"], 2)
         return stats
 
-    def entradas_hoje_detalhadas(self) -> list[dict]:
+    def analise_atraso_por_setup(self, limiar_ms: int = 500) -> dict:
+        """Agrupa operações finalizadas por setup/timeframe separando atraso rápido vs lento.
+
+        Retorna:
+          {setup: {timeframe_int: {
+            "rapido": {"n", "wins", "winrate", "media_ms"},
+            "lento":  {"n", "wins", "winrate", "media_ms"},
+          }}}
+
+        Bucket rápido: atraso_envio_ms < limiar_ms; lento: >= limiar_ms.
+        """
+        with self._lock, self._sessao() as db:
+            linhas = db.execute(
+                """
+                SELECT setup, COALESCE(timeframe, 0), atraso_envio_ms,
+                       CASE WHEN resultado_bruto='win' THEN 1 ELSE 0 END
+                FROM operacoes
+                WHERE status='finalizada' AND resultado_bruto IN ('win', 'loss')
+                ORDER BY setup, timeframe, atraso_envio_ms
+                """,
+            ).fetchall()
+
+        acum: dict = {}
+        for setup, tf, atraso_ms, ganhou in linhas:
+            atraso_ms = int(atraso_ms or 0)
+            bucket = "rapido" if atraso_ms < limiar_ms else "lento"
+            chave_tf = acum.setdefault(setup, {}).setdefault(int(tf), {
+                "rapido": {"n": 0, "wins": 0, "soma_ms": 0},
+                "lento":  {"n": 0, "wins": 0, "soma_ms": 0},
+            })
+            chave_tf[bucket]["n"] += 1
+            chave_tf[bucket]["wins"] += ganhou
+            chave_tf[bucket]["soma_ms"] += atraso_ms
+
+        saida: dict = {}
+        for setup, tfs in acum.items():
+            saida[setup] = {}
+            for tf, buckets in tfs.items():
+                saida[setup][tf] = {}
+                for nome, b in buckets.items():
+                    n, wins, soma = b["n"], b["wins"], b["soma_ms"]
+                    saida[setup][tf][nome] = {
+                        "n": n,
+                        "wins": wins,
+                        "winrate": round(wins / n * 100, 1) if n > 0 else None,
+                        "media_ms": round(soma / n) if n > 0 else None,
+                    }
+        return saida
+
+    def entradas_hoje_detalhadas(self, data: str | None = None) -> list[dict]:
         """Lista de entradas do dia com justificativa, correlacionada com decisoes.
 
         Retorna uma entrada por operação (exceto falha_envio), enriquecida com
         o detalhes_json da decisão correspondente (mesmo ativo+direcao, timestamp
         mais próximo dentro de 10 s).
+
+        Args:
+            data: data no formato YYYY-MM-DD. None usa a data atual (UTC local).
         """
         import json as _json
 
-        hoje = datetime.now().date().isoformat()
+        hoje = data if data is not None else datetime.now().date().isoformat()
         with self._lock, self._sessao() as db:
             ops = db.execute(
                 """

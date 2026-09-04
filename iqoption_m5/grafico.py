@@ -192,6 +192,7 @@ class GraficoM5:
         plano_forex: dict | None = None,
         movimentos_unicos: dict | None = None,
         fibo_contexto: dict | None = None,
+        analise_atraso: dict | None = None,
     ) -> dict:
         conversor = self._unix
         fibo_contexto_saida = dict(fibo_contexto) if fibo_contexto else None
@@ -325,6 +326,7 @@ class GraficoM5:
             "entradasDetalhadas": entradas_detalhadas,
             "niveisSR": niveis_sr,
             "movimentosUnicos": movimentos_unicos,
+            "analiseAtraso": analise_atraso,
         }
 
     def atualizar(self, ativo: str, dados: dict) -> None:
@@ -334,17 +336,45 @@ class GraficoM5:
     def semear_historico(self, registro) -> None:
         """Escreve historico_hoje.json com statsGlobais e entradasDetalhadas do SQLite.
 
+        Também arquiva um snapshot datado (historico_YYYY-MM-DD.json) para o dia
+        anterior (se ainda não existir) e para hoje, permitindo navegação histórica.
+
         Chamado logo após iniciar() para que o frontend mostre o histórico do dia
         imediatamente, mesmo antes do primeiro ciclo de candle carregar os JSONs ao vivo.
         """
+        from datetime import date, timedelta
         try:
+            hoje_str = date.today().isoformat()
+            ontem_str = (date.today() - timedelta(days=1)).isoformat()
             stats = registro.stats_globais()
             entradas = registro.entradas_hoje_detalhadas()
+            atraso = registro.analise_atraso_por_setup()
         except Exception as erro:
             print(f"[grafico] semear_historico falhou: {erro}")
             return
-        dados = {"statsGlobais": stats, "entradasDetalhadas": entradas}
+        dados = {"statsGlobais": stats, "entradasDetalhadas": entradas, "analiseAtraso": atraso}
         self._json_atomico(self.pasta_dados / "historico_hoje.json", dados)
+
+        # Snapshot datado de hoje (pode ser parcial — atualizado a cada startup)
+        self._json_atomico(
+            self.pasta_dados / f"historico_{hoje_str}.json",
+            {"data": hoje_str, "entradasDetalhadas": entradas, "statsGlobais": stats},
+        )
+
+        # Snapshot do dia anterior se ainda não foi arquivado
+        arquivo_ontem = self.pasta_dados / f"historico_{ontem_str}.json"
+        if not arquivo_ontem.exists():
+            try:
+                entradas_ontem = registro.entradas_hoje_detalhadas(data=ontem_str)
+                if entradas_ontem:
+                    stats_ontem = registro.stats_globais()
+                    self._json_atomico(arquivo_ontem, {
+                        "data": ontem_str,
+                        "entradasDetalhadas": entradas_ontem,
+                        "statsGlobais": stats_ontem,
+                    })
+            except Exception:
+                pass
 
     def fechar(self) -> None:
         if self.servidor is not None:

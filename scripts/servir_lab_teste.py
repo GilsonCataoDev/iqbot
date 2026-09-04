@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import http.server
 import json
+import datetime as _datetime
 import math
 import os
 import shutil
@@ -230,6 +231,24 @@ def _ativo_json(preco_base: float, tf: int, tendencia: str, tem_sinal: bool,
                 },
             },
         },
+        "analiseAtraso": {
+            "ema921_rsi": {
+                300: {
+                    "rapido": {"n": 7,  "wins": 5, "winrate": 71.4, "media_ms": 280},
+                    "lento":  {"n": 6,  "wins": 3, "winrate": 50.0, "media_ms": 820},
+                },
+            },
+            "ema920_pullback": {
+                300: {
+                    "rapido": {"n": 9,  "wins": 6, "winrate": 66.7, "media_ms": 310},
+                    "lento":  {"n": 4,  "wins": 2, "winrate": 50.0, "media_ms": 750},
+                },
+                900: {
+                    "rapido": {"n": 4,  "wins": 2, "winrate": 50.0, "media_ms": 290},
+                    "lento":  {"n": 2,  "wins": 0, "winrate": 0.0,  "media_ms": 680},
+                },
+            },
+        },
         "desempenhoSimuladoPorSetup": {
             "ema920_pullback": {
                 300: {
@@ -270,6 +289,51 @@ for a in ATIVOS:
     dados = _ativo_json(a["preco"], 300, a["tend"], a["sinal"], a["w"], a["l"], a["lucro"])
     (PASTA_FONTE / f"{a['id']}.json").write_text(
         json.dumps(dados, ensure_ascii=False, default=str), encoding="utf-8")
+
+# ── Snapshot datado de ontem (para testar navegação histórica) ────────────────
+_ontem = (_datetime.date.today() - _datetime.timedelta(days=1)).isoformat()
+_entradas_ontem = [
+    {
+        "hora": f"{h:02d}:{m:02d}",
+        "ativo": "EURUSD",
+        "direcao": "call" if i % 3 != 2 else "put",
+        "setup": "ema921_rsi",
+        "preco_entrada": 1.08400 + i * 0.0001,
+        "expiracao_minutos": 25,
+        "status": "fechada",
+        "lucro": 0.85 if i % 3 != 2 else -1.0,
+        "timeframe": 300,
+        "criterios": ["EMA 9 acima da EMA 21", "RSI acima de 50"],
+        "comparaveis": {"amostra": 13, "wins": 9, "losses": 4, "winrate": 69.2},
+        "leituraM5": {"modo": "sombra", "qualificada": i % 3 != 2, "observacao": "Mock histórico."},
+        "sequencia": {
+            "decisao_em": f"{h:02d}:{m:02d}:{(i*7)%60:02d}",
+            "enviada_em": f"{h:02d}:{m:02d}:{(i*7+1)%60:02d}",
+            "vencimento_em": f"{h:02d}:{(m+25)%60:02d}:00",
+            "atraso_ms": 300 + i * 40,
+        },
+        "indicadores": {
+            "ema9": round(1.0843 + i * 0.0001, 5),
+            "ema_longa": round(1.0830 + i * 0.0001, 5),
+            "rsi": round(55 + i * 3.5, 1),
+            "atr": 0.00043,
+            "corpo_pct": 65,
+            "tendencia": "alta",
+            "candle_tipo": "engulf",
+        },
+    }
+    for i, (h, m) in enumerate([(9, 5), (10, 15), (11, 20), (13, 0), (14, 30), (15, 45)])
+]
+_snapshot_ontem = {
+    "data": _ontem,
+    "entradasDetalhadas": _entradas_ontem,
+    "statsGlobais": {
+        "normal": {"entradas": 6, "wins": 4, "lucro": 2.40, "finalizadas": 6, "winrate": 66.7},
+        "otc": {"entradas": 0, "wins": 0, "lucro": 0.0, "finalizadas": 0, "winrate": None},
+    },
+}
+(PASTA_FONTE / f"historico_{_ontem}.json").write_text(
+    json.dumps(_snapshot_ontem, ensure_ascii=False, default=str), encoding="utf-8")
 
 print(f"Arquivos gerados em {PASTA_FONTE}")
 
