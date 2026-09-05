@@ -284,8 +284,11 @@ for ativo in MOCK_ATIVOS:
                 "l": 1.084 + i * 0.0001 - 0.0003,
                 "c": 1.084 + i * 0.0001 + (0.0002 if i % 2 == 0 else -0.0001)}
                for i in range(60)]
+    # Bandas com valores reais: com None nos 60 pontos a camada nunca era exercitada.
+    sup = [round(k["h"] + 0.0006, 6) for k in candles]
+    inf = [round(k["l"] - 0.0006, 6) for k in candles]
     (RAIZ / f"mkt_{ativo}.json").write_text(
-        json.dumps({"candles": candles, "sup": [None] * 60, "inf": [None] * 60}),
+        json.dumps({"candles": candles, "sup": sup, "inf": inf}),
         encoding="utf-8"
     )
 

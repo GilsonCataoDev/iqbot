@@ -1541,7 +1541,8 @@ def loop(api, cfg, estado: Estado, calendario: CalendarioEconomico | None = None
 
 
 _HTML = """<!DOCTYPE html><html lang="pt-BR"><head><meta charset="utf-8">
-<title>Monitor Mercado</title><style>
+<title>Monitor Mercado</title>
+<script src="https://unpkg.com/lightweight-charts@4.1.3/dist/lightweight-charts.standalone.production.js"></script><style>
 *{box-sizing:border-box}
 body{font-family:ui-monospace,monospace;background:#0b1220;color:#e2e8f0;margin:0;padding:.8rem}
 h1{color:#38bdf8;font-size:1.05rem;margin:0 0 .2rem}
@@ -1563,7 +1564,9 @@ tr:hover{background:#16203450;cursor:pointer}
 .bar{display:inline-block;width:60px;height:7px;background:#1e293b;border-radius:3px;
   position:relative;vertical-align:middle}
 .bar>i{position:absolute;top:-2px;width:3px;height:11px;background:#38bdf8;border-radius:1px}
-#cv{width:100%;height:300px;display:block;background:#0d1526;border-radius:.4rem;margin:.4rem 0}
+#cv{width:100%;height:320px;background:#0d1526;border-radius:.4rem;margin:.4rem 0}
+#cv-titulo{color:#94a3b8;font-size:.7rem;margin:.3rem 0 0}
+#cv-aviso{display:none;color:#94a3b8;font-size:.72rem;padding:.6rem;background:#0d1526;border-radius:.4rem;margin:.4rem 0}
 .tabs{display:flex;gap:.3rem;margin:.3rem 0}
 .tab{background:#1e293b;border:1px solid #334155;border-radius:.3rem;padding:.15rem .5rem;
   cursor:pointer;font-size:.7rem;color:#94a3b8}
@@ -1645,7 +1648,9 @@ Testado em 01/09/2026: operar a favor do canal (51.14%) rende o mesmo que contra
 
 <div class="sec">GRAFICO</div>
 <div class="tabs" id="tabs"></div>
-<canvas id="cv"></canvas>
+<div id="cv-titulo"></div>
+<div id="cv-aviso"></div>
+<div id="cv"></div>
 </section>
 
 <section class="view" data-view="estudos">
@@ -2112,76 +2117,118 @@ function render(){
   renderFibo();
 }
 
-async function pick(a){ sel=a; render(); await grafico(); }
+async function pick(a){ sel=a; _primeiroDesenho=true; render(); await grafico(); }
+
+let chartM=null, sCandles=null, sSup=null, sInf=null;
+let linhasNivelM=[], seriesZonaM=[];
+let _primeiroDesenho=true;
+let _observadorLargura=null;
+
+function _chartMonitor(){
+  if(chartM) return chartM;
+  const el=document.getElementById('cv');
+  // Criar com largura 0 (aba escondida) deixa o barSpacing preso em 0.5 e
+  // nem fitContent recupera. mudarVisao('grafico') rechama isto ao abrir.
+  if(!el.clientWidth){
+    // Aba em segundo plano ou painel oculto: tenta de novo assim que
+    // o container ganhar largura, em vez de esperar o tick de 30s.
+    if(!_observadorLargura){
+      _observadorLargura=new ResizeObserver(()=>{ if(!chartM && el.clientWidth) grafico(); });
+      _observadorLargura.observe(el);
+    }
+    return null;
+  }
+  chartM=LightweightCharts.createChart(el,{
+    width:el.clientWidth, height:320,
+    layout:{background:{color:'#0d1526'},textColor:'#94a3b8',fontSize:10},
+    grid:{vertLines:{color:'#16233a'},horzLines:{color:'#16233a'}},
+    rightPriceScale:{borderColor:'#1e293b'},
+    timeScale:{borderColor:'#1e293b',timeVisible:true,secondsVisible:false},
+    crosshair:{mode:LightweightCharts.CrosshairMode.Normal},
+  });
+  sCandles=chartM.addCandlestickSeries({
+    upColor:'#22c55e',downColor:'#ef4444',borderUpColor:'#22c55e',
+    borderDownColor:'#ef4444',wickUpColor:'#22c55e',wickDownColor:'#ef4444',
+  });
+  const opBanda={color:'#f59e0b8c',lineWidth:1,lastValueVisible:false,
+    priceLineVisible:false,crosshairMarkerVisible:false};
+  sSup=chartM.addLineSeries(opBanda);
+  sInf=chartM.addLineSeries(opBanda);
+  new ResizeObserver(()=>chartM.applyOptions({width:el.clientWidth})).observe(el);
+  return chartM;
+}
 
 async function grafico(){
   if(!sel) return;
-  const cv=document.getElementById('cv'), W=cv.clientWidth, H=300;
-  cv.width=W; cv.height=H;
-  const c=cv.getContext('2d');
-  c.fillStyle='#0d1526'; c.fillRect(0,0,W,H);
+  const aviso=document.getElementById('cv-aviso');
+  const titulo=document.getElementById('cv-titulo');
   let d;
   try{
     const resposta=await fetch('mkt_'+sel+'.json?t='+Date.now());
     if(!resposta.ok) throw new Error('HTTP '+resposta.status);
     d=await resposta.json();
   }catch(e){
-    c.fillStyle='#94a3b8'; c.font='12px monospace';
-    c.fillText(sel+' — gráfico indisponível; aguardando dados válidos',16,30); return;
+    aviso.textContent=sel+' \u2014 gr\u00e1fico indispon\u00edvel; aguardando dados v\u00e1lidos';
+    aviso.style.display=''; return;
   }
   const K=Array.isArray(d.candles)?d.candles:[];
   if(!K.length){
-    c.fillStyle='#94a3b8'; c.font='12px monospace';
-    c.fillText(sel+' — aguardando candles do mercado normal',16,30); return;
+    aviso.textContent=sel+' \u2014 aguardando candles do mercado normal';
+    aviso.style.display=''; return;
   }
-  const P={l:6,r:56,t:16,b:18};
-  const cw=(W-P.l-P.r)/K.length, bw=Math.max(1,cw*.6);
-  const A=(D.ativos||{})[sel]||{}, F=A.fibo||{}, FA=F.alvos||{}, FL=A.fluxo||{}, FLA=FL.alvos||{}, O=A.orb||{}, OA=O.alvos||{}, L=A.liquidez||{}, LA=L.alvos||{};
-  const niveisNumericos=xs=>xs.filter(v=>v!==null&&v!==undefined&&v!=='').map(Number).filter(Number.isFinite);
-  const fibValores=niveisNumericos([F.zona_inf,F.zona_sup,F.fib382,F.fib500,F.fib618,F.fib786,FA.entrada,FA.sl,FA.tp1,FA.tp2,FA.tp3]);
-  const fluxoValores=niveisNumericos([FL.vwap,FL.poc,FL.vah,FL.val,FLA.sl,FLA.tp1,FLA.tp2]);
-  const orbValores=niveisNumericos([O.orh,O.orl,O.fvg_inf,O.fvg_sup,OA.entrada,OA.sl,OA.tp1,OA.tp2]);
-  const liquidezValores=niveisNumericos([L.piso_range,L.teto_range,LA.entrada,LA.sl,LA.tp1]);
+  aviso.style.display='none';
+  if(!_chartMonitor()) return;
+
+  // Marcacoes do ativo anterior nao podem sobreviver a troca de aba.
+  linhasNivelM.forEach(l=>sCandles.removePriceLine(l)); linhasNivelM=[];
+  seriesZonaM.forEach(s=>chartM.removeSeries(s)); seriesZonaM=[];
+
+  const A=(D.ativos||{})[sel]||{}, F=A.fibo||{}, FA=F.alvos||{}, FL=A.fluxo||{},
+        FLA=FL.alvos||{}, O=A.orb||{}, OA=O.alvos||{}, L=A.liquidez||{}, LA=L.alvos||{};
   const candleVals=K.flatMap(k=>[Number(k.h),Number(k.l)]).filter(Number.isFinite);
   const candleMax=Math.max(...candleVals), candleMin=Math.min(...candleVals);
   const faixa=Math.max(candleMax-candleMin,Math.abs(candleMax)*1e-6,1e-9);
-  // Um alvo distante não pode achatar os candles. Níveis fora de 35% da
-  // janela continuam no cartão de leitura, mas não participam da escala.
+  // Um alvo distante nao pode achatar os candles. Niveis fora de 35% da
+  // janela continuam no cartao de leitura, mas nao entram no grafico.
   const perto=v=>Number.isFinite(v)&&v>=candleMin-faixa*.35&&v<=candleMax+faixa*.35;
-  const sobreposicoes=fibValores.concat(fluxoValores,orbValores,liquidezValores).filter(perto);
-  let vals=candleVals.concat((d.sup||[]).filter(v=>v!=null&&perto(Number(v))))
-    .concat((d.inf||[]).filter(v=>v!=null&&perto(Number(v)))).concat(sobreposicoes);
-  let mx=Math.max(...vals), mn=Math.min(...vals);
-  const pad=(mx-mn)*.06||1e-6; mx+=pad; mn-=pad;
-  const Y=v=>P.t+(mx-v)/(mx-mn)*(H-P.t-P.b);
-  const rotulosNivel=[];
-  c.strokeStyle='#1e293b';
-  for(let i=0;i<=4;i++){const y=P.t+i*(H-P.t-P.b)/4;c.beginPath();c.moveTo(P.l,y);c.lineTo(W-P.r,y);c.stroke();
-    c.fillStyle='#475569';c.font='9px monospace';c.textAlign='left';
-    c.fillText((mx-i*(mx-mn)/4).toPrecision(6),W-P.r+3,y+3);}
-  // bandas do canal
-  [['sup','#f59e0b'],['inf','#f59e0b']].forEach(([k,col])=>{
-    const S=d[k]||[]; c.strokeStyle=col; c.globalAlpha=.55; c.lineWidth=1.2; c.beginPath();
-    let started=false;
-    S.forEach((v,i)=>{ if(v==null) return; const x=P.l+i*cw+cw/2, y=Y(v);
-      if(!started){c.moveTo(x,y);started=true;} else c.lineTo(x,y); });
-    c.stroke(); c.globalAlpha=1;
-  });
+
+  sCandles.setData(K.map(k=>({time:k.t,open:Number(k.o),high:Number(k.h),
+                              low:Number(k.l),close:Number(k.c)})));
+  const serieBanda=arr=>(arr||[]).map((v,i)=>{
+    const n=Number(v);
+    return (v==null||!K[i]||!perto(n))?null:{time:K[i].t,value:n};
+  }).filter(Boolean);
+  sSup.setData(serieBanda(d.sup));
+  sInf.setData(serieBanda(d.inf));
+
   function nivel(valor,cor,rotulo){
     if(!perto(valor)) return;
-    const y=Y(valor); c.save(); c.setLineDash([4,3]); c.strokeStyle=cor; c.lineWidth=1;
-    c.beginPath(); c.moveTo(P.l,y); c.lineTo(W-P.r,y); c.stroke(); c.setLineDash([]);
-    rotulosNivel.push({y,cor,rotulo}); c.restore();
+    linhasNivelM.push(sCandles.createPriceLine({
+      price:valor, color:cor, lineWidth:1,
+      lineStyle:LightweightCharts.LineStyle.Dashed,
+      axisLabelVisible:true, title:rotulo,
+    }));
   }
+  function zona(v1,v2,cor,rotulo){
+    const a=Number(v1), b=Number(v2);
+    if(!perto(a)||!perto(b)) return;
+    const lo=Math.min(a,b), hi=Math.max(a,b);
+    const s=chartM.addBaselineSeries({
+      baseValue:{type:'price',price:lo},
+      topFillColor1:cor, topFillColor2:cor, topLineColor:'transparent',
+      bottomFillColor1:'transparent', bottomFillColor2:'transparent',
+      bottomLineColor:'transparent', lastValueVisible:false,
+      priceLineVisible:false, crosshairMarkerVisible:false,
+      title:rotulo||'',
+    });
+    s.setData(K.map(k=>({time:k.t,value:hi})));
+    seriesZonaM.push(s);
+  }
+
   nivel(Number(A.piso_acumulacao),'#38bdf8','piso 10 velas');
   if(FL.disponivel){
-    const val=Number(FL.val), vah=Number(FL.vah);
-    if(Number.isFinite(val) && Number.isFinite(vah)){
-      c.save(); c.fillStyle='#0ea5e914';
-      c.fillRect(P.l,Math.min(Y(val),Y(vah)),W-P.l-P.r,Math.abs(Y(val)-Y(vah)));
-      c.restore();
-    }
-    nivel(Number(FL.vwap),'#38bdf8','VWAP sessão');
+    zona(FL.val,FL.vah,'#0ea5e914','');
+    nivel(Number(FL.vwap),'#38bdf8','VWAP sess\u00e3o');
     nivel(Number(FL.poc),'#f59e0b','POC');
     nivel(Number(FL.vah),'#60a5fa','VAH');
     nivel(Number(FL.val),'#60a5fa','VAL');
@@ -2193,19 +2240,11 @@ async function grafico(){
   if(O.disponivel){
     const orh=Number(O.orh), orl=Number(O.orl);
     if(Number.isFinite(orh) && Number.isFinite(orl)){
-      c.save(); c.fillStyle='#f59e0b12';
-      c.fillRect(P.l,Math.min(Y(orh),Y(orl)),W-P.l-P.r,Math.abs(Y(orh)-Y(orl)));
-      c.restore();
-      nivel(orh,'#f59e0b','ORB máxima');
-      nivel(orl,'#f59e0b','ORB mínima');
+      zona(orh,orl,'#f59e0b12','');
+      nivel(orh,'#f59e0b','ORB m\u00e1xima');
+      nivel(orl,'#f59e0b','ORB m\u00ednima');
     }
-    const fi=Number(O.fvg_inf), fs=Number(O.fvg_sup);
-    if(O.fvg && Number.isFinite(fi) && Number.isFinite(fs)){
-      c.save(); c.fillStyle='#22c55e1d';
-      c.fillRect(P.l,Math.min(Y(fi),Y(fs)),W-P.l-P.r,Math.abs(Y(fi)-Y(fs)));
-      c.fillStyle='#86efac'; c.font='9px monospace'; c.textAlign='left';
-      c.fillText('FVG M15',P.l+3,Math.min(Y(fi),Y(fs))+10); c.restore();
-    }
+    if(O.fvg) zona(O.fvg_inf,O.fvg_sup,'#22c55e1d','FVG M15');
     if(O.sinal_estudo && OA){
       nivel(Number(OA.entrada),'#22c55e','ORB entrada sombra');
       nivel(Number(OA.sl),'#ef4444','ORB SL');
@@ -2220,13 +2259,7 @@ async function grafico(){
     nivel(Number(LA.tp1),'#86efac','Liquidez: TP1 range');
   }
   if(F.disponivel){
-    const zi=Number(F.zona_inf), zs=Number(F.zona_sup);
-    if(Number.isFinite(zi) && Number.isFinite(zs)){
-      c.save(); c.fillStyle='#8b5cf622';
-      c.fillRect(P.l,Math.min(Y(zi),Y(zs)),W-P.l-P.r,Math.abs(Y(zi)-Y(zs)));
-      c.fillStyle='#c4b5fd'; c.font='9px monospace'; c.textAlign='left';
-      c.fillText('ZONA FIBO 38.2–61.8%',P.l+3,Math.min(Y(zi),Y(zs))+10); c.restore();
-    }
+    zona(F.zona_inf,F.zona_sup,'#8b5cf622','ZONA FIBO 38.2-61.8%');
     nivel(Number(FA.entrada),'#a78bfa','Fibo entrada 61.8%');
     nivel(Number(F.fib786),'#f59e0b','Fibo invalida 78.6%');
     nivel(Number(FA.tp1),'#22c55e','Fibo TP1');
@@ -2238,30 +2271,9 @@ async function grafico(){
     nivel(Number(A.alvos.tp1),'#22c55e','TP1');
     nivel(Number(A.alvos.tp2),'#86efac','TP2');
   }
-  K.forEach((k,i)=>{
-    const x=P.l+i*cw+cw/2, up=k.c>=k.o, col=up?'#22c55e':'#ef4444';
-    c.strokeStyle=col; c.lineWidth=1;
-    c.beginPath(); c.moveTo(x,Y(k.h)); c.lineTo(x,Y(k.l)); c.stroke();
-    c.fillStyle=col;
-    const yt=Math.min(Y(k.o),Y(k.c));
-    c.fillRect(x-bw/2,yt,bw,Math.max(1,Math.abs(Y(k.c)-Y(k.o))));
-  });
-  // Níveis próximos são comuns; empilha os textos e liga cada um à sua linha.
-  const ordenados=rotulosNivel.sort((a,b)=>a.y-b.y);
-  let anterior=P.t-11;
-  ordenados.forEach(r=>{r.ly=Math.max(r.y,anterior+11);anterior=r.ly;});
-  const excesso=ordenados.length?Math.max(0,ordenados[ordenados.length-1].ly-(H-P.b-2)):0;
-  ordenados.forEach(r=>{
-    const ly=Math.max(P.t+7,r.ly-excesso);
-    c.save(); c.strokeStyle=r.cor; c.globalAlpha=.7; c.beginPath();
-    c.moveTo(W-P.r-16,r.y); c.lineTo(W-P.r-3,ly); c.stroke(); c.globalAlpha=1;
-    c.font='8px monospace'; c.textAlign='right';
-    const largura=c.measureText(r.rotulo).width+5;
-    c.fillStyle='#07101fee'; c.fillRect(W-P.r-4-largura,ly-8,largura+4,10);
-    c.fillStyle=r.cor; c.fillText(r.rotulo,W-P.r-3,ly); c.restore();
-  });
-  c.fillStyle='#94a3b8'; c.font='11px monospace'; c.textAlign='left';
-  c.fillText(`${sel} · ${RN[A.regime]||'—'} · R2 ${A.r2??'—'}`,P.l+2,11);
+  titulo.textContent=`${sel} \u00b7 ${RN[A.regime]||'\u2014'} \u00b7 R2 ${A.r2??'\u2014'}`;
+  // So depois de todas as series: enquadrar antes deixava a grade errada.
+  if(_primeiroDesenho){ chartM.timeScale().fitContent(); _primeiroDesenho=false; }
 }
 
 async function tick(){
@@ -2274,7 +2286,6 @@ async function tick(){
 }
 tick(); setInterval(tick,30000);
 mudarVisao(visao);
-window.addEventListener('resize',grafico);
 </script></body></html>"""
 
 
