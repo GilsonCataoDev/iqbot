@@ -358,6 +358,27 @@ _historico_hoje = {
     "alertasDegradacao": {
         "PULLBACK_M5": {"n": 8, "wins": 2, "winrate": 25.0},
     },
+    "historicoUltimosDias": [
+        {"data": ((_datetime.date.today() - _datetime.timedelta(days=d)).isoformat()),
+         "n": [12, 18, 15, 20, 10, 16, 14][d],
+         "wins": [7, 12, 9, 14, 4, 10, 9][d],
+         "winrate": [58.3, 66.7, 60.0, 70.0, 40.0, 62.5, 64.3][d],
+         "lucro": [1.2, 3.4, 1.8, 5.1, -2.0, 2.6, 2.1][d]}
+        for d in range(6, -1, -1)
+    ],
+    "desempenhoSetupHora": {
+        "EMA 9/21 RSI": {
+            "09": {"n": 8,  "wins": 6, "winrate": 75.0},
+            "10": {"n": 12, "wins": 8, "winrate": 66.7},
+            "11": {"n": 10, "wins": 5, "winrate": 50.0},
+            "14": {"n": 6,  "wins": 2, "winrate": 33.3},
+        },
+        "PULLBACK_M5": {
+            "10": {"n": 5, "wins": 1, "winrate": 20.0},
+            "11": {"n": 7, "wins": 2, "winrate": 28.6},
+            "15": {"n": 4, "wins": 3, "winrate": 75.0},
+        },
+    },
     "desempenhoPorHora": {
         "09": {"n": 12, "wins": 8,  "winrate": 66.7},
         "10": {"n": 18, "wins": 12, "winrate": 66.7},

@@ -1513,6 +1513,66 @@ class RegistroSQLite:
             for row in rows
         }
 
+    def historico_ultimos_dias(self, n: int = 7) -> list:
+        """Win-rate e lucro diário nos últimos `n` dias (BRT = UTC-3).
+
+        Retorna lista [{data, n, wins, winrate, lucro}] ordenada por data asc.
+        """
+        with self._lock, self._sessao() as db:
+            rows = db.execute(
+                """
+                SELECT date(datetime(enviada_em, '-3 hours')) AS data_brt,
+                       COUNT(*) AS n,
+                       SUM(CASE WHEN resultado_bruto = 'win' THEN 1 ELSE 0 END) AS wins,
+                       SUM(CASE WHEN lucro IS NOT NULL THEN lucro ELSE 0 END) AS lucro
+                FROM operacoes
+                WHERE resultado_bruto IN ('win', 'loss')
+                  AND enviada_em >= datetime('now', '-' || :dias || ' days')
+                GROUP BY data_brt
+                ORDER BY data_brt ASC
+                """,
+                {"dias": n},
+            ).fetchall()
+        return [
+            {
+                "data": row["data_brt"],
+                "n": row["n"],
+                "wins": row["wins"],
+                "winrate": round(row["wins"] / row["n"] * 100, 1) if row["n"] else 0.0,
+                "lucro": round(float(row["lucro"]), 2),
+            }
+            for row in rows
+        ]
+
+    def desempenho_setup_hora(self) -> dict:
+        """Win-rate cruzado por setup e hora BRT (UTC-3).
+
+        Retorna {setup: {hora: {n, wins, winrate}}}.
+        """
+        with self._lock, self._sessao() as db:
+            rows = db.execute(
+                """
+                SELECT setup,
+                       strftime('%H', datetime(enviada_em, '-3 hours')) AS hora,
+                       COUNT(*) AS n,
+                       SUM(CASE WHEN resultado_bruto = 'win' THEN 1 ELSE 0 END) AS wins
+                FROM operacoes
+                WHERE resultado_bruto IN ('win', 'loss')
+                  AND setup IS NOT NULL AND setup != ''
+                GROUP BY setup, hora
+                ORDER BY setup, hora
+                """
+            ).fetchall()
+        resultado: dict = {}
+        for row in rows:
+            n, wins = row["n"], row["wins"]
+            resultado.setdefault(row["setup"], {})[row["hora"]] = {
+                "n": n,
+                "wins": wins,
+                "winrate": round(wins / n * 100, 1) if n else 0.0,
+            }
+        return resultado
+
     def alertas_degradacao_setup(
         self, min_entradas: int = 5, limiar: float = 40.0
     ) -> dict:

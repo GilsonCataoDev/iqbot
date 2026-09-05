@@ -455,6 +455,7 @@
       <div id="pl-total-hero" class="pl-neutro">—</div>
       <div id="pl-detalhe-hero">sem entradas</div>
       <div class="pl-chips" id="pl-chips"></div>
+      <div id="meta-diaria-box"></div>
     </div>
 
     <!-- Sinal em destaque -->
@@ -509,6 +510,8 @@
         <span class="filtro-chip" onclick="setFiltro('direcao','put',this)">▼ Put</span>
         <div class="filtro-sep"></div>
         <span class="filtro-chip ativo" id="filtro-setup-todos" onclick="setFiltro('setup','todos',this)">Setup: todos</span>
+        <div class="filtro-sep"></div>
+        <span class="filtro-chip ativo" id="filtro-ativo-todos" onclick="setFiltro('ativo','todos',this)">Ativo: todos</span>
         <div class="filtro-sep"></div>
         <label style="font-size:9px;color:var(--muted);display:flex;align-items:center;gap:3px">
           🕐 das
@@ -569,6 +572,18 @@
       <div id="saude-ia-corpo"><p style="color:var(--muted)">Sem dados.</p></div>
     </div>
 
+    <!-- P9-C: Histórico de dias -->
+    <div class="cartao" id="cartao-historico-dias">
+      <h3>Últimos 7 dias</h3>
+      <div id="historico-dias-corpo"><p style="color:var(--muted)">Sem dados.</p></div>
+    </div>
+
+    <!-- P9-D: Setup × hora -->
+    <div class="cartao" id="cartao-setup-hora">
+      <h3>Setup × hora BRT</h3>
+      <div id="setup-hora-corpo"><p style="color:var(--muted)">Sem dados.</p></div>
+    </div>
+
     <div class="cartao" id="cartao-dados" style="display:none">
       <h3>Saúde dos dados</h3>
       <div class="dados-grid" id="dados-corpo"></div>
@@ -606,7 +621,7 @@ let visaoLab = localStorage.getItem('emaLabVisao') || 'agora';
 const CARTOES_LAB = {
   agora:['cartao-pl','cartao-sinal','cartao-plano-forex','cartao-rapido'],
   entradas:['cartao-pl','cartao-entradas'],
-  estudos:['cartao-setup','cartao-extra','cartao-ia-precisao','cartao-hora','cartao-saude-ia'],
+  estudos:['cartao-setup','cartao-extra','cartao-ia-precisao','cartao-hora','cartao-saude-ia','cartao-historico-dias','cartao-setup-hora'],
   dados:['cartao-dados'],
 };
 function mudarVisaoLab(nome) {
@@ -705,6 +720,7 @@ function _renderizarListaEntradas(lista) {
   const el = document.getElementById('entradas-lista');
   if (!el) return;
   _atualizarFiltrosSetup(lista || []);
+  _atualizarFiltrosAtivo(lista || []);
   const filtrada = _aplicarFiltros(lista || []);
   if (!filtrada.length) {
     el.innerHTML = lista && lista.length
@@ -767,6 +783,8 @@ let _filtroSetup     = 'todos';
 let _setupsDisponiveis = [];   // atualizado pelo ciclo
 let _filtroHoraMin   = null;   // P8-A: hora BRT mínima (0-23) ou null
 let _filtroHoraMax   = null;   // P8-A: hora BRT máxima (0-23) ou null
+let _filtroAtivo     = 'todos'; // P9-A
+let _ativosDisponiveis = [];
 
 function _aplicarFiltros(lista) {
   return lista.filter(e => {
@@ -777,12 +795,31 @@ function _aplicarFiltros(lista) {
     }
     if (_filtroDir !== 'todos' && e.direcao !== _filtroDir) return false;
     if (_filtroSetup !== 'todos' && e.setup !== _filtroSetup) return false;
+    if (_filtroAtivo !== 'todos' && e.ativo !== _filtroAtivo) return false;
     if (_filtroHoraMin !== null || _filtroHoraMax !== null) {
       const h = parseInt((e.hora || '00').split(':')[0], 10);
       if (_filtroHoraMin !== null && h < _filtroHoraMin) return false;
       if (_filtroHoraMax !== null && h > _filtroHoraMax) return false;
     }
     return true;
+  });
+}
+
+function _atualizarFiltrosAtivo(entradas) {
+  const ativos = [...new Set(entradas.map(e => e.ativo).filter(Boolean))];
+  if (JSON.stringify(ativos) === JSON.stringify(_ativosDisponiveis)) return;
+  _ativosDisponiveis = ativos;
+  const cont = document.getElementById('filtros-entradas');
+  if (!cont) return;
+  [...cont.querySelectorAll('[data-ativo-chip]')].forEach(c => c.remove());
+  const ancora = document.getElementById('filtro-ativo-todos');
+  ativos.forEach(a => {
+    const c = document.createElement('span');
+    c.className = 'filtro-chip';
+    c.dataset.ativoChip = '1';
+    c.textContent = a;
+    c.onclick = () => setFiltro('ativo', a, c);
+    if (ancora) ancora.after(c); else cont.appendChild(c);
   });
 }
 
@@ -799,13 +836,15 @@ function setFiltro(tipo, valor, chip) {
   if (tipo === 'resultado') _filtroResultado = valor;
   else if (tipo === 'direcao') _filtroDir = valor;
   else if (tipo === 'setup') _filtroSetup = valor;
-  // destaca o chip ativo dentro do grupo (procura irmãos com mesmo onclick prefix)
+  else if (tipo === 'ativo') _filtroAtivo = valor;
   const grupo = tipo;
   const todos = document.querySelectorAll(`#filtros-entradas .filtro-chip`);
   todos.forEach(c => {
     if (c.getAttribute('onclick') && c.getAttribute('onclick').includes(`'${grupo}'`)) {
       c.classList.remove('ativo');
     }
+    if (grupo === 'setup' && c.dataset.setupChip) c.classList.remove('ativo');
+    if (grupo === 'ativo' && c.dataset.ativoChip) c.classList.remove('ativo');
   });
   chip.classList.add('ativo');
   const lista = _dataEntradas ? null : _entradasHoje;
@@ -1721,6 +1760,7 @@ function renderizarPainel(dados) {
       chips.push(`<span class="pl-chip">Mov. únicos ${mov.vitorias}/${mov.finalizados} · ${wrMov}${extra}</span>`);
     }
     plChips.innerHTML = chips.join('');
+    atualizarMetaDiaria(winsTotal);
   }
 
   // Entradas detalhadas
@@ -1925,6 +1965,80 @@ function renderizarPrecisaoIA(precisaoIA) {
     `<p style="color:var(--border);font-size:8px;margin-top:5px">Janela: operação enviada até 10 min após a consulta</p>`;
 }
 
+function atualizarMetaDiaria(winsTotal) {
+  const el = document.getElementById('meta-diaria-box');
+  if (!el) return;
+  const meta = parseInt(localStorage.getItem('ema_meta_wins') || '0', 10) || 0;
+  if (!meta) {
+    el.innerHTML = `<span style="font-size:9px;color:var(--muted)">Meta: ` +
+      `<input id="meta-input" type="number" min="1" max="50" ` +
+      `style="width:32px;font-size:9px;background:#1a2235;border:1px solid var(--border);` +
+      `color:var(--text);border-radius:3px;padding:1px 3px;text-align:center" ` +
+      `placeholder="—" onchange="if(+this.value>0){localStorage.setItem('ema_meta_wins',+this.value);atualizarMetaDiaria(${winsTotal})}"> wins/dia</span>`;
+    return;
+  }
+  const pct = Math.min(100, Math.round(winsTotal / meta * 100));
+  const cor = pct >= 100 ? 'var(--green)' : pct >= 60 ? 'var(--yellow)' : 'var(--red)';
+  el.innerHTML = `<div style="margin-top:4px">` +
+    `<span style="font-size:9px;color:var(--muted)">Meta: ` +
+    `<span style="color:${cor};font-weight:700">${winsTotal}/${meta}</span> wins ` +
+    `<a href="#" onclick="localStorage.removeItem('ema_meta_wins');atualizarMetaDiaria(${winsTotal});return false" ` +
+    `style="font-size:8px;color:var(--muted);margin-left:4px">✕</a></span>` +
+    `<div style="margin-top:3px;height:4px;border-radius:2px;background:var(--border)">` +
+    `<div style="height:4px;border-radius:2px;background:${cor};width:${pct}%;transition:width .4s"></div>` +
+    `</div></div>`;
+}
+
+function renderizarHistoricoDias(dias) {
+  const el = document.getElementById('historico-dias-corpo');
+  if (!el) return;
+  if (!dias || !dias.length) { el.innerHTML = '<p style="color:var(--muted)">Sem histórico ainda.</p>'; return; }
+  const maxN = Math.max(...dias.map(d => d.n));
+  const barras = dias.map(d => {
+    const alt = maxN ? Math.round(d.n / maxN * 32) : 4;
+    const cor = d.winrate >= 60 ? 'var(--green)' : d.winrate < 40 ? 'var(--red)' : 'var(--yellow)';
+    const lbl = d.data ? d.data.slice(5) : '?';
+    const sinal = d.lucro >= 0 ? '+' : '';
+    return `<div class="hora-col">` +
+      `<div class="hora-pct" style="color:${cor}">${d.winrate}%</div>` +
+      `<div class="hora-bar" style="height:${alt}px;background:${cor};opacity:.7" ` +
+      `title="${d.data}: ${d.wins}/${d.n} · ${sinal}${d.lucro}"></div>` +
+      `<div class="hora-lbl">${lbl}</div>` +
+      `</div>`;
+  }).join('');
+  const totalN = dias.reduce((s, d) => s + d.n, 0);
+  const totalW = dias.reduce((s, d) => s + d.wins, 0);
+  const totalL = dias.reduce((s, d) => s + (d.lucro || 0), 0);
+  const sL = totalL >= 0 ? `+${totalL.toFixed(2)}` : totalL.toFixed(2);
+  el.innerHTML =
+    `<p style="color:var(--muted);font-size:9px;margin-bottom:4px">${totalW}W/${totalN} · ${sL} (${dias.length} dias)</p>` +
+    `<div class="hora-barra">${barras}</div>`;
+}
+
+function renderizarSetupHora(dados) {
+  const el = document.getElementById('setup-hora-corpo');
+  if (!el) return;
+  const setups = Object.keys(dados || {});
+  if (!setups.length) { el.innerHTML = '<p style="color:var(--muted)">Sem dados ainda.</p>'; return; }
+  const horas = [...new Set(setups.flatMap(s => Object.keys(dados[s])))].sort();
+  const corWR = wr => wr >= 60 ? 'var(--green)' : wr < 40 ? 'var(--red)' : 'var(--yellow)';
+  const th = 'padding:2px 4px;font-size:8px;color:var(--muted);text-align:center';
+  const cab = `<tr><th style="${th};text-align:left">Setup</th>` +
+    horas.map(h => `<th style="${th}">${h}h</th>`).join('') + `</tr>`;
+  const linhas = setups.map(s => {
+    const hd = dados[s];
+    const cels = horas.map(h => {
+      if (!hd[h]) return `<td style="padding:2px 4px;font-size:8px;color:var(--border);text-align:center">—</td>`;
+      const d = hd[h]; const cor = corWR(d.winrate);
+      return `<td style="padding:2px 4px;font-size:8px;color:${cor};text-align:center;font-weight:700" ` +
+        `title="${escapar(s)} @ ${h}h: ${d.wins}/${d.n}">${d.winrate}%</td>`;
+    }).join('');
+    const nome = s.length > 14 ? s.slice(0, 13) + '…' : s;
+    return `<tr><td style="padding:2px 4px;font-size:8px;color:var(--muted);white-space:nowrap">${escapar(nome)}</td>${cels}</tr>`;
+  }).join('');
+  el.innerHTML = `<div style="overflow-x:auto"><table style="width:100%;border-collapse:collapse">${cab}${linhas}</table></div>`;
+}
+
 function renderizarSaudeIA(precisaoIA) {
   const el = document.getElementById('saude-ia-corpo');
   if (!el) return;
@@ -1973,6 +2087,8 @@ async function carregarHistoricoHoje() {
     renderizarPrecisaoIA(hist.precisaoIA || {});
     renderizarSaudeIA(hist.precisaoIA || {});
     renderizarDesempenhoPorHora(hist.desempenhoPorHora || {});
+    renderizarHistoricoDias(hist.historicoUltimosDias || []);
+    renderizarSetupHora(hist.desempenhoSetupHora || {});
     // P8-B: alertas de degradação de setup
     const _deg = hist.alertasDegradacao || {};
     const _setupsDeg = Object.keys(_deg);

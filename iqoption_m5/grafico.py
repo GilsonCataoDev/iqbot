@@ -429,12 +429,15 @@ class GraficoM5:
             precisao_ia = registro.precisao_ia()
             desemp_hora = registro.desempenho_por_hora()
             alertas_deg = registro.alertas_degradacao_setup()
+            hist_dias = registro.historico_ultimos_dias()
+            desemp_sh = registro.desempenho_setup_hora()
         except Exception as erro:
             print(f"[grafico] semear_historico falhou: {erro}")
             return
         dados = {"statsGlobais": stats, "entradasDetalhadas": entradas,
                  "analiseAtraso": atraso, "precisaoIA": precisao_ia,
-                 "desempenhoPorHora": desemp_hora, "alertasDegradacao": alertas_deg}
+                 "desempenhoPorHora": desemp_hora, "alertasDegradacao": alertas_deg,
+                 "historicoUltimosDias": hist_dias, "desempenhoSetupHora": desemp_sh}
         self._json_atomico(self.pasta_dados / "historico_hoje.json", dados)
 
         # Snapshot datado de hoje (pode ser parcial — atualizado a cada startup)
