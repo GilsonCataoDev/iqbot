@@ -615,7 +615,7 @@
 <script>
 // ── Estado global ──
 const params = new URLSearchParams(window.location.search);
-const fonte = params.get('fonte') || 'iqoption_m5';
+const fonte = params.get('fonte') || (location.port === '8785' ? 'ema_laboratorio_practice' : 'iqoption_m5');
 const modoLab = fonte.includes('ema_laboratorio') || location.port === '8785';
 let visaoLab = localStorage.getItem('emaLabVisao') || 'agora';
 const CARTOES_LAB = {
