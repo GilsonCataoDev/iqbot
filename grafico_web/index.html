@@ -615,7 +615,8 @@
 <script>
 // ── Estado global ──
 const params = new URLSearchParams(window.location.search);
-const fonte = params.get('fonte') || (location.port === '8785' ? 'ema_laboratorio_practice' : 'iqoption_m5');
+// Reatribuída por carregarManifesto se a fonte informada não responder.
+let fonte = params.get('fonte') || (location.port === '8785' ? 'ema_laboratorio_practice' : 'iqoption_m5');
 const modoLab = fonte.includes('ema_laboratorio') || location.port === '8785';
 let visaoLab = localStorage.getItem('emaLabVisao') || 'agora';
 const CARTOES_LAB = {
@@ -1196,8 +1197,19 @@ function selecionarAtivo(id) {
 
 async function carregarManifesto() {
   const select = document.getElementById('ativo');
+  // A fonte pode vir errada na URL (link antigo, histórico do navegador).
+  // Tenta a informada e cai para as conhecidas antes de desistir.
+  const candidatas = [...new Set([fonte, 'ema_laboratorio_practice', 'iqoption_m5'])];
+  let manifesto = null;
+  for (const cand of candidatas) {
+    try {
+      manifesto = await buscarJson(`${cand}/manifest.json?_=` + Date.now());
+      fonte = cand;
+      break;
+    } catch (e) {}
+  }
   try {
-    const manifesto = await buscarJson(`${fonte}/manifest.json?_=` + Date.now());
+    if (!manifesto) throw new Error('nenhuma fonte respondeu');
     listaAtivos = manifesto.ativos;
     select.innerHTML = '';
     for (const item of listaAtivos) {
@@ -1243,7 +1255,7 @@ async function carregarManifesto() {
     const st = document.getElementById('status');
     if (st) {
       st.style.color = 'var(--red)';
-      st.textContent = `manifest.json não encontrado em "${fonte}/" — servidor sem dados ou fonte errada`;
+      st.textContent = `manifest.json não encontrado em: ${candidatas.join(', ')} — servidor sem dados`;
     }
   }
 }
