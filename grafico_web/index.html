@@ -380,6 +380,10 @@
   .filtro-chip { padding: 1px 6px; border-radius: 10px; font-size: 9px; cursor: pointer;
     background: #1a2235; border: 1px solid var(--border); color: var(--muted); transition: background .15s; }
   .filtro-chip.ativo { background: var(--accent); border-color: var(--accent); color: #fff; }
+  .filtro-hora-input { width: 30px; font-size: 9px; background: #1a2235; border: 1px solid var(--border);
+    color: var(--text); border-radius: 4px; padding: 1px 3px; text-align: center; }
+  .aviso-degradacao { font-size: 9px; color: var(--yellow); background: rgba(234,179,8,.08);
+    border: 1px solid rgba(234,179,8,.3); border-radius: 4px; padding: 4px 7px; margin-bottom: 5px; }
   .filtro-sep { width: 100%; height: 0; }
 
   /* ── Segunda opinião IA (P5-B) ── */
@@ -493,6 +497,7 @@
     <!-- Entradas detalhadas -->
     <div class="cartao" id="cartao-entradas">
       <h3>Detalhes <span id="entradas-resumo" style="font-weight:400;color:var(--muted);font-size:10px;text-transform:none;letter-spacing:0"></span><a id="link-exportar-csv" href="#" style="float:right;font-size:9px;color:var(--accent);text-decoration:none;font-weight:400" title="Baixar CSV do dia">↓ CSV</a></h3>
+      <div id="aviso-degradacao" class="aviso-degradacao" style="display:none"></div>
       <div class="filtros-entradas" id="filtros-entradas">
         <span class="filtro-chip ativo" onclick="setFiltro('resultado','todos',this)">Todos</span>
         <span class="filtro-chip" onclick="setFiltro('resultado','win',this)">✓ Win</span>
@@ -504,6 +509,16 @@
         <span class="filtro-chip" onclick="setFiltro('direcao','put',this)">▼ Put</span>
         <div class="filtro-sep"></div>
         <span class="filtro-chip ativo" id="filtro-setup-todos" onclick="setFiltro('setup','todos',this)">Setup: todos</span>
+        <div class="filtro-sep"></div>
+        <label style="font-size:9px;color:var(--muted);display:flex;align-items:center;gap:3px">
+          🕐 das
+          <input id="filtro-hora-min" type="number" min="0" max="23" class="filtro-hora-input" placeholder="—"
+            oninput="setFiltroHora()">
+          h às
+          <input id="filtro-hora-max" type="number" min="0" max="23" class="filtro-hora-input" placeholder="—"
+            oninput="setFiltroHora()">
+          h
+        </label>
       </div>
       <div class="nav-data" id="nav-data-entradas">
         <button id="btn-data-ant" onclick="navegarData(-1)">←</button>
@@ -548,6 +563,12 @@
       <div id="ia-precisao-corpo"><p style="color:var(--muted)">Sem dados.</p></div>
     </div>
 
+    <!-- P8-C: Saúde do modelo IA -->
+    <div class="cartao" id="cartao-saude-ia">
+      <h3>Saúde do modelo IA</h3>
+      <div id="saude-ia-corpo"><p style="color:var(--muted)">Sem dados.</p></div>
+    </div>
+
     <div class="cartao" id="cartao-dados" style="display:none">
       <h3>Saúde dos dados</h3>
       <div class="dados-grid" id="dados-corpo"></div>
@@ -585,7 +606,7 @@ let visaoLab = localStorage.getItem('emaLabVisao') || 'agora';
 const CARTOES_LAB = {
   agora:['cartao-pl','cartao-sinal','cartao-plano-forex','cartao-rapido'],
   entradas:['cartao-pl','cartao-entradas'],
-  estudos:['cartao-setup','cartao-extra','cartao-ia-precisao','cartao-hora'],
+  estudos:['cartao-setup','cartao-extra','cartao-ia-precisao','cartao-hora','cartao-saude-ia'],
   dados:['cartao-dados'],
 };
 function mudarVisaoLab(nome) {
@@ -744,6 +765,8 @@ let _filtroResultado = 'todos';
 let _filtroDir       = 'todos';
 let _filtroSetup     = 'todos';
 let _setupsDisponiveis = [];   // atualizado pelo ciclo
+let _filtroHoraMin   = null;   // P8-A: hora BRT mínima (0-23) ou null
+let _filtroHoraMax   = null;   // P8-A: hora BRT máxima (0-23) ou null
 
 function _aplicarFiltros(lista) {
   return lista.filter(e => {
@@ -754,8 +777,22 @@ function _aplicarFiltros(lista) {
     }
     if (_filtroDir !== 'todos' && e.direcao !== _filtroDir) return false;
     if (_filtroSetup !== 'todos' && e.setup !== _filtroSetup) return false;
+    if (_filtroHoraMin !== null || _filtroHoraMax !== null) {
+      const h = parseInt((e.hora || '00').split(':')[0], 10);
+      if (_filtroHoraMin !== null && h < _filtroHoraMin) return false;
+      if (_filtroHoraMax !== null && h > _filtroHoraMax) return false;
+    }
     return true;
   });
+}
+
+function setFiltroHora() {
+  const minEl = document.getElementById('filtro-hora-min');
+  const maxEl = document.getElementById('filtro-hora-max');
+  _filtroHoraMin = minEl && minEl.value !== '' ? parseInt(minEl.value, 10) : null;
+  _filtroHoraMax = maxEl && maxEl.value !== '' ? parseInt(maxEl.value, 10) : null;
+  const lista = _dataEntradas ? null : _entradasHoje;
+  if (lista) _renderizarListaEntradas(lista);
 }
 
 function setFiltro(tipo, valor, chip) {
@@ -1888,11 +1925,67 @@ function renderizarPrecisaoIA(precisaoIA) {
     `<p style="color:var(--border);font-size:8px;margin-top:5px">Janela: operação enviada até 10 min após a consulta</p>`;
 }
 
+function renderizarSaudeIA(precisaoIA) {
+  const el = document.getElementById('saude-ia-corpo');
+  if (!el) return;
+  const ace = precisaoIA && precisaoIA['ACEITAR'];
+  const rej = precisaoIA && precisaoIA['REJEITAR'];
+  if (!ace && !rej) {
+    el.innerHTML = '<p style="color:var(--muted)">Sem opiniões cruzadas ainda.</p>';
+    return;
+  }
+  const aceN = ace ? ace.n : 0,    aceW = ace ? ace.wins : 0, aceL = aceN - aceW;
+  const rejN = rej ? rej.n : 0,    rejW = rej ? rej.wins : 0, rejL = rejN - rejW;
+  const totalIA = aceN + rejN;
+  // corretos = ACEITAR→WIN + REJEITAR→LOSS (bloqueou corretamente)
+  const corretos = aceW + rejL;
+  const score = totalIA ? Math.round(corretos / totalIA * 100) : null;
+  const scoreCls = score >= 60 ? 'var(--green)' : score !== null && score < 40 ? 'var(--red)' : 'var(--yellow)';
+  let html = `<p style="color:var(--muted);font-size:9px;margin-bottom:6px">` +
+    (score !== null
+      ? `Score: <span style="color:${scoreCls};font-weight:700">${score}%</span> corretos de ${totalIA} decisões`
+      : 'Calculando...') +
+    `</p>`;
+  if (ace) {
+    const cor = ace.winrate >= 60 ? 'var(--green)' : ace.winrate < 40 ? 'var(--red)' : 'var(--yellow)';
+    html += `<div style="margin-bottom:4px;padding:4px 7px;border-radius:4px;background:var(--border);font-size:10px">` +
+      `<span style="color:var(--green);font-weight:700">ACEITAR</span> → ` +
+      `<span style="color:var(--green)">✓${aceW} WIN</span> · ` +
+      `<span style="color:var(--red)">✗${aceL} LOSS</span> ` +
+      `<span style="color:${cor}">(${ace.winrate}%)</span></div>`;
+  }
+  if (rej) {
+    const cor = rejL >= rejW ? 'var(--green)' : 'var(--red)';
+    html += `<div style="padding:4px 7px;border-radius:4px;background:var(--border);font-size:10px">` +
+      `<span style="color:var(--red);font-weight:700">REJEITAR</span> → ` +
+      `<span style="color:var(--green)">✓${rejL} bloqueou LOSS</span> · ` +
+      `<span style="color:var(--red)">✗${rejW} perdeu WIN</span> ` +
+      `<span style="color:${cor}">(${rej.winrate}% das ops tiveram WIN mesmo assim)</span></div>`;
+  }
+  html += `<p style="color:var(--border);font-size:8px;margin-top:5px">` +
+    `Janela: op. enviada até 10 min após consulta IA</p>`;
+  el.innerHTML = html;
+}
+
 async function carregarHistoricoHoje() {
   try {
     const hist = await buscarJson(`${fonte}/historico_hoje.json?_=` + Date.now());
     renderizarPrecisaoIA(hist.precisaoIA || {});
+    renderizarSaudeIA(hist.precisaoIA || {});
     renderizarDesempenhoPorHora(hist.desempenhoPorHora || {});
+    // P8-B: alertas de degradação de setup
+    const _deg = hist.alertasDegradacao || {};
+    const _setupsDeg = Object.keys(_deg);
+    const _avisoEl = document.getElementById('aviso-degradacao');
+    if (_avisoEl) {
+      if (_setupsDeg.length) {
+        _avisoEl.style.display = '';
+        _avisoEl.innerHTML = `⚠️ Setup${_setupsDeg.length > 1 ? 's' : ''} abaixo de 40%: ` +
+          _setupsDeg.map(s => `<strong>${escapar(s)}</strong> (${_deg[s].winrate}% · ${_deg[s].n} ops)`).join(', ');
+      } else {
+        _avisoEl.style.display = 'none';
+      }
+    }
     // Atualiza link CSV com a data navegada
     const csvLink = document.getElementById('link-exportar-csv');
     if (csvLink) {

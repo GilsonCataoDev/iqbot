@@ -1513,6 +1513,36 @@ class RegistroSQLite:
             for row in rows
         }
 
+    def alertas_degradacao_setup(
+        self, min_entradas: int = 5, limiar: float = 40.0
+    ) -> dict:
+        """Setups com win-rate abaixo de `limiar`% na amostra histórica.
+
+        Só considera setups com pelo menos `min_entradas` finalizadas.
+        Retorna {setup: {n, wins, winrate}}.
+        """
+        with self._lock, self._sessao() as db:
+            rows = db.execute(
+                """
+                SELECT setup,
+                       COUNT(*) AS n,
+                       SUM(CASE WHEN resultado_bruto = 'win' THEN 1 ELSE 0 END) AS wins
+                FROM operacoes
+                WHERE resultado_bruto IN ('win', 'loss')
+                  AND setup IS NOT NULL AND setup != ''
+                GROUP BY setup
+                HAVING n >= :min_ent
+                """,
+                {"min_ent": min_entradas},
+            ).fetchall()
+        resultado: dict = {}
+        for row in rows:
+            n, wins = row["n"], row["wins"]
+            wr = round(wins / n * 100, 1) if n else 0.0
+            if wr < limiar:
+                resultado[row["setup"]] = {"n": n, "wins": wins, "winrate": wr}
+        return resultado
+
     def status_decisoes_grafico(self, ativo: str) -> dict[tuple[str, str], str]:
         with self._lock, self._sessao() as db:
             linhas = db.execute(

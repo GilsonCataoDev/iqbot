@@ -355,6 +355,9 @@ _historico_hoje = {
         "REJEITAR": {"n":  8, "wins":  2, "winrate": 25.0},
         "INCERTO":  {"n":  6, "wins":  3, "winrate": 50.0},
     },
+    "alertasDegradacao": {
+        "PULLBACK_M5": {"n": 8, "wins": 2, "winrate": 25.0},
+    },
     "desempenhoPorHora": {
         "09": {"n": 12, "wins": 8,  "winrate": 66.7},
         "10": {"n": 18, "wins": 12, "winrate": 66.7},
