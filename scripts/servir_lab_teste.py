@@ -18,8 +18,12 @@ import time
 import webbrowser
 from pathlib import Path
 
-PORTA = 8785
-RAIZ = Path(tempfile.gettempdir()) / "lab_teste_8785"
+import sys
+
+# Porta 8785 liga modoLab automaticamente; em outra porta o modo vem do
+# ?fonte=ema_laboratorio_practice que a URL abaixo ja carrega.
+PORTA = int(sys.argv[1]) if len(sys.argv) > 1 else 8785
+RAIZ = Path(tempfile.gettempdir()) / f"lab_teste_{PORTA}"
 RAIZ.mkdir(parents=True, exist_ok=True)
 
 # ── Copiar index.html do projeto ─────────────────────────────────────────────
@@ -158,7 +162,20 @@ def _ativo_json(preco_base: float, tf: int, tendencia: str, tem_sinal: bool,
         "rsi": 63,
     } if tem_sinal else None
 
+    # Fibo da perna de alta: origem no fundo, extremo no topo.
+    # Espelha _finalizar_mapa_fibonacci (preco_nivel = extremo - amplitude*n).
+    _fib_origem = preco_base - 0.005
+    _fib_extremo = preco_base + 0.003
+    _fib_ampl = _fib_extremo - _fib_origem
+    _fib_preco = lambda n: round(_fib_extremo - _fib_ampl * n, 5)
+    _fib_niveis = [
+        {"nivel": n, "preco": _fib_preco(n),
+         "papel": "zona" if n in (0.382, 0.5, 0.618) else "extremo" if n in (0.0, 1.0) else "secundario"}
+        for n in (0.0, 0.236, 0.382, 0.5, 0.618, 0.786, 1.0)
+    ]
+
     return {
+        "fib": _fib_niveis,
         "candles": candles,
         "volume": _volume(candles),
         "bandaSup": sup, "bandaInf": inf, "bandaMedia": med,
@@ -185,9 +202,15 @@ def _ativo_json(preco_base: float, tf: int, tendencia: str, tem_sinal: bool,
             {"moeda": "USD", "impacto": "Low", "minutos": 45, "evento": "ISM Manufacturing"},
         ],
         "fibContexto": {
-            "direcao": "call", "estado": "NA ZONA — AGUARDAR REJEIÇÃO",
-            "confirmado": False, "tocou_zona": True,
-            "origem": preco_base - 0.005, "extremo": preco_base + 0.003,
+            "tendencia": "alta", "direcao": "call",
+            "estado": "NA ZONA — AGUARDAR REJEIÇÃO",
+            "confirmado": False, "tocou_zona": True, "sr_confluente": False,
+            "rejeicao": False,
+            "origem": _fib_origem, "extremo": _fib_extremo,
+            "amplitude": _fib_ampl, "amplitude_atr": 2.1,
+            "zona_inf": _fib_preco(0.618), "zona_sup": _fib_preco(0.382),
+            "fib786": _fib_preco(0.786),
+            "niveis": _fib_niveis,
             "inicio_time": agora - 3600, "fim_time": agora - 1800,
         },
         "planoForex": {
@@ -446,11 +469,20 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         pass
 
 class Servidor(socketserver.ThreadingTCPServer):
-    allow_reuse_address = True
+    # SO_REUSEADDR no Windows permite DOIS processos ligarem na mesma porta:
+    # o bot real e este mock respondiam alternadamente, dando 404 intermitente.
+    # Sem reuse, subir com a porta ocupada falha na hora.
+    allow_reuse_address = False
     daemon_threads = True
-    def server_bind(self):
-        self.socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        super().server_bind()
+
+_sonda = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+if _sonda.connect_ex(("127.0.0.1", PORTA)) == 0:
+    _sonda.close()
+    raise SystemExit(
+        f"Porta {PORTA} ja esta em uso (o bot real provavelmente esta rodando).\n"
+        f"Pare o outro processo ou use outra porta antes de subir o mock."
+    )
+_sonda.close()
 
 with Servidor(("127.0.0.1", PORTA), Handler) as srv:
     url = f"http://127.0.0.1:{PORTA}/index.html?fonte={FONTE}"

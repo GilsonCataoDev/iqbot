@@ -1093,45 +1093,53 @@ function _toggleNiveis() {
     title: `${n.tipo === 'resistencia' ? 'R' : 'S'} ${n.preco.toFixed(_cachePrecisao)}`,
   })) : [];
 }
-function _ancorasFib(contexto, candles) {
-  const inicioInformado = Number(contexto?.inicio_time);
-  const fimInformado = Number(contexto?.fim_time);
-  if ([inicioInformado, fimInformado].every(Number.isFinite)) {
-    return { inicio: inicioInformado, fim: fimInformado };
-  }
-
-  // Compatibilidade com um Lab que já estava aberto antes de o backend passar
-  // os horários das âncoras. Recupera no gráfico os candles mais próximos dos
-  // preços de origem e extremo, mantendo a ordem origem -> extremo.
-  const origem = Number(contexto?.origem);
-  const extremo = Number(contexto?.extremo);
-  if (![origem, extremo].every(Number.isFinite) || candles.length < 2) return null;
-  const compra = contexto?.direcao === 'call';
-  const campoOrigem = compra ? 'low' : 'high';
-  const campoExtremo = compra ? 'high' : 'low';
-  let melhor = null;
-  for (let i = 0; i < candles.length - 1; i++) {
-    const erroOrigem = Math.abs(Number(candles[i][campoOrigem]) - origem);
-    for (let j = i + 1; j < candles.length; j++) {
-      const erro = erroOrigem + Math.abs(Number(candles[j][campoExtremo]) - extremo);
-      if (!melhor || erro < melhor.erro) melhor = { erro, inicio: Number(candles[i].time), fim: Number(candles[j].time) };
-    }
-  }
-  return melhor && [melhor.inicio, melhor.fim].every(Number.isFinite) ? melhor : null;
+function _ancorasFib(contexto) {
+  // Só ancora nos horários que o backend derivou da perna estrutural.
+  // Casar preços contra os candles produzia uma perna plausível porém
+  // arbitrária — sem âncora confirmada o certo é não desenhar nada.
+  const inicio = Number(contexto?.inicio_time);
+  const fim = Number(contexto?.fim_time);
+  return [inicio, fim].every(Number.isFinite) ? { inicio, fim } : null;
 }
 function _toggleFib() {
   linhasFib.forEach(s => chartPreco.removeSeries(s));
   linhasFib = [];
   if (!chkFib.checked || !_cacheFibContexto || !_cacheCandles.length) return;
-  const ancoras = _ancorasFib(_cacheFibContexto, _cacheCandles);
+  const ancoras = _ancorasFib(_cacheFibContexto);
   if (!ancoras) return;
   const inicio = ancoras.inicio;
   const fimImpulso = ancoras.fim;
   const fimGrafico = Number(_cacheCandles[_cacheCandles.length - 1].time);
   if (![inicio, fimImpulso, fimGrafico].every(Number.isFinite)) return;
 
+  // Cor conta o estado da retração: confirmada, na zona, invalidada ou aguardando.
+  const _estadoFib = String(_cacheFibContexto.estado || '');
+  const corFib = _cacheFibContexto.confirmado    ? '#26a69a'
+    : _estadoFib.includes('NA ZONA')             ? '#e0b040'
+    : _estadoFib.includes('INVALIDADO')          ? '#5a6072'
+    : '#bc8cff';
+
+  // Faixa de retração sombreada: baseline em zona_inf preenchendo até zona_sup.
+  const zonaInf = Number(_cacheFibContexto.zona_inf);
+  const zonaSup = Number(_cacheFibContexto.zona_sup);
+  if ([zonaInf, zonaSup].every(Number.isFinite)) {
+    const faixa = chartPreco.addBaselineSeries({
+      baseValue: { type: 'price', price: zonaInf },
+      topFillColor1: corFib + '2e', topFillColor2: corFib + '2e',
+      topLineColor: 'transparent',
+      bottomFillColor1: 'transparent', bottomFillColor2: 'transparent',
+      bottomLineColor: 'transparent',
+      lastValueVisible: false, priceLineVisible: false, crosshairMarkerVisible: false,
+    });
+    faixa.setData([
+      {time: inicio, value: zonaSup},
+      {time: fimGrafico, value: zonaSup},
+    ]);
+    linhasFib.push(faixa);
+  }
+
   const impulso = chartPreco.addLineSeries({
-    color: '#bc8cffaa', lineWidth: 2, lineStyle: LightweightCharts.LineStyle.Solid,
+    color: corFib + 'aa', lineWidth: 2, lineStyle: LightweightCharts.LineStyle.Solid,
     title: 'Fib impulso', lastValueVisible: false, priceLineVisible: false,
     crosshairMarkerVisible: false,
   });
@@ -1690,7 +1698,10 @@ function renderizarLeituraRapida(dados) {
     : (aberta ? `ordem aberta ${aberta.direcao.toUpperCase()}` : 'livre');
   const riscoCls = noticiaHigh ? 'quick-danger' : (aberta ? 'quick-warn' : 'quick-ok');
   const fib = dados.fibContexto;
-  const fibTxt = fib ? `${fib.direcao === 'call' ? 'CALL' : 'PUT'} · ${fib.estado}` : 'sem impulso válido';
+  const fibSemAncora = fib && !Number.isFinite(Number(fib.inicio_time));
+  const fibTxt = !fib ? 'sem impulso válido'
+    : fibSemAncora ? 'sem âncora estrutural'
+    : `${fib.direcao === 'call' ? 'CALL' : 'PUT'} · ${fib.estado}`;
   const fibCls = fib?.confirmado ? 'quick-ok'
     : (fib?.tocou_zona || fib?.estado === 'RETRAÇÃO PROFUNDA — ESPERAR' ? 'quick-warn'
     : (fib?.estado === 'IMPULSO INVALIDADO' ? 'quick-danger' : 'quick-info'));
