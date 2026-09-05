@@ -273,7 +273,8 @@ def test_sombra_guarda_timeframe_para_comparar_m5_e_m15(tmp_path):
         linhas = db.execute(
             "SELECT timeframe FROM simulacoes ORDER BY timeframe"
         ).fetchall()
-    assert linhas == [(300,), (900,)]
+    # sqlite3.Row nao compara igual a tupla; o que importa sao os valores.
+    assert [linha[0] for linha in linhas] == [300, 900]
 
 
 def test_decisoes_grafico_mostra_setup_e_timeframe(tmp_path):

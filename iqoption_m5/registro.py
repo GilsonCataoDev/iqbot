@@ -57,6 +57,10 @@ class RegistroSQLite:
 
     def _conectar(self):
         conexao = sqlite3.connect(self.caminho, timeout=10)
+        # sqlite3.Row aceita indice E nome de coluna: o desempacotamento em
+        # tupla das consultas antigas continua valendo, e as consultas que
+        # acessam row["coluna"] param de estourar TypeError.
+        conexao.row_factory = sqlite3.Row
         conexao.execute("PRAGMA journal_mode=WAL")
         return conexao
 
@@ -206,6 +210,23 @@ class RegistroSQLite:
                     latencia_ms INTEGER,
                     criado_em TEXT NOT NULL
                 );
+
+                CREATE TABLE IF NOT EXISTS marcacoes_manuais (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    ativo TEXT NOT NULL,
+                    painel TEXT NOT NULL,
+                    tipo TEXT NOT NULL,
+                    preco_a REAL NOT NULL,
+                    preco_b REAL,
+                    tempo_a INTEGER,
+                    tempo_b INTEGER,
+                    direcao TEXT,
+                    rotulo TEXT,
+                    criado_em TEXT NOT NULL
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_marcacoes_ativo
+                    ON marcacoes_manuais(painel, ativo);
 
                 CREATE INDEX IF NOT EXISTS idx_operacoes_status_data
                     ON operacoes(status, enviada_em);
@@ -1602,6 +1623,63 @@ class RegistroSQLite:
             if wr < limiar:
                 resultado[row["setup"]] = {"n": n, "wins": wins, "winrate": wr}
         return resultado
+
+    # ------------------------------------------------------------------
+    # Marcações manuais do operador (fibo e linha horizontal)
+    # ------------------------------------------------------------------
+
+    def marcacoes(self, painel: str, ativo: str) -> list[dict]:
+        """Marcações que o operador desenhou neste painel para este ativo."""
+        with self._lock, self._sessao() as db:
+            linhas = db.execute(
+                """
+                SELECT id, ativo, painel, tipo, preco_a, preco_b,
+                       tempo_a, tempo_b, direcao, rotulo, criado_em
+                FROM marcacoes_manuais
+                WHERE painel = ? AND ativo = ?
+                ORDER BY id
+                """,
+                (painel, ativo),
+            ).fetchall()
+        return [dict(linha) for linha in linhas]
+
+    def salvar_marcacao(
+        self, painel: str, ativo: str, tipo: str, preco_a: float,
+        preco_b: float | None = None, tempo_a: int | None = None,
+        tempo_b: int | None = None, direcao: str | None = None,
+        rotulo: str | None = None,
+    ) -> int:
+        """Grava uma marcação e devolve o id gerado.
+
+        `tipo` é "fibo" (usa preco_a/preco_b como origem/extremo) ou
+        "horizontal" (só preco_a).
+        """
+        if tipo not in {"fibo", "horizontal"}:
+            raise ValueError(f"tipo de marcação desconhecido: {tipo}")
+        if tipo == "fibo" and preco_b is None:
+            raise ValueError("fibo exige preco_b")
+        with self._lock, self._sessao() as db:
+            cursor = db.execute(
+                """
+                INSERT INTO marcacoes_manuais (
+                    ativo, painel, tipo, preco_a, preco_b,
+                    tempo_a, tempo_b, direcao, rotulo, criado_em
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (ativo, painel, tipo, float(preco_a),
+                 None if preco_b is None else float(preco_b),
+                 tempo_a, tempo_b, direcao, rotulo,
+                 datetime.utcnow().isoformat()),
+            )
+            return int(cursor.lastrowid)
+
+    def remover_marcacao(self, marcacao_id: int) -> bool:
+        """Apaga uma marcação. Devolve False se o id não existia."""
+        with self._lock, self._sessao() as db:
+            cursor = db.execute(
+                "DELETE FROM marcacoes_manuais WHERE id = ?", (int(marcacao_id),)
+            )
+            return cursor.rowcount > 0
 
     def status_decisoes_grafico(self, ativo: str) -> dict[tuple[str, str], str]:
         with self._lock, self._sessao() as db:
