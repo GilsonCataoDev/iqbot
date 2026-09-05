@@ -49,7 +49,10 @@ class TestPainelHtml(unittest.TestCase):
 
         self.assertIn("min-width: 290px", html)
         self.assertIn('id="camada-bloqueados"', html)
-        self.assertIn('id="camada-auxiliares"', html)
+        # A camada "Auxiliares" foi removida: so escondia pullbacks/confluencias,
+        # que os setups atuais nunca produzem, entao o controle nao fazia nada.
+        self.assertNotIn('id="camada-auxiliares"', html)
+        self.assertNotIn("chkAuxiliares", html)
         self.assertIn("compactarMarcadores", html)
         self.assertIn("modoLab", html)
 

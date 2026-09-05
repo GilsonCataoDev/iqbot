@@ -428,7 +428,6 @@
     <label><input type="checkbox" id="camada-niveis" checked> S/R</label>
     <label><input type="checkbox" id="camada-fib" checked> Fib</label>
     <label><input type="checkbox" id="camada-bloqueados"> Bloqueados</label>
-    <label><input type="checkbox" id="camada-auxiliares"> Auxiliares</label>
     <button class="btn-icon" id="btn-som" title="Ativar/desativar som nos sinais">🔕</button>
   </div>
 </div>
@@ -1074,12 +1073,10 @@ const chkEma    = document.getElementById('camada-ema');
 const chkNiveis = document.getElementById('camada-niveis');
 const chkFib    = document.getElementById('camada-fib');
 const chkBloqueados = document.getElementById('camada-bloqueados');
-const chkAuxiliares = document.getElementById('camada-auxiliares');
 // Fora do Lab preservamos a visualização histórica anterior. No Lab, a tela
 // nasce limpa e o operador escolhe quando quer inspecionar ruído de pesquisa.
 if (!modoLab) {
   chkBloqueados.checked = true;
-  chkAuxiliares.checked = true;
 }
 function _toggleNiveis() {
   linhasNiveis.forEach(l => serieCandle.removePriceLine(l));
@@ -1171,7 +1168,7 @@ function _toggleFib() {
   _toggleNiveis();
   _toggleFib();
 }));
-[chkBloqueados, chkAuxiliares].forEach(chk => chk.addEventListener('change', atualizar));
+chkBloqueados.addEventListener('change', atualizar);
 
 function abreviarSetup(valor) {
   const texto = String(valor || '')
@@ -1427,7 +1424,7 @@ async function atualizar() {
       _prioridade: s.status === 'bloqueado' ? 10 : 30,
     }));
     const temposConfl = new Set((dados.confluencias||[]).map(c => c.time));
-    const marcadoresPullback = !chkAuxiliares.checked ? [] : (dados.pullbacks||[])
+    const marcadoresPullback = (dados.pullbacks||[])
       .filter(p => !temposConfl.has(p.time))
       .filter(p => p.status !== 'bloqueado' || chkBloqueados.checked).map(p => ({
       time: p.time,
@@ -1436,7 +1433,7 @@ async function atualizar() {
       shape: 'circle', text: `PB ${(p.fatores||[]).join('+')}${p.status==='bloqueado'?' BLQ':''}`,
       _prioridade: 15,
     }));
-    const marcadoresConfl = !chkAuxiliares.checked ? [] : (dados.confluencias||[])
+    const marcadoresConfl = (dados.confluencias||[])
       .filter(c => c.status !== 'bloqueado' || chkBloqueados.checked).map(c => ({
       time: c.time,
       position: c.direcao === 'compra' ? 'belowBar' : 'aboveBar',
