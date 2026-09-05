@@ -61,9 +61,24 @@ class TestPainelHtml(unittest.TestCase):
         self.assertIn("inicio_time", html)
         self.assertIn("fim_time", html)
         self.assertIn("_ancorasFib", html)
-        self.assertIn("campoOrigem", html)
         self.assertIn("Fib impulso", html)
         self.assertIn("f.papel === 'zona' || f.papel === 'extremo'", html)
+
+        # A perna vem só das âncoras do backend. Casar preços contra os candles
+        # desenhava uma perna plausível porém arbitrária — não pode voltar.
+        self.assertNotIn("campoOrigem", html)
+        self.assertNotIn("campoExtremo", html)
+
+    def test_fibo_sombreia_a_zona_e_colore_pelo_estado(self):
+        html = (
+            Path(__file__).resolve().parent.parent / "grafico_web" / "index.html"
+        ).read_text(encoding="utf-8")
+
+        self.assertIn("addBaselineSeries", html)
+        self.assertIn("zona_inf", html)
+        self.assertIn("zona_sup", html)
+        for cor in ("#26a69a", "#e0b040", "#5a6072", "#bc8cff"):
+            self.assertIn(cor, html)
 
 
 if __name__ == "__main__":

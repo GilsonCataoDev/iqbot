@@ -195,6 +195,7 @@ def _montar_prompt_segunda_opiniao(alerta: dict) -> str:
 
 def segunda_opiniao_alerta(alerta_dados: dict) -> dict | None:
     """Consulta Groq sobre um sinal calculado. Retorna dict ou None se falhar/indisponível."""
+    global _bloqueado_ate
     if not MODELO_SEGUNDA_OPINIAO:
         return None
     with _lock_bloqueio:
@@ -226,7 +227,6 @@ def segunda_opiniao_alerta(alerta_dados: dict) -> dict | None:
             return None
         latencia_ms = int((time.time() - t0) * 1000)
         if resp.status_code == 429:
-            global _bloqueado_ate
             with _lock_bloqueio:
                 pausa = 300 if "tokens per day" in resp.text else 30
                 _bloqueado_ate = time.time() + pausa

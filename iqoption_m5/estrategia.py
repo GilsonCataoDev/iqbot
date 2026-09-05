@@ -424,37 +424,108 @@ class EstrategiaReversaoM5:
             return None
         return float(mapa["zona_inf"]), float(mapa["zona_sup"])
 
-    def _mapa_fibonacci(
-        self, df: pd.DataFrame, indice_recuo: int, tendencia: str
-    ) -> dict | None:
-        """Mapa estável usado pelas estratégias já avaliadas."""
-        c = self.config
-        inicio = max(0, indice_recuo - c.pullback_janela)
-        impulso = df.iloc[inicio:indice_recuo]
-        if len(impulso) < 10:
-            return None
+    def _perna_por_extremos(
+        self, impulso: pd.DataFrame, tendencia: str
+    ) -> tuple[int, int] | None:
+        """Maior perna bruta da janela, sem exigir pivô confirmado."""
         if tendencia == "alta":
             pos_extremo = int(np.argmax(impulso["High"].to_numpy()))
             if pos_extremo == 0:
                 return None
             pos_origem = int(np.argmin(impulso.iloc[:pos_extremo]["Low"].to_numpy()))
-            origem = float(impulso.iloc[pos_origem]["Low"])
-            extremo = float(impulso.iloc[pos_extremo]["High"])
-            amplitude = extremo - origem
-            preco_nivel = lambda nivel: extremo - amplitude * nivel
-        elif tendencia == "baixa":
+        else:
             pos_extremo = int(np.argmin(impulso["Low"].to_numpy()))
             if pos_extremo == 0:
                 return None
             pos_origem = int(np.argmax(impulso.iloc[:pos_extremo]["High"].to_numpy()))
+        return pos_origem, pos_extremo
+
+    def _perna_por_pivo(
+        self, impulso: pd.DataFrame, tendencia: str,
+        amplitude_minima: float, raio: int,
+    ) -> tuple[tuple[int, int] | None, bool]:
+        """Perna entre pivô confirmado e o extremo da perna em andamento.
+
+        A origem precisa ser um fundo/topo swing confirmado. O extremo, porém,
+        acompanha a perna até o último candle fechado; exigir extremo
+        confirmado fazia a Fibo parar antes do preço.
+
+        Devolve (par, houve_pivo). Par None com houve_pivo True significa que
+        existe estrutura na janela mas nenhuma perna passou nos mínimos — aí o
+        chamador não deve cair para o critério frouxo.
+        """
+        fundos = self._fundos_swing(impulso["Low"], raio)
+        topos = self._topos_swing(impulso["High"], raio)
+        houve_pivo = bool(fundos or topos)
+        origens = fundos if tendencia == "alta" else topos
+        for pos_origem in reversed(origens):
+            depois = impulso.iloc[pos_origem + 1 :]
+            if depois.empty:
+                continue
+            if tendencia == "alta":
+                pos_extremo = pos_origem + 1 + int(np.argmax(depois["High"].to_numpy()))
+                amplitude = (
+                    float(impulso.iloc[pos_extremo]["High"])
+                    - float(impulso.iloc[pos_origem]["Low"])
+                )
+            else:
+                pos_extremo = pos_origem + 1 + int(np.argmin(depois["Low"].to_numpy()))
+                amplitude = (
+                    float(impulso.iloc[pos_origem]["High"])
+                    - float(impulso.iloc[pos_extremo]["Low"])
+                )
+            if amplitude >= amplitude_minima and (pos_extremo - pos_origem) >= 2 * raio + 1:
+                return (pos_origem, pos_extremo), houve_pivo
+        return None, houve_pivo
+
+    def _mapa_fibonacci(
+        self, df: pd.DataFrame, indice_recuo: int, tendencia: str,
+        *, exigir_pivo_confirmado: bool = False,
+    ) -> dict | None:
+        """Mapa de Fibonacci da janela de pullback.
+
+        `exigir_pivo_confirmado` escolhe a regra da perna: False mantém o
+        critério das estratégias já avaliadas em backtest (extremos brutos da
+        janela); True exige origem em pivô swing e não inventa perna quando há
+        estrutura sem candidata válida.
+        """
+        c = self.config
+        if tendencia not in {"alta", "baixa"}:
+            return None
+        inicio = max(0, indice_recuo - c.pullback_janela)
+        impulso = df.iloc[inicio:indice_recuo]
+        if len(impulso) < 10:
+            return None
+        atr = float(df.iloc[indice_recuo]["ATR"])
+        if atr <= 0:
+            return None
+
+        par: tuple[int, int] | None = None
+        if exigir_pivo_confirmado:
+            par, houve_pivo = self._perna_por_pivo(
+                impulso, tendencia,
+                c.pullback_amplitude_min_atr * atr, c.pullback_pivo_raio,
+            )
+            if par is None and houve_pivo:
+                return None
+        if par is None:
+            par = self._perna_por_extremos(impulso, tendencia)
+        if par is None:
+            return None
+
+        pos_origem, pos_extremo = par
+        if tendencia == "alta":
+            origem = float(impulso.iloc[pos_origem]["Low"])
+            extremo = float(impulso.iloc[pos_extremo]["High"])
+            amplitude = extremo - origem
+            preco_nivel = lambda nivel: extremo - amplitude * nivel
+        else:
             origem = float(impulso.iloc[pos_origem]["High"])
             extremo = float(impulso.iloc[pos_extremo]["Low"])
             amplitude = origem - extremo
             preco_nivel = lambda nivel: extremo + amplitude * nivel
-        else:
-            return None
-        atr = float(df.iloc[indice_recuo]["ATR"])
-        if amplitude <= 0 or atr <= 0 or amplitude < c.pullback_amplitude_min_atr * atr:
+
+        if amplitude <= 0 or amplitude < c.pullback_amplitude_min_atr * atr:
             return None
         return self._finalizar_mapa_fibonacci(
             impulso, pos_origem, pos_extremo, tendencia, origem, extremo,
@@ -464,88 +535,9 @@ class EstrategiaReversaoM5:
     def _mapa_fibonacci_visual(
         self, df: pd.DataFrame, indice_recuo: int, tendencia: str
     ) -> dict | None:
-        """Fibonacci visual da perna estrutural ainda em andamento."""
-        c = self.config
-        inicio = max(0, indice_recuo - c.pullback_janela)
-        impulso = df.iloc[inicio:indice_recuo]
-        if len(impulso) < 10:
-            return None
-
-        atr = float(df.iloc[indice_recuo]["ATR"])
-        if atr <= 0:
-            return None
-        amplitude_minima = c.pullback_amplitude_min_atr * atr
-        raio = c.pullback_pivo_raio
-        fundos = self._fundos_swing(impulso["Low"], raio)
-        topos = self._topos_swing(impulso["High"], raio)
-        pos_origem: int | None = None
-        pos_extremo: int | None = None
-
-        if tendencia == "alta":
-            # A origem precisa ser um fundo estrutural confirmado. O extremo,
-            # porém, acompanha a perna em andamento até o último candle fechado;
-            # exigir um topo confirmado fazia a Fibo parar antes do preço.
-            encontrou_par = False
-            for fundo in reversed(fundos):
-                depois_origem = impulso.iloc[fundo + 1 :]
-                if depois_origem.empty:
-                    continue
-                encontrou_par = True
-                topo = fundo + 1 + int(np.argmax(depois_origem["High"].to_numpy()))
-                candidato_amplitude = float(impulso.iloc[topo]["High"]) - float(
-                    impulso.iloc[fundo]["Low"]
-                )
-                duracao = topo - fundo
-                if candidato_amplitude >= amplitude_minima and duracao >= 2 * raio + 1:
-                    pos_origem, pos_extremo = fundo, topo
-                    break
-            if pos_extremo is None:
-                if encontrou_par or fundos or topos:
-                    return None
-                pos_extremo = int(np.argmax(impulso["High"].to_numpy()))
-                if pos_extremo == 0:
-                    return None
-                antes_extremo = impulso.iloc[:pos_extremo]
-                pos_origem = int(np.argmin(antes_extremo["Low"].to_numpy()))
-            origem = float(impulso.iloc[pos_origem]["Low"])
-            extremo = float(impulso.iloc[pos_extremo]["High"])
-            amplitude = extremo - origem
-            preco_nivel = lambda nivel: extremo - amplitude * nivel
-        elif tendencia == "baixa":
-            encontrou_par = False
-            for topo in reversed(topos):
-                depois_origem = impulso.iloc[topo + 1 :]
-                if depois_origem.empty:
-                    continue
-                encontrou_par = True
-                fundo = topo + 1 + int(np.argmin(depois_origem["Low"].to_numpy()))
-                candidato_amplitude = float(impulso.iloc[topo]["High"]) - float(
-                    impulso.iloc[fundo]["Low"]
-                )
-                duracao = fundo - topo
-                if candidato_amplitude >= amplitude_minima and duracao >= 2 * raio + 1:
-                    pos_origem, pos_extremo = topo, fundo
-                    break
-            if pos_extremo is None:
-                if encontrou_par or fundos or topos:
-                    return None
-                pos_extremo = int(np.argmin(impulso["Low"].to_numpy()))
-                if pos_extremo == 0:
-                    return None
-                antes_extremo = impulso.iloc[:pos_extremo]
-                pos_origem = int(np.argmax(antes_extremo["High"].to_numpy()))
-            origem = float(impulso.iloc[pos_origem]["High"])
-            extremo = float(impulso.iloc[pos_extremo]["Low"])
-            amplitude = origem - extremo
-            preco_nivel = lambda nivel: extremo + amplitude * nivel
-        else:
-            return None
-
-        if amplitude <= 0 or atr <= 0 or amplitude < c.pullback_amplitude_min_atr * atr:
-            return None
-        return self._finalizar_mapa_fibonacci(
-            impulso, pos_origem, pos_extremo, tendencia, origem, extremo,
-            amplitude, atr, preco_nivel,
+        """Fibonacci do gráfico: exige perna estrutural confirmada."""
+        return self._mapa_fibonacci(
+            df, indice_recuo, tendencia, exigir_pivo_confirmado=True
         )
 
     def _finalizar_mapa_fibonacci(
