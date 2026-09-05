@@ -4,6 +4,7 @@
 <meta charset="UTF-8">
 <title>IQ Option — sinais ao vivo</title>
 <script src="https://unpkg.com/lightweight-charts@4.1.3/dist/lightweight-charts.standalone.production.js"></script>
+<script src="marcacoes.js"></script>
 <style>
   :root {
     --bg: #0d1117; --surface: #161b27; --surface2: #1c2233; --border: #222d42;
@@ -380,6 +381,12 @@
   .filtro-chip { padding: 1px 6px; border-radius: 10px; font-size: 9px; cursor: pointer;
     background: #1a2235; border: 1px solid var(--border); color: var(--muted); transition: background .15s; }
   .filtro-chip.ativo { background: var(--accent); border-color: var(--accent); color: #fff; }
+  .marc-sep { width:1px; height:14px; background:var(--border); margin:0 3px; display:inline-block; }
+  .btn-marc { background:#1a2235; border:1px solid var(--border); color:var(--muted);
+    border-radius:5px; font-size:10px; padding:2px 7px; cursor:pointer; }
+  .btn-marc:hover { color:var(--text); }
+  .btn-marc.ativo { background:var(--accent); border-color:var(--accent); color:#fff; }
+  #marc-dica { font-size:9px; color:var(--yellow); }
   .filtro-hora-input { width: 30px; font-size: 9px; background: #1a2235; border: 1px solid var(--border);
     color: var(--text); border-radius: 4px; padding: 1px 3px; text-align: center; }
   .aviso-degradacao { font-size: 9px; color: var(--yellow); background: rgba(234,179,8,.08);
@@ -428,6 +435,11 @@
     <label><input type="checkbox" id="camada-niveis" checked> S/R</label>
     <label><input type="checkbox" id="camada-fib" checked> Fib</label>
     <label><input type="checkbox" id="camada-bloqueados"> Bloqueados</label>
+    <span class="marc-sep"></span>
+    <button class="btn-marc" id="btn-marc-fibo" onclick="marcarFibo()" title="Marcar Fibo: clique na origem e depois no extremo">✎ Fibo</button>
+    <button class="btn-marc" id="btn-marc-linha" onclick="marcarLinha()" title="Marcar linha horizontal: um clique no preço">✎ Linha</button>
+    <button class="btn-marc" id="btn-marc-limpar" onclick="limparMarcacoes()" title="Apagar todas as marcações deste ativo">✕</button>
+    <span id="marc-dica"></span>
     <button class="btn-icon" id="btn-som" title="Ativar/desativar som nos sinais">🔕</button>
   </div>
 </div>
@@ -1198,6 +1210,29 @@ function selecionarAtivo(id) {
   document.getElementById('ativo').value = id;
   localStorage.setItem(CHAVE_LS, id);
   atualizar(); atualizarResumo();
+  if (window.Marcacoes) Marcacoes.carregar();
+}
+
+// ── Marcação manual (fibo e linha horizontal), via marcacoes.js ──────────
+function _marcAtualizar(itens, modo, aguardandoSegundo) {
+  const bF = document.getElementById('btn-marc-fibo');
+  const bL = document.getElementById('btn-marc-linha');
+  const dica = document.getElementById('marc-dica');
+  if (bF) bF.classList.toggle('ativo', modo === 'fibo');
+  if (bL) bL.classList.toggle('ativo', modo === 'horizontal');
+  if (!dica) return;
+  dica.textContent = modo === 'fibo'
+    ? (aguardandoSegundo ? 'clique no extremo' : 'clique na origem')
+    : modo === 'horizontal' ? 'clique no preço'
+    : (itens.length ? `${itens.length} ${itens.length > 1 ? 'marcações' : 'marcação'}` : '');
+}
+function marcarFibo()  { Marcacoes.setModo('fibo'); }
+function marcarLinha() { Marcacoes.setModo('horizontal'); }
+function limparMarcacoes() {
+  if (!Marcacoes.itens.length) return;
+  if (confirm(`Apagar ${Marcacoes.itens.length} marcação(ões) de ${ativoAtual}?`)) {
+    Marcacoes.limparTudo();
+  }
 }
 
 async function carregarManifesto() {
@@ -2152,6 +2187,12 @@ async function carregarHistoricoHoje() {
 
 (async () => {
   await carregarManifesto();
+  if (window.Marcacoes) {
+    Marcacoes.iniciar({
+      painel: 'lab', chart: chartPreco, serie: serieCandle,
+      getAtivo: () => ativoAtual, aoAtualizar: _marcAtualizar,
+    });
+  }
   await carregarHistoricoHoje();
   atualizar();
   atualizarResumo();

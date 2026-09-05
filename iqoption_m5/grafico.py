@@ -85,6 +85,73 @@ def _handle_exportar(handler) -> None:
         handler.send_error(500, str(e))
 
 
+def _json_resposta(handler, corpo, status=200) -> None:
+    dados = json.dumps(corpo, ensure_ascii=False).encode("utf-8")
+    handler.send_response(status)
+    handler.send_header("Content-Type", "application/json")
+    handler.send_header("Access-Control-Allow-Origin", "*")
+    handler.send_header("Content-Length", str(len(dados)))
+    handler.end_headers()
+    handler.wfile.write(dados)
+
+
+def _corpo_json(handler) -> dict:
+    tamanho = int(handler.headers.get("Content-Length", 0))
+    return json.loads(handler.rfile.read(tamanho)) if tamanho else {}
+
+
+def _handle_marcacoes_listar(handler) -> None:
+    """GET /marcacoes?painel=&ativo= — marcações manuais do operador."""
+    from urllib.parse import urlparse, parse_qs
+    try:
+        if _handler_registro is None:
+            _json_resposta(handler, [], 200)
+            return
+        params = parse_qs(urlparse(handler.path).query)
+        painel = (params.get("painel") or ["lab"])[0]
+        ativo = (params.get("ativo") or [""])[0]
+        if not ativo:
+            _json_resposta(handler, [], 200)
+            return
+        _json_resposta(handler, _handler_registro.marcacoes(painel, ativo))
+    except Exception as erro:
+        handler.send_error(500, str(erro))
+
+
+def _handle_marcacoes_salvar(handler) -> None:
+    """POST /marcacoes — grava uma marcação e devolve o id."""
+    try:
+        if _handler_registro is None:
+            handler.send_error(503, "Registro nao disponivel")
+            return
+        c = _corpo_json(handler)
+        novo_id = _handler_registro.salvar_marcacao(
+            painel=c.get("painel", "lab"), ativo=c["ativo"], tipo=c["tipo"],
+            preco_a=c["preco_a"], preco_b=c.get("preco_b"),
+            tempo_a=c.get("tempo_a"), tempo_b=c.get("tempo_b"),
+            direcao=c.get("direcao"), rotulo=c.get("rotulo"),
+        )
+        _json_resposta(handler, {"id": novo_id})
+    except (KeyError, ValueError) as erro:
+        handler.send_error(400, str(erro))
+    except Exception as erro:
+        handler.send_error(500, str(erro))
+
+
+def _handle_marcacoes_remover(handler) -> None:
+    """POST /marcacoes/remover — apaga por id."""
+    try:
+        if _handler_registro is None:
+            handler.send_error(503, "Registro nao disponivel")
+            return
+        c = _corpo_json(handler)
+        _json_resposta(handler, {"removido": _handler_registro.remover_marcacao(c["id"])})
+    except (KeyError, ValueError) as erro:
+        handler.send_error(400, str(erro))
+    except Exception as erro:
+        handler.send_error(500, str(erro))
+
+
 class _ServidorReutilizavel(socketserver.ThreadingTCPServer):
     allow_reuse_address = True
     daemon_threads = True
@@ -108,6 +175,8 @@ class _HandlerSilencioso(http.server.SimpleHTTPRequestHandler):
     def do_GET(self):
         if self.path.startswith("/exportar"):
             _handle_exportar(self)
+        elif self.path.split("?")[0] == "/marcacoes":
+            _handle_marcacoes_listar(self)
         else:
             super().do_GET()
 
@@ -128,6 +197,10 @@ class _HandlerSilencioso(http.server.SimpleHTTPRequestHandler):
                 self.send_error(500)
         elif self.path.startswith("/opiniao_groq"):
             _handle_opiniao_groq(self)
+        elif self.path.startswith("/marcacoes/remover"):
+            _handle_marcacoes_remover(self)
+        elif self.path.startswith("/marcacoes"):
+            _handle_marcacoes_salvar(self)
         else:
             self.send_error(404)
 
@@ -216,6 +289,9 @@ class GraficoM5:
             raise RuntimeError(f"Painel web não encontrado em {self.pasta_web_origem}")
         self.pasta_web.mkdir(parents=True, exist_ok=True)
         (self.pasta_web / "index.html").write_bytes(origem_html.read_bytes())
+        origem_js = self.pasta_web_origem / "marcacoes.js"
+        if origem_js.exists():
+            (self.pasta_web / "marcacoes.js").write_bytes(origem_js.read_bytes())
         manifesto = {"ativos": [{"id": ativo, "label": ativo} for ativo in self.config.ativos]}
         self._json_atomico(self.pasta_dados / "manifest.json", manifesto)
         handler = functools.partial(_HandlerSilencioso, directory=str(self.pasta_web))

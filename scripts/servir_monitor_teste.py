@@ -27,6 +27,11 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import monitor_mercado
 
 (RAIZ / "index.html").write_text(monitor_mercado._HTML, encoding="utf-8")
+_SRC_JS = Path(__file__).resolve().parents[1] / "grafico_web" / "marcacoes.js"
+if _SRC_JS.exists():
+    (RAIZ / "marcacoes.js").write_bytes(_SRC_JS.read_bytes())
+from iqoption_m5.registro import RegistroSQLite
+_REGISTRO = RegistroSQLite(RAIZ / "marcacoes_teste.db")
 
 # ── JSON simulado ───────────────────────────────────────────────────────────
 MOCK_ATIVOS = {
@@ -298,6 +303,36 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         super().__init__(*a, directory=str(RAIZ), **kw)
     def log_message(self, fmt, *args):
         pass
+    def _json(self, corpo, status=200):
+        dados = json.dumps(corpo, ensure_ascii=False).encode("utf-8")
+        self.send_response(status)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Access-Control-Allow-Origin", "*")
+        self.send_header("Content-Length", str(len(dados)))
+        self.end_headers()
+        self.wfile.write(dados)
+    def do_GET(self):
+        # Rota exata: startswith pegaria /marcacoes.js tambem.
+        if self.path.split("?")[0] == "/marcacoes":
+            from urllib.parse import urlparse, parse_qs
+            q = parse_qs(urlparse(self.path).query)
+            self._json(_REGISTRO.marcacoes(
+                (q.get("painel") or ["monitor"])[0], (q.get("ativo") or [""])[0]))
+            return
+        super().do_GET()
+    def do_POST(self):
+        corpo = self.rfile.read(int(self.headers.get("Content-Length", 0)) or 0)
+        c = json.loads(corpo or b"{}")
+        if self.path.startswith("/marcacoes/remover"):
+            self._json({"removido": _REGISTRO.remover_marcacao(c["id"])})
+        elif self.path.startswith("/marcacoes"):
+            self._json({"id": _REGISTRO.salvar_marcacao(
+                painel=c.get("painel", "monitor"), ativo=c["ativo"], tipo=c["tipo"],
+                preco_a=c["preco_a"], preco_b=c.get("preco_b"),
+                tempo_a=c.get("tempo_a"), tempo_b=c.get("tempo_b"),
+                direcao=c.get("direcao"), rotulo=c.get("rotulo"))})
+        else:
+            self.send_error(404)
 
 class Servidor(socketserver.ThreadingTCPServer):
     allow_reuse_address = True

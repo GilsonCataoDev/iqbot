@@ -1542,7 +1542,8 @@ def loop(api, cfg, estado: Estado, calendario: CalendarioEconomico | None = None
 
 _HTML = """<!DOCTYPE html><html lang="pt-BR"><head><meta charset="utf-8">
 <title>Monitor Mercado</title>
-<script src="https://unpkg.com/lightweight-charts@4.1.3/dist/lightweight-charts.standalone.production.js"></script><style>
+<script src="https://unpkg.com/lightweight-charts@4.1.3/dist/lightweight-charts.standalone.production.js"></script>
+<script src="marcacoes.js"></script><style>
 *{box-sizing:border-box}
 body{font-family:ui-monospace,monospace;background:#0b1220;color:#e2e8f0;margin:0;padding:.8rem}
 h1{color:#38bdf8;font-size:1.05rem;margin:0 0 .2rem}
@@ -1566,6 +1567,11 @@ tr:hover{background:#16203450;cursor:pointer}
 .bar>i{position:absolute;top:-2px;width:3px;height:11px;background:#38bdf8;border-radius:1px}
 #cv{width:100%;height:320px;background:#0d1526;border-radius:.4rem;margin:.4rem 0}
 #cv-titulo{color:#94a3b8;font-size:.7rem;margin:.3rem 0 0}
+#marc-barra{display:flex;gap:.3rem;align-items:center;margin:.35rem 0}
+.btn-marc{background:#16233a;border:1px solid #1e293b;color:#94a3b8;border-radius:.25rem;font-size:.68rem;padding:.15rem .5rem;cursor:pointer}
+.btn-marc:hover{color:#e2e8f0}
+.btn-marc.on{background:#38bdf8;border-color:#38bdf8;color:#08131f}
+#marc-dica{font-size:.66rem;color:#fbbf24}
 #cv-aviso{display:none;color:#94a3b8;font-size:.72rem;padding:.6rem;background:#0d1526;border-radius:.4rem;margin:.4rem 0}
 .tabs{display:flex;gap:.3rem;margin:.3rem 0}
 .tab{background:#1e293b;border:1px solid #334155;border-radius:.3rem;padding:.15rem .5rem;
@@ -1649,6 +1655,12 @@ Testado em 01/09/2026: operar a favor do canal (51.14%) rende o mesmo que contra
 <div class="sec">GRAFICO</div>
 <div class="tabs" id="tabs"></div>
 <div id="cv-titulo"></div>
+<div id="marc-barra">
+  <button class="btn-marc" id="btn-marc-fibo" onclick="marcarFibo()" title="Clique na origem e depois no extremo">✎ Fibo</button>
+  <button class="btn-marc" id="btn-marc-linha" onclick="marcarLinha()" title="Um clique no preço">✎ Linha</button>
+  <button class="btn-marc" id="btn-marc-limpar" onclick="limparMarcacoes()" title="Apagar marcações deste ativo">✕</button>
+  <span id="marc-dica"></span>
+</div>
 <div id="cv-aviso"></div>
 <div id="cv"></div>
 </section>
@@ -2117,12 +2129,32 @@ function render(){
   renderFibo();
 }
 
-async function pick(a){ sel=a; _primeiroDesenho=true; render(); await grafico(); }
+async function pick(a){ sel=a; _primeiroDesenho=true; render(); await grafico();
+  if(window.Marcacoes) Marcacoes.carregar(); }
 
 let chartM=null, sCandles=null, sSup=null, sInf=null;
 let linhasNivelM=[], seriesZonaM=[];
 let _primeiroDesenho=true;
 let _observadorLargura=null;
+
+function _marcAtualizar(itens, modo, aguardandoSegundo){
+  const bF=document.getElementById('btn-marc-fibo');
+  const bL=document.getElementById('btn-marc-linha');
+  const dica=document.getElementById('marc-dica');
+  if(bF) bF.classList.toggle('on', modo==='fibo');
+  if(bL) bL.classList.toggle('on', modo==='horizontal');
+  if(!dica) return;
+  dica.textContent = modo==='fibo'
+    ? (aguardandoSegundo?'clique no extremo':'clique na origem')
+    : modo==='horizontal' ? 'clique no preço'
+    : (itens.length ? `${itens.length} ${itens.length>1?'marcações':'marcação'}` : '');
+}
+function marcarFibo(){ Marcacoes.setModo('fibo'); }
+function marcarLinha(){ Marcacoes.setModo('horizontal'); }
+function limparMarcacoes(){
+  if(!Marcacoes.itens.length) return;
+  if(confirm(`Apagar ${Marcacoes.itens.length} marcação(ões) de ${sel}?`)) Marcacoes.limparTudo();
+}
 
 function _chartMonitor(){
   if(chartM) return chartM;
@@ -2155,6 +2187,10 @@ function _chartMonitor(){
   sSup=chartM.addLineSeries(opBanda);
   sInf=chartM.addLineSeries(opBanda);
   new ResizeObserver(()=>chartM.applyOptions({width:el.clientWidth})).observe(el);
+  if(window.Marcacoes){
+    Marcacoes.iniciar({painel:'monitor', chart:chartM, serie:sCandles,
+                       getAtivo:()=>sel, aoAtualizar:_marcAtualizar});
+  }
   return chartM;
 }
 
@@ -2302,6 +2338,14 @@ def main() -> int:
                                       sufixo_banco="mercado"))
     g.iniciar(abrir_navegador=False)
     (g.pasta_web / "index.html").write_text(_HTML, encoding="utf-8")
+
+    # O servidor vem do GraficoM5, entao os endpoints /marcacoes ja existem;
+    # falta so o registro. Banco proprio do monitor (sufixo "mercado") para
+    # nao misturar marcacao manual com o banco de operacoes.
+    from iqoption_m5 import grafico as _grafico_mod
+    from iqoption_m5.registro import RegistroSQLite
+    _cfg_marc = dataclasses.replace(base, sufixo_banco="mercado")
+    _grafico_mod._handler_registro = RegistroSQLite(_cfg_marc.banco_sqlite)
 
     estado = Estado(g.pasta_web)
     estado.salvar()

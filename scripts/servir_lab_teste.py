@@ -23,12 +23,18 @@ import sys
 # Porta 8785 liga modoLab automaticamente; em outra porta o modo vem do
 # ?fonte=ema_laboratorio_practice que a URL abaixo ja carrega.
 PORTA = int(sys.argv[1]) if len(sys.argv) > 1 else 8785
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from iqoption_m5.registro import RegistroSQLite
 RAIZ = Path(tempfile.gettempdir()) / f"lab_teste_{PORTA}"
 RAIZ.mkdir(parents=True, exist_ok=True)
 
 # ── Copiar index.html do projeto ─────────────────────────────────────────────
 SRC_HTML = Path(__file__).resolve().parents[1] / "grafico_web" / "index.html"
 (RAIZ / "index.html").write_bytes(SRC_HTML.read_bytes())
+_SRC_JS = SRC_HTML.parent / "marcacoes.js"
+if _SRC_JS.exists():
+    (RAIZ / "marcacoes.js").write_bytes(_SRC_JS.read_bytes())
 
 # ── Helpers de candles simulados ─────────────────────────────────────────────
 def _candles(n: int = 60, preco_base: float = 1.084, tf: int = 300):
@@ -421,6 +427,8 @@ _historico_hoje = {
 print(f"Arquivos gerados em {PASTA_FONTE}")
 
 # ── Servidor ──────────────────────────────────────────────────────────────────
+_REGISTRO = RegistroSQLite(RAIZ / "marcacoes_teste.db")
+
 class Handler(http.server.SimpleHTTPRequestHandler):
     def __init__(self, *a, **kw):
         super().__init__(*a, directory=str(RAIZ), **kw)
@@ -428,7 +436,22 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         # Sem cache: o index.html e os JSONs mudam a cada reinicio do teste.
         self.send_header("Cache-Control", "no-store, must-revalidate")
         super().end_headers()
+    def _json(self, corpo, status=200):
+        dados = json.dumps(corpo, ensure_ascii=False).encode("utf-8")
+        self.send_response(status)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Access-Control-Allow-Origin", "*")
+        self.send_header("Content-Length", str(len(dados)))
+        self.end_headers()
+        self.wfile.write(dados)
+
     def do_GET(self):
+        if self.path.split("?")[0] == "/marcacoes":
+            from urllib.parse import urlparse, parse_qs
+            q = parse_qs(urlparse(self.path).query)
+            self._json(_REGISTRO.marcacoes(
+                (q.get("painel") or ["lab"])[0], (q.get("ativo") or [""])[0]))
+            return
         if self.path.startswith("/exportar"):
             data = (self.path.split("data=")[1].split("&")[0] if "data=" in self.path
                     else _datetime.date.today().isoformat())
@@ -447,6 +470,18 @@ class Handler(http.server.SimpleHTTPRequestHandler):
     def do_POST(self):
         length = int(self.headers.get("Content-Length", 0))
         body = self.rfile.read(length)
+        if self.path.startswith("/marcacoes/remover"):
+            c = json.loads(body or b"{}")
+            self._json({"removido": _REGISTRO.remover_marcacao(c["id"])})
+            return
+        if self.path.startswith("/marcacoes"):
+            c = json.loads(body or b"{}")
+            self._json({"id": _REGISTRO.salvar_marcacao(
+                painel=c.get("painel", "lab"), ativo=c["ativo"], tipo=c["tipo"],
+                preco_a=c["preco_a"], preco_b=c.get("preco_b"),
+                tempo_a=c.get("tempo_a"), tempo_b=c.get("tempo_b"),
+                direcao=c.get("direcao"), rotulo=c.get("rotulo"))})
+            return
         if self.path.startswith("/opiniao_groq"):
             import random
             veredictos = [
