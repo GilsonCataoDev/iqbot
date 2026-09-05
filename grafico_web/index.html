@@ -1238,7 +1238,14 @@ async function carregarManifesto() {
       fetch('toggle', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify(estado) }).catch(() => {});
     }
     if (!Object.keys(togglesSalvos).length) salvarToggles();
-  } catch (e) { select.innerHTML = '<option>sem ativos</option>'; }
+  } catch (e) {
+    select.innerHTML = '<option>sem ativos</option>';
+    const st = document.getElementById('status');
+    if (st) {
+      st.style.color = 'var(--red)';
+      st.textContent = `manifest.json não encontrado em "${fonte}/" — servidor sem dados ou fonte errada`;
+    }
+  }
 }
 
 async function atualizarResumo() {

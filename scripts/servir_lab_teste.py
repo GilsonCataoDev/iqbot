@@ -401,6 +401,10 @@ print(f"Arquivos gerados em {PASTA_FONTE}")
 class Handler(http.server.SimpleHTTPRequestHandler):
     def __init__(self, *a, **kw):
         super().__init__(*a, directory=str(RAIZ), **kw)
+    def end_headers(self):
+        # Sem cache: o index.html e os JSONs mudam a cada reinicio do teste.
+        self.send_header("Cache-Control", "no-store, must-revalidate")
+        super().end_headers()
     def do_GET(self):
         if self.path.startswith("/exportar"):
             data = (self.path.split("data=")[1].split("&")[0] if "data=" in self.path
