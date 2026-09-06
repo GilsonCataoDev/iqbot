@@ -1015,9 +1015,21 @@ const opcoesComuns = {
   handleScroll: true, handleScale: true,
 };
 
-const chartPreco  = LightweightCharts.createChart(document.getElementById('chart-preco'),  { ...opcoesComuns });
-const chartVolume = LightweightCharts.createChart(document.getElementById('chart-volume'), { ...opcoesComuns, timeScale: { visible: false } });
-const chartRsi    = LightweightCharts.createChart(document.getElementById('chart-rsi'),    { ...opcoesComuns });
+// Criar com largura zero deixa a escala de tempo sem range válido, e nem
+// resize() nem fitContent() depois recuperam — o gráfico fica inutilizável.
+// Acontece quando a aba nasce em segundo plano, onde o container mede 0.
+// O ResizeObserver abaixo ajusta para a medida real assim que ela existe.
+function _medidaSegura(id, larguraPadrao = 800, alturaPadrao = 300) {
+  const el = document.getElementById(id);
+  return {
+    width:  (el && el.clientWidth)  || larguraPadrao,
+    height: (el && el.clientHeight) || alturaPadrao,
+  };
+}
+
+const chartPreco  = LightweightCharts.createChart(document.getElementById('chart-preco'),  { ...opcoesComuns, ..._medidaSegura('chart-preco') });
+const chartVolume = LightweightCharts.createChart(document.getElementById('chart-volume'), { ...opcoesComuns, timeScale: { visible: false }, ..._medidaSegura('chart-volume', 800, 90) });
+const chartRsi    = LightweightCharts.createChart(document.getElementById('chart-rsi'),    { ...opcoesComuns, ..._medidaSegura('chart-rsi', 800, 90) });
 
 const serieCandle  = chartPreco.addCandlestickSeries({ upColor: '#26a69a', downColor: '#ef5350', borderVisible: false, wickUpColor: '#26a69a', wickDownColor: '#ef5350' });
 let _linhaEntradaAtiva = null;
@@ -1045,7 +1057,10 @@ sincronizarRange(chartRsi,    [chartPreco,  chartVolume]);
 const ro = new ResizeObserver(() => {
   [['chart-preco', chartPreco], ['chart-volume', chartVolume], ['chart-rsi', chartRsi]].forEach(([id, c]) => {
     const el = document.getElementById(id);
-    if (el) c.resize(el.clientWidth, el.clientHeight);
+    // Aba oculta mede 0; redimensionar para 0 não tem serventia.
+    if (el && el.clientWidth > 0 && el.clientHeight > 0) {
+      c.resize(el.clientWidth, el.clientHeight);
+    }
   });
 });
 ro.observe(document.getElementById('charts-area'));

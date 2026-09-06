@@ -72,6 +72,18 @@ class TestPainelHtml(unittest.TestCase):
         self.assertNotIn("campoOrigem", html)
         self.assertNotIn("campoExtremo", html)
 
+    def test_charts_nao_nascem_com_largura_zero(self):
+        html = (
+            Path(__file__).resolve().parent.parent / "grafico_web" / "index.html"
+        ).read_text(encoding="utf-8")
+
+        # Criado com largura 0 (aba em segundo plano), o chart fica sem range
+        # de tempo valido e nem resize()/fitContent() recuperam.
+        self.assertIn("_medidaSegura", html)
+        for grafico in ("chart-preco", "chart-volume", "chart-rsi"):
+            self.assertIn(f"_medidaSegura('{grafico}'", html)
+        self.assertIn("el.clientWidth > 0 && el.clientHeight > 0", html)
+
     def test_fibo_sombreia_a_zona_e_colore_pelo_estado(self):
         html = (
             Path(__file__).resolve().parent.parent / "grafico_web" / "index.html"
