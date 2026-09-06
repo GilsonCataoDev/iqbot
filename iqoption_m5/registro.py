@@ -3,7 +3,7 @@ import sqlite3
 import threading
 import uuid
 from contextlib import contextmanager
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 
 import pandas as pd
 
@@ -1007,7 +1007,7 @@ class RegistroSQLite:
         continua contabilizando todas as ordens, mas esta métrica não finge que
         elas foram oportunidades independentes.
         """
-        hoje = datetime.now().date().isoformat()
+        hoje = (datetime.now(timezone.utc) - timedelta(hours=3)).date().isoformat()
         with self._lock, self._sessao() as db:
             linhas = db.execute(
                 """
@@ -1018,7 +1018,7 @@ class RegistroSQLite:
                        SUM(CASE WHEN status='finalizada' AND lucro = 0 THEN 1 ELSE 0 END),
                        SUM(CASE WHEN status != 'finalizada' OR lucro IS NULL THEN 1 ELSE 0 END)
                 FROM operacoes
-                WHERE date(enviada_em)=? AND status != 'falha_envio'
+                WHERE date(datetime(enviada_em, '-3 hours'))=? AND status != 'falha_envio'
                 GROUP BY ativo, direcao, strftime('%Y-%m-%dT%H:%M', enviada_em)
                 """,
                 (hoje,),
@@ -1050,12 +1050,12 @@ class RegistroSQLite:
         """Quantos sinais confirmados da estrategia validada apareceram hoje
         e quantos viraram ordem de verdade — pra saber se a impressao de
         'perde muita entrada' e real ou so falta de visibilidade."""
-        hoje = datetime.now().date().isoformat()
+        hoje = (datetime.now(timezone.utc) - timedelta(hours=3)).date().isoformat()
         with self._lock, self._sessao() as db:
             linhas = db.execute(
                 """
                 SELECT motivo_risco FROM decisoes
-                WHERE motivo_estrategia=? AND date(candle_hora)=?
+                WHERE motivo_estrategia=? AND date(datetime(candle_hora, '-3 hours'))=?
                 """,
                 (motivo_estrategia, hoje),
             ).fetchall()
@@ -1195,12 +1195,12 @@ class RegistroSQLite:
         Conta TODAS as ordens do dia exceto falha_envio (inclusive as ainda abertas).
         Winrate e lucro calculados apenas sobre as finalizadas com lucro definido.
         """
-        hoje = datetime.now().date().isoformat()
+        hoje = (datetime.now(timezone.utc) - timedelta(hours=3)).date().isoformat()
         with self._lock, self._sessao() as db:
             linhas = db.execute(
                 """
                 SELECT ativo, status, lucro FROM operacoes
-                WHERE date(enviada_em)=? AND status != 'falha_envio'
+                WHERE date(datetime(enviada_em, '-3 hours'))=? AND status != 'falha_envio'
                 """,
                 (hoje,),
             ).fetchall()
@@ -1285,14 +1285,14 @@ class RegistroSQLite:
         """
         import json as _json
 
-        hoje = data if data is not None else datetime.now().date().isoformat()
+        hoje = data if data is not None else (datetime.now(timezone.utc) - timedelta(hours=3)).date().isoformat()
         with self._lock, self._sessao() as db:
             ops = db.execute(
                 """
                 SELECT id_ordem, ativo, direcao, status, lucro, enviada_em, setup,
                        timeframe, expiracao_minutos, preco_entrada, atraso_envio_ms
                 FROM operacoes
-                WHERE date(enviada_em)=? AND status != 'falha_envio'
+                WHERE date(datetime(enviada_em, '-3 hours'))=? AND status != 'falha_envio'
                 ORDER BY enviada_em ASC
                 """,
                 (hoje,),
@@ -1301,7 +1301,7 @@ class RegistroSQLite:
                 """
                 SELECT ativo, direcao, registrado_em, setup, timeframe, detalhes_json
                 FROM decisoes
-                WHERE date(registrado_em)=? AND permitida=1
+                WHERE date(datetime(registrado_em, '-3 hours'))=? AND permitida=1
                 ORDER BY registrado_em ASC
                 """,
                 (hoje,),
@@ -1326,7 +1326,7 @@ class RegistroSQLite:
                 """
                 SELECT ativo, veredicto, motivo, criado_em
                 FROM opinioes_groq
-                WHERE date(criado_em) = ?
+                WHERE date(datetime(criado_em, '-3 hours')) = ?
                 ORDER BY criado_em ASC
                 """,
                 (hoje,),

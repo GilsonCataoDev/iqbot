@@ -261,6 +261,75 @@ def segunda_opiniao_alerta(alerta_dados: dict) -> dict | None:
         _sem_ia.release()
 
 
+def classificar_indicador(titulo: str) -> str | None:
+    """Um resultado ACIMA do previsto fortalece ou enfraquece a moeda?
+
+    Tarefa puramente semântica sobre o TÍTULO do indicador — não olha preço,
+    não sugere direção de operação. A matemática consome o resultado.
+
+    Devolve "fortalece", "enfraquece", "neutro" ou None quando a IA está
+    indisponível. None faz o chamador manter o comportamento determinístico.
+    """
+    global _bloqueado_ate
+    if not MODELO_SEGUNDA_OPINIAO or not titulo.strip():
+        return None
+    with _lock_bloqueio:
+        if time.time() < _bloqueado_ate:
+            return None
+    if not _sem_ia.acquire(blocking=False):
+        return None
+    try:
+        try:
+            chave = _chave()
+        except RuntimeError:
+            return None
+        prompt = (
+            f"Indicador econômico: {titulo.strip()}\n\n"
+            "Quando o valor divulgado vem ACIMA do previsto, o efeito típico "
+            "sobre a moeda do país é fortalecer ou enfraquecer?\n"
+            "fortalece → crescimento, atividade, emprego, inflação, confiança.\n"
+            "enfraquece → desemprego, pedidos de auxílio, estoques indesejados.\n"
+            "neutro    → discurso, ata, feriado, ou sem número comparável.\n\n"
+            'Responda SOMENTE JSON: {"efeito": "fortalece|enfraquece|neutro"}'
+        )
+        corpo = {
+            "model": MODELO_SEGUNDA_OPINIAO,
+            "messages": [
+                {"role": "system", "content": "Economista. Responda SOMENTE JSON válido."},
+                {"role": "user", "content": prompt},
+            ],
+            "temperature": 0.0,
+            "max_tokens": 40,
+        }
+        try:
+            resp = _req.post(URL_GROQ, json=corpo,
+                             headers={**_HEADERS_BASE, "Authorization": f"Bearer {chave}"},
+                             timeout=TIMEOUT_SEGUNDOS)
+        except _req.RequestException:
+            return None
+        if resp.status_code == 429:
+            with _lock_bloqueio:
+                pausa = 300 if "tokens per day" in resp.text else 30
+                _bloqueado_ate = time.time() + pausa
+            return None
+        if resp.status_code != 200:
+            return None
+        try:
+            conteudo = resp.json()["choices"][0]["message"]["content"].strip()
+        except (KeyError, IndexError):
+            return None
+        inicio, fim = conteudo.find("{"), conteudo.rfind("}") + 1
+        if inicio < 0 or fim <= inicio:
+            return None
+        try:
+            efeito = str(json.loads(conteudo[inicio:fim]).get("efeito", "")).lower()
+        except json.JSONDecodeError:
+            return None
+        return efeito if efeito in ("fortalece", "enfraquece", "neutro") else None
+    finally:
+        _sem_ia.release()
+
+
 def montar_contexto(
     ativo: str,
     timeframe: str,

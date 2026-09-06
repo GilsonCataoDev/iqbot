@@ -69,6 +69,59 @@ def _numero(valor: str | None) -> float | None:
         return None
 
 
+# Classificador semântico opcional (LLM) para títulos que as listas acima não
+# cobrem. Injetado por quem tiver IA disponível; sem ele o comportamento é
+# exatamente o determinístico de antes.
+_classificador = None
+_cache_classificacao: dict[str, str] = {}
+_arquivo_classificacao: Path | None = None
+
+
+def definir_classificador(funcao, arquivo_cache: Path | None = None) -> None:
+    """Liga um classificador de título -> fortalece/enfraquece/neutro.
+
+    Cada título custa uma chamada apenas na primeira vez: o calendário repete
+    os mesmos indicadores toda semana.
+    """
+    global _classificador, _arquivo_classificacao, _cache_classificacao
+    _classificador = funcao
+    _arquivo_classificacao = Path(arquivo_cache) if arquivo_cache else None
+    if _arquivo_classificacao and _arquivo_classificacao.exists():
+        try:
+            _cache_classificacao = json.loads(
+                _arquivo_classificacao.read_text(encoding="utf-8")
+            )
+        except (OSError, json.JSONDecodeError):
+            _cache_classificacao = {}
+
+
+def _efeito_classificado(titulo: str) -> str | None:
+    """Consulta o cache e, se preciso, o classificador. None = desconhecido."""
+    if _classificador is None:
+        return None
+    chave = titulo.strip().upper()
+    if chave in _cache_classificacao:
+        return _cache_classificacao[chave] or None
+    try:
+        efeito = _classificador(titulo)
+    except Exception:
+        return None
+    if efeito not in ("fortalece", "enfraquece", "neutro"):
+        return None
+    # Grava inclusive "neutro", para nao reconsultar o mesmo titulo.
+    _cache_classificacao[chave] = efeito
+    if _arquivo_classificacao is not None:
+        try:
+            _arquivo_classificacao.parent.mkdir(parents=True, exist_ok=True)
+            _arquivo_classificacao.write_text(
+                json.dumps(_cache_classificacao, ensure_ascii=False),
+                encoding="utf-8",
+            )
+        except OSError:
+            pass
+    return efeito
+
+
 def _direcao_da_noticia(titulo: str, moeda_evento: str, ativo: str) -> dict | None:
     """Sugere CALL/PUT conforme a noticia e em qual moeda do par ela cai."""
     titulo_upper = titulo.upper()
@@ -77,7 +130,16 @@ def _direcao_da_noticia(titulo: str, moeda_evento: str, ativo: str) -> dict | No
     acima_fortalece = any(p.upper() in titulo_upper for p in _ACIMA_FORTALECE)
     acima_enfraquece = any(p.upper() in titulo_upper for p in _ACIMA_ENFRAQUECE)
     if not acima_fortalece and not acima_enfraquece:
-        return None
+        # Listas não cobrem este título: só aqui a IA entra, e apenas para
+        # dizer o SENTIDO do indicador. A direção do par continua saindo da
+        # conta determinística abaixo.
+        efeito = _efeito_classificado(titulo)
+        if efeito == "fortalece":
+            acima_fortalece = True
+        elif efeito == "enfraquece":
+            acima_enfraquece = True
+        else:
+            return None
 
     # A moeda base do par e a primeira (EUR em EURUSD, GBP em GBPUSD).
     moeda_base = base_ativo[:3]
@@ -177,7 +239,8 @@ def e_sintetico(ativo: str) -> bool:
 class CalendarioEconomico:
     """Baixa uma vez por hora e responde consultas a partir da memória."""
 
-    def __init__(self, pasta_dados: Path, ttl_segundos: float = 3600, url: str = URL_CALENDARIO):
+    def __init__(self, pasta_dados: Path, ttl_segundos: float = 3600,
+                 url: str = URL_CALENDARIO, usar_ia: bool = True):
         self.arquivo = Path(pasta_dados) / "calendario_economico.json"
         self.arquivo_historico = Path(pasta_dados) / "historico_noticias.json"
         self.ttl_segundos = ttl_segundos
@@ -185,6 +248,25 @@ class CalendarioEconomico:
         self._eventos: list[Evento] = []
         self._baixado_em = 0.0
         self._avisou_falha = False
+        if usar_ia and _classificador is None:
+            self._ligar_classificador_ia(Path(pasta_dados))
+
+    @staticmethod
+    def _ligar_classificador_ia(pasta_dados: Path) -> None:
+        """Deixa a IA cobrir os títulos fora das listas de palavras-chave.
+
+        Falha em silêncio: sem chave, sem rede ou sem modelo, o calendário
+        segue 100% determinístico.
+        """
+        try:
+            from .ia import MODELO_SEGUNDA_OPINIAO, classificar_indicador
+        except Exception:
+            return
+        if not MODELO_SEGUNDA_OPINIAO:
+            return
+        definir_classificador(
+            classificar_indicador, pasta_dados / "classificacao_indicadores.json"
+        )
 
     # -- carga ------------------------------------------------------------
     def _baixar(self) -> list[dict]:
