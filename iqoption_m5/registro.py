@@ -608,13 +608,16 @@ class RegistroSQLite:
             )
 
     def estado_hoje(self) -> EstadoPersistido:
-        hoje = datetime.now().date().isoformat()
+        # Dia do operador = dia BRT. enviada_em está em UTC, então comparar a
+        # data local com date(enviada_em) crua perdia tudo que foi enviado
+        # após 21h BRT — num restart à noite o risco recarregava dia vazio.
+        hoje = (datetime.now(timezone.utc) - timedelta(hours=3)).date().isoformat()
         with self._lock, self._sessao() as db:
             linhas = db.execute(
                 """
                 SELECT status, lucro, valor
                 FROM operacoes
-                WHERE date(enviada_em)=?
+                WHERE date(datetime(enviada_em, '-3 hours'))=?
                   AND status IN ('aberta', 'finalizada', 'resultado_desconhecido')
                 ORDER BY enviada_em ASC
                 """,
