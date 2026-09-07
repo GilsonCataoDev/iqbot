@@ -392,7 +392,10 @@ def executar_laboratorio_ema() -> None:
     # Fecha o candle do rastro; evita avaliar o mesmo setup fechado duas vezes.
     ultimo_fechado: dict[tuple[str, str], object] = {}
     # Toque intravela: uma tentativa por setup, ativo e candle em formação.
-    intravela_disparado: set[tuple[str, str, object]] = set()
+    # Guarda só o último candle disparado por (rastro, ativo) — a checagem é
+    # sempre contra o candle atual, então um set acumulava tuplas de candles
+    # já passados pelo tempo todo de vida do processo, sem nunca reconsultá-las.
+    intravela_disparado: dict[tuple[str, str], object] = {}
     # O candidato NZD não repete a mesma direção em pullbacks muito próximos.
     ultimo_nzd_por_direcao: dict[str, dict[str, pd.Timestamp]] = {}
     ultima_atualizacao_noticias = 0.0
@@ -514,12 +517,16 @@ def executar_laboratorio_ema() -> None:
                                 dados_grafico_ao_vivo[ativo] = dados_grafico
                         except Exception as erro:
                             print(f"[GRÁFICO] {ativo}: atualização falhou ({erro})")
+                    # Sombra é observação: só lê candle e grava resultado, não
+                    # toca na banca. Fica antes do portão de ordem porque o
+                    # estado de abertura da IQ vem errado com frequência, e a
+                    # amostra não pode parar de crescer junto com ele.
+                    _resolver_sombras(registro, snapshot)
                     # Abertura/payout decide se pode enviar ordem. O gráfico
                     # deve continuar recebendo candles mesmo quando esse
                     # estado vem fechado ou temporariamente incorreto da IQ.
                     if not snapshot.mercado_aberto:
                         continue
-                    _resolver_sombras(registro, snapshot)
                     try:
                         setup = _setup_do_rastro(rastro.config)
                     except RuntimeError as erro:
@@ -546,7 +553,7 @@ def executar_laboratorio_ema() -> None:
                         segundo = snapshot.timestamp_servidor % rastro.config.timeframe_segundos
                         limite = rastro.config.janela_entrada_por_setup[setup]
                         candle_atual = indicadores.index[-1]
-                        if segundo > limite or (rastro.nome, ativo, candle_atual) in intravela_disparado:
+                        if segundo > limite or intravela_disparado.get((rastro.nome, ativo)) == candle_atual:
                             continue
                         decisoes = estrategias[rastro.nome].avaliar_reversoes(ativo, indicadores)
                     else:
@@ -627,7 +634,7 @@ def executar_laboratorio_ema() -> None:
                             timeframe=rastro.config.timeframe_segundos,
                         )
                         if rastro.intravela:
-                            intravela_disparado.add((rastro.nome, ativo, indicadores.index[-1]))
+                            intravela_disparado[(rastro.nome, ativo)] = indicadores.index[-1]
                         if motivo_sombra is not None:
                             _registrar_sombra(registro, snapshot, rastro, decisao, motivo_sombra)
                         status = (
