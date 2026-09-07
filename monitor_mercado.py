@@ -456,6 +456,51 @@ def _leitura_ia_resultado(confirmado: dict) -> dict | None:
         return None
 
 
+def _plano_rompimento_reteste_sombra(ativo: str, df: pd.DataFrame,
+                                     atr_atual: float | None) -> dict | None:
+    """Plano do forex traduzido para o formato de estudo do monitor.
+
+    Entrada a mercado no fechamento da vela que confirmou — sem modo_entrada,
+    o simulador ja trata como preenchida, que e a semantica certa: a
+    estrategia diz que a entrada real pertence a abertura seguinte.
+    """
+    try:
+        from iqoption_m5.forex_estrategia import plano_rompimento_reteste
+        plano = plano_rompimento_reteste(ativo, df)
+    except Exception:
+        return None
+    if plano is None:
+        return None
+    try:
+        entrada = float(df.iloc[-1]["Close"])
+        risco = float(plano.risco_preco)
+        if risco <= 0:
+            return None
+        passo, unidade = unidade_movimento(ativo)
+        return {
+            "direcao": "buy" if plano.lado == "buy" else "sell",
+            "motivo": plano.motivo,
+            "risco_atr": (round(risco / atr_atual, 2)
+                          if atr_atual and atr_atual > 0 else None),
+            "checklist": [
+                {"nome": "Rompimento com corpo entre 0.6 e 2.0 ATR", "ok": True},
+                {"nome": "Reteste do nível com fechamento de volta", "ok": True},
+                {"nome": "EMA20/EMA50 alinhadas", "ok": True},
+                {"nome": "Risco entre 0.60 e 1.80 ATR", "ok": True},
+            ],
+            "alvos": {
+                "entrada": round(entrada, 6),
+                "sl": round(float(plano.stop), 6),
+                "tp1": round(float(plano.alvo), 6),
+                "risco_pips": round(risco / passo, 1),
+                "risco_unidade": unidade,
+                "nivel_rompido": round(float(plano.nivel), 6),
+            },
+        }
+    except Exception:
+        return None
+
+
 def contexto_noticia(calendario: CalendarioEconomico | None, ativo: str,
                       agora: datetime) -> dict:
     """Salva um fato do calendário; nunca deriva direção sem dado publicado."""
@@ -1318,6 +1363,10 @@ class Estado:
         """Amostra isolada da varredura v2; permanece sempre em sombra."""
         return self._amostra_por_tipo("liquidity_sweep_v2")
 
+    def _amostra_rompimento_reteste(self) -> dict:
+        """Rompimento+reteste do forex, observado aqui por falta de amostra."""
+        return self._amostra_por_tipo("rompimento_reteste")
+
     def registrar_direcao_noticia(self, ativo: str, vela: str, preco: float,
                                   noticia: dict) -> None:
         """Guarda a direção mecânica para conferir depois se ela acertou.
@@ -1431,6 +1480,7 @@ class Estado:
                        "amostraFluxo": self._amostra_fluxo(),
                        "amostraOrb": self._amostra_orb(),
                        "amostraLiquidez": self._amostra_liquidez(),
+                       "amostraRompimentoReteste": self._amostra_rompimento_reteste(),
                        "amostraDirecaoNoticia": self._amostra_direcao_noticia()}
         try:
             arq = self.pasta / "mercado.json"
@@ -1722,6 +1772,28 @@ def loop(api, cfg, estado: Estado, calendario: CalendarioEconomico | None = None
                     )
                     print(f"[LIQUIDEZ V2 — ESTUDO] {a} BUY @ {df.index[-1]} "
                           f"RR={liquidez['rr']}")
+                # Rompimento+reteste do forex, em sombra. A estrategia vive em
+                # forex_estrategia.py e nao tinha nenhuma amostra ao vivo: os
+                # processos que a executam nao rodam. Aqui ela so observa,
+                # usando a maquina de afericao que ja existe.
+                plano_rr = _plano_rompimento_reteste_sombra(a, df, av)
+                if plano_rr is not None:
+                    estudo_rr = {
+                        **estado.dados[a],
+                        "sinal": True, "direcao": plano_rr["direcao"],
+                        "entrada_valida": False,
+                        "estado_entrada": "ROMPIMENTO+RETESTE — ESTUDO",
+                        "motivo_entrada": plano_rr["motivo"],
+                        "checklist": plano_rr["checklist"],
+                        "alvos": None, "alvos_estudo": plano_rr["alvos"],
+                    }
+                    estado.registrar_sinal(
+                        a, str(df.index[-1]), estudo_rr,
+                        tipo="rompimento_reteste",
+                    )
+                    print(f"[ROMPIMENTO+RETESTE — ESTUDO] {a} "
+                          f"{plano_rr['direcao'].upper()} @ {df.index[-1]} "
+                          f"risco={plano_rr['risco_atr']}ATR")
             except Exception as e:
                 print(f"[{a}] {e!r}")
         estado.status = f"OK — {datetime.now(timezone.utc):%H:%M:%S} UTC"
@@ -2155,6 +2227,7 @@ function renderAmostra(){
     linhaEstudo('Fluxo de sessão — estudo',D.amostraFluxo||{})+
     linhaEstudo('ORB/FVG M15 — estudo sombra',D.amostraOrb||{})+
     linhaEstudo('Liquidez V2 — estudo sombra',D.amostraLiquidez||{})+
+    linhaEstudo('Rompimento+reteste (forex) — estudo sombra',D.amostraRompimentoReteste||{})+
     linhaDirecaoNoticia(D.amostraDirecaoNoticia||{})+
     '<div class="nota">Estudos não são misturados ao sinal validado. IC95% de Wilson; amostras abaixo de 30 resolvidos não sustentam conclusões.</div>';
 }
