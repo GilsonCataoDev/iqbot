@@ -2365,4 +2365,6 @@ def main() -> int:
 
 
 if __name__ == "__main__":
+    from iqoption_m5.log_arquivo import ativar as ativar_log
+    print(f"Log desta sessao: {ativar_log('monitor_mercado')}")
     sys.exit(main())
