@@ -290,18 +290,75 @@ def _resolver_sombras(registro: RegistroSQLite, snapshot: SnapshotMercado) -> No
         )
 
 
+# Por ativo: (último candle avaliado, sinais acumulados na sessão).
+# avaliar_todas() olha só o último candle fechado, então marcar o dia inteiro
+# exige acumular a cada candle novo — varrer a janela toda custaria ~1.8s por
+# ativo, inviável dentro do laço de 1s.
+_sinais_fechado_cache: dict[str, tuple[object, list]] = {}
+
+
+def _sinais_so_para_ver(
+    estrategia: EstrategiaReversaoM5,
+    snapshot: SnapshotMercado,
+    indicadores: pd.DataFrame,
+    setup: str | None,
+) -> list:
+    """Sinais que a estratégia marcaria, acumulados só para desenhar.
+
+    Com o mercado fechado o bot pula a avaliação inteira e o gráfico ficava sem
+    nada do dia. Aqui ela roda apenas para o desenho: não grava decisão, não
+    registra sombra e não envia ordem. Entram como bloqueados, na camada que o
+    operador já liga e desliga.
+
+    Como nada é persistido, a marcação começa do zero a cada reinício — é o
+    preço de não tocar no banco nem nas estatísticas.
+    """
+    if setup is None or len(indicadores) < 3:
+        return []
+    if snapshot.mercado_aberto:
+        # Reabriu: as decisões reais voltam a ser gravadas e estas sairiam
+        # duplicando o que o banco já traz.
+        _sinais_fechado_cache.pop(snapshot.ativo, None)
+        return []
+
+    candle = indicadores.index[-2]
+    ultimo, acumulado = _sinais_fechado_cache.get(snapshot.ativo, (None, []))
+    if ultimo == candle:
+        return acumulado
+
+    try:
+        novas = estrategia.avaliar_todas(snapshot.ativo, indicadores)
+    except Exception:
+        novas = []
+    for decisao in novas:
+        if decisao.detalhes.get("setup") != setup:
+            continue
+        decisao.detalhes["status_grafico"] = "bloqueado"
+        decisao.detalhes["razao"] = list(decisao.detalhes.get("razao") or []) + [
+            "mercado fechado — sinal apenas observado"
+        ]
+        acumulado.append(decisao)
+    # Descarta o que já saiu da janela desenhada, senão a lista cresce sem fim.
+    primeiro = indicadores.index[0]
+    acumulado = [d for d in acumulado if d.candle_hora >= primeiro]
+    _sinais_fechado_cache[snapshot.ativo] = (candle, acumulado)
+    return acumulado
+
+
 def _atualizar_grafico_laboratorio(
     grafico: GraficoM5,
     registro: RegistroSQLite,
     estrategia: EstrategiaReversaoM5,
     snapshot: SnapshotMercado,
     indicadores: pd.DataFrame,
+    setup: str | None = None,
 ) -> dict:
     """Desenha o M5 e todos os sinais auditados (M5/M15) daquele ativo."""
     dados = grafico.montar_dados(
         snapshot=snapshot,
         indicadores=indicadores,
-        sinais=registro.decisoes_grafico(snapshot.ativo),
+        sinais=list(registro.decisoes_grafico(snapshot.ativo))
+        + _sinais_so_para_ver(estrategia, snapshot, indicadores, setup),
         possivel=None,
         operacoes=registro.operacoes_grafico(snapshot.ativo),
         desempenho=registro.resumo_desempenho(snapshot.ativo),
@@ -510,8 +567,16 @@ def executar_laboratorio_ema() -> None:
                         and rastro.config.ema920_pullback_ativo
                     ):
                         try:
+                            # O setup deste rastro filtra os sinais que o
+                            # gráfico mostra com o mercado fechado, para não
+                            # marcar entrada que este bot não tomaria.
+                            try:
+                                setup_grafico = _setup_do_rastro(rastro.config)
+                            except RuntimeError:
+                                setup_grafico = None
                             dados_grafico = _atualizar_grafico_laboratorio(
-                                grafico, registro, estrategias[rastro.nome], snapshot, indicadores
+                                grafico, registro, estrategias[rastro.nome],
+                                snapshot, indicadores, setup_grafico,
                             )
                             with lock_grafico_ao_vivo:
                                 dados_grafico_ao_vivo[ativo] = dados_grafico
