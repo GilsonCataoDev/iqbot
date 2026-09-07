@@ -283,12 +283,13 @@ MOCK_PAYLOAD = {
 # Gráficos vazios para os ativos mock
 import numpy as np
 for ativo in MOCK_ATIVOS:
-    candles = [{"t": int(time.time()) - (59 - i) * 900,
+    _n_velas = monitor_mercado.VELAS_GRAFICO
+    candles = [{"t": int(time.time()) - (_n_velas - 1 - i) * 900,
                 "o": 1.084 + i * 0.0001 + (0.0002 if i % 3 == 0 else -0.0001),
                 "h": 1.084 + i * 0.0001 + 0.0004,
                 "l": 1.084 + i * 0.0001 - 0.0003,
                 "c": 1.084 + i * 0.0001 + (0.0002 if i % 2 == 0 else -0.0001)}
-               for i in range(60)]
+               for i in range(_n_velas)]
     # Bandas com valores reais: com None nos 60 pontos a camada nunca era exercitada.
     sup = [round(k["h"] + 0.0006, 6) for k in candles]
     inf = [round(k["l"] - 0.0006, 6) for k in candles]

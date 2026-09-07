@@ -59,6 +59,9 @@ CLASSE = {
 }
 
 TF = 900
+# Velas desenhadas no grafico. df_grafico ja carrega 300; o corte antigo
+# em 60 mostrava so 15h de M15. 240 da 60h sem custo de download.
+VELAS_GRAFICO = 240
 PORTA = 8777
 INTERVALO_S = 30
 JAN = 10
@@ -1257,8 +1260,8 @@ class Estado:
             pass
 
     def salvar_candles(self, ativo: str, df: pd.DataFrame, r: pd.DataFrame) -> None:
-        u = df.tail(60)
-        ru = r.tail(60)
+        u = df.tail(VELAS_GRAFICO)
+        ru = r.tail(VELAS_GRAFICO)
         minimo = float(u["Low"].min())
         maximo = float(u["High"].max())
         amplitude = maximo - minimo
@@ -1565,7 +1568,7 @@ tr:hover{background:#16203450;cursor:pointer}
 .bar{display:inline-block;width:60px;height:7px;background:#1e293b;border-radius:3px;
   position:relative;vertical-align:middle}
 .bar>i{position:absolute;top:-2px;width:3px;height:11px;background:#38bdf8;border-radius:1px}
-#cv{width:100%;height:320px;background:#0d1526;border-radius:.4rem;margin:.4rem 0}
+#cv{width:100%;height:58vh;min-height:340px;background:#0d1526;border-radius:.4rem;margin:.4rem 0}
 #cv-titulo{color:#94a3b8;font-size:.7rem;margin:.3rem 0 0}
 #marc-barra{display:flex;gap:.3rem;align-items:center;margin:.35rem 0}
 .btn-marc{background:#16233a;border:1px solid #1e293b;color:#94a3b8;border-radius:.25rem;font-size:.68rem;padding:.15rem .5rem;cursor:pointer}
@@ -2171,7 +2174,7 @@ function _chartMonitor(){
     return null;
   }
   chartM=LightweightCharts.createChart(el,{
-    width:el.clientWidth, height:320,
+    width:el.clientWidth, height:el.clientHeight || 340,
     layout:{background:{color:'#0d1526'},textColor:'#94a3b8',fontSize:10},
     grid:{vertLines:{color:'#16233a'},horzLines:{color:'#16233a'}},
     rightPriceScale:{borderColor:'#1e293b'},
@@ -2186,7 +2189,11 @@ function _chartMonitor(){
     priceLineVisible:false,crosshairMarkerVisible:false};
   sSup=chartM.addLineSeries(opBanda);
   sInf=chartM.addLineSeries(opBanda);
-  new ResizeObserver(()=>chartM.applyOptions({width:el.clientWidth})).observe(el);
+  new ResizeObserver(()=>{
+    if(el.clientWidth>0 && el.clientHeight>0){
+      chartM.applyOptions({width:el.clientWidth, height:el.clientHeight});
+    }
+  }).observe(el);
   if(window.Marcacoes){
     Marcacoes.iniciar({painel:'monitor', chart:chartM, serie:sCandles,
                        getAtivo:()=>sel, aoAtualizar:_marcAtualizar});
