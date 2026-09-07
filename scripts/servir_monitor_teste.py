@@ -266,7 +266,11 @@ MOCK_PAYLOAD = {
     "amostraEntrada": {"sinais": 1, "wins": 1, "losses": 0, "expirados": 0, "pendentes": 0,
                         "ambiguos": 0, "nao_executadas": 0, "winrate": 100.0,
                         "ic_95": [20.6, 100.0], "amostra_suficiente": False, "maturidade": "INSUFICIENTE",
-                        "avaliados_r": 1, "saldo_r": 2.5, "media_r": 2.5},
+                        "avaliados_r": 1, "saldo_r": 2.5, "media_r": 2.5,
+                        # Horizonte longo medido em paralelo, para a linha de comparacao.
+                        "horizonte": "6h",
+                        "comparacao_longa": {"horizonte": "12h", "wins": 1, "losses": 0,
+                                              "avaliados_r": 1, "saldo_r": 3.1, "media_r": 3.1}},
     "amostraFibo": {"sinais": 1, "wins": 0, "losses": 0, "expirados": 0, "pendentes": 1,
                      "ambiguos": 0, "nao_executadas": 0, "winrate": None,
                      "ic_95": None, "amostra_suficiente": False, "maturidade": "INSUFICIENTE",

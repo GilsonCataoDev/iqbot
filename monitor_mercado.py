@@ -66,6 +66,19 @@ PORTA = 8777
 INTERVALO_S = 30
 JAN = 10
 SIMULADOR_VERSAO = 2
+# Horizonte oficial da simulacao TP/SL, em velas. 24 x M15 = 6h.
+HORIZONTE_VELAS = 24
+# Horizonte longo medido EM PARALELO, sem substituir o oficial: um trade
+# fechado em 6h e outro em 12h sao metodos diferentes e nao podem ser somados.
+# Rodando os dois lado a lado da para comparar com dado real depois.
+HORIZONTE_LONGO_VELAS = 48
+CHAVE_SIM_LONGA = "simulacao_longa"
+
+
+def _rotulo_horas(velas: int) -> str:
+    """24 velas de M15 viram "6h" — mantem os desfechos ja gravados."""
+    horas = velas * TF / 3600
+    return f"{int(horas)}h" if horas == int(horas) else f"{horas:g}h"
 
 
 def adquirir_trava_monitor(porta: int = PORTA + 10_000) -> socket.socket:
@@ -1002,8 +1015,13 @@ class Estado:
                     and simulacao.get("resultado_r") is None
                 )
                 versao_antiga = int(simulacao.get("versao") or 0) < SIMULADOR_VERSAO
+                # Sinais gravados antes da medicao paralela ainda nao tem a
+                # chave longa; reprocessa uma vez para preenche-la.
+                longa = h.get(CHAVE_SIM_LONGA) or {}
+                sem_longa = not longa or longa.get("desfecho") in (None, "aguardando")
                 if (desfecho in ("aguardando", "sem_dados")
-                        or expiracao_prematura or precisa_resultado_r or versao_antiga):
+                        or expiracao_prematura or precisa_resultado_r
+                        or versao_antiga or sem_longa):
                     pend.append(h)
         alterou = False
         for h in pend:
@@ -1015,12 +1033,18 @@ class Estado:
                 o, c = float(lin["Open"]), float(lin["Close"])
                 reacao = "subiu" if c > o else ("caiu" if c < o else "igual")
                 simulacao = self._resolver_tp_sl(h, df)
+                # Horizonte longo em paralelo, em chave propria: o oficial
+                # acima nao muda, entao a amostra ja acumulada segue valida.
+                simulacao_longa = self._resolver_tp_sl(
+                    h, df, horizonte_velas=HORIZONTE_LONGO_VELAS
+                )
                 with self._lock:
                     h["resultado"] = reacao
                     passo, unidade = unidade_movimento(ativo)
                     h["var_pips"] = round((c - o) / passo, 1)
                     h["var_unidade"] = unidade
                     h["simulacao"] = simulacao
+                    h[CHAVE_SIM_LONGA] = simulacao_longa
                     for visivel in self.historico:
                         if visivel.get("id") == h.get("id") and visivel is not h:
                             visivel.update(h)
@@ -1032,7 +1056,8 @@ class Estado:
             self._salvar_aprendizado()
 
     @staticmethod
-    def _resolver_tp_sl(h: dict, df: pd.DataFrame, horizonte_velas: int = 24) -> dict:
+    def _resolver_tp_sl(h: dict, df: pd.DataFrame,
+                        horizonte_velas: int = HORIZONTE_VELAS) -> dict:
         alvo = h.get("alvos_estudo") or h.get("alvos") or {}
         if not alvo or not h.get("vela"):
             return {
@@ -1146,7 +1171,7 @@ class Estado:
         if not preenchida:
             return {
                 "versao": SIMULADOR_VERSAO,
-                "desfecho": "nao_executada_6h", "velas": len(futuras),
+                "desfecho": f"nao_executada_{_rotulo_horas(horizonte_velas)}", "velas": len(futuras),
                 "bateu_tp1_sem_stop": None, "primeiro_toque": None,
                 "vela_desfecho": str(futuras.index[-1]),
                 "preco_saida": None, "resultado_r": None,
@@ -1155,7 +1180,7 @@ class Estado:
         preco_saida = float(futuras.iloc[-1]["Close"])
         return {
             "versao": SIMULADOR_VERSAO,
-            "desfecho": "expirado_6h", "velas": len(futuras),
+            "desfecho": f"expirado_{_rotulo_horas(horizonte_velas)}", "velas": len(futuras),
             "bateu_tp1_sem_stop": None, "primeiro_toque": None,
             "vela_desfecho": str(futuras.index[-1]),
             "preco_saida": preco_saida, "resultado_r": resultado_r(preco_saida),
@@ -1164,14 +1189,14 @@ class Estado:
         }
 
     @staticmethod
-    def _resumo_simulacoes(itens: list[dict]) -> dict:
-        desfechos = [str((h.get("simulacao") or {}).get("desfecho", "aguardando")) for h in itens]
+    def _resumo_simulacoes(itens: list[dict], chave: str = "simulacao") -> dict:
+        desfechos = [str((h.get(chave) or {}).get("desfecho", "aguardando")) for h in itens]
         wins, losses = desfechos.count("win_tp1"), desfechos.count("loss_sl")
         resolvidos = wins + losses
         resultados_r = [
-            float((h.get("simulacao") or {}).get("resultado_r"))
+            float((h.get(chave) or {}).get("resultado_r"))
             for h in itens
-            if (h.get("simulacao") or {}).get("resultado_r") is not None
+            if (h.get(chave) or {}).get("resultado_r") is not None
         ]
         ic = wilson_ci(wins, resolvidos)
         # Maturidade segue o mesmo critério do plano: nunca promover por
@@ -1188,10 +1213,10 @@ class Estado:
             maturidade = "APROVADA"
         return {
             "sinais": len(itens), "wins": wins, "losses": losses,
-            "expirados": desfechos.count("expirado_6h"),
+            "expirados": sum(d.startswith("expirado_") for d in desfechos),
             "pendentes": desfechos.count("aguardando"),
             "ambiguos": sum(d.startswith("ambíguo") for d in desfechos),
-            "nao_executadas": desfechos.count("nao_executada_6h"),
+            "nao_executadas": sum(d.startswith("nao_executada_") for d in desfechos),
             "winrate": round(wins * 100 / resolvidos, 1) if resolvidos else None,
             "ic_95": list(ic) if ic else None,
             "amostra_suficiente": resolvidos >= 30,
@@ -1210,25 +1235,36 @@ class Estado:
         ]
         return self._resumo_simulacoes(validos)
 
+    def _amostra_por_tipo(self, tipo: str) -> dict:
+        """Resumo do horizonte oficial, com o longo anexado para comparação.
+
+        Os dois nunca são somados: horizontes diferentes são métodos
+        diferentes. Ficam lado a lado só para decidir, com dado, se vale
+        trocar o oficial.
+        """
+        itens = [h for h in self._aprendizado if h.get("tipo") == tipo]
+        resumo = self._resumo_simulacoes(itens)
+        resumo["horizonte"] = _rotulo_horas(HORIZONTE_VELAS)
+        longo = self._resumo_simulacoes(itens, CHAVE_SIM_LONGA)
+        longo["horizonte"] = _rotulo_horas(HORIZONTE_LONGO_VELAS)
+        resumo["comparacao_longa"] = longo
+        return resumo
+
     def _amostra_fibo(self) -> dict:
         """Amostra separada: Fibo não pode contaminar o sinal já validado."""
-        itens = [h for h in self._aprendizado if h.get("tipo") == "fibo_m15"]
-        return self._resumo_simulacoes(itens)
+        return self._amostra_por_tipo("fibo_m15")
 
     def _amostra_fluxo(self) -> dict:
         """Amostra isolada da leitura de fluxo; nunca vira entrada validada."""
-        itens = [h for h in self._aprendizado if h.get("tipo") == "fluxo_m15"]
-        return self._resumo_simulacoes(itens)
+        return self._amostra_por_tipo("fluxo_m15")
 
     def _amostra_orb(self) -> dict:
         """Amostra isolada do ORB/FVG adaptado ao M15."""
-        itens = [h for h in self._aprendizado if h.get("tipo") == "orb_fvg_m15"]
-        return self._resumo_simulacoes(itens)
+        return self._amostra_por_tipo("orb_fvg_m15")
 
     def _amostra_liquidez(self) -> dict:
         """Amostra isolada da varredura v2; permanece sempre em sombra."""
-        itens = [h for h in self._aprendizado if h.get("tipo") == "liquidity_sweep_v2"]
-        return self._resumo_simulacoes(itens)
+        return self._amostra_por_tipo("liquidity_sweep_v2")
 
     def salvar(self) -> None:
         with self._lock:
@@ -1924,9 +1960,14 @@ function maturidadeBadge(x){
 function linhaEstudo(label,x){
   const wr=x.winrate==null?'sem TP/SL resolvido':`${x.wins} TP / ${x.losses} SL · ${x.winrate}%`;
   const saldo=x.saldo_r==null?'R aguardando':`${x.saldo_r>0?'+':''}${x.saldo_r}R`;
+  // Horizonte longo medido em paralelo: comparacao, nunca soma.
+  const L=x.comparacao_longa;
+  const cmp = L && L.avaliados_r ?
+    `<div style="font-size:.62rem;color:#64748b;margin-top:.1rem">horizonte ${x.horizonte||'6h'}: ${x.media_r==null?'—':(x.media_r>0?'+':'')+x.media_r}R/sinal (${x.avaliados_r||0}) &nbsp;·&nbsp; ${L.horizonte}: ${L.media_r==null?'—':(L.media_r>0?'+':'')+L.media_r}R/sinal (${L.avaliados_r})</div>` : '';
   return `<div style="margin:.45rem 0;padding:.4rem .5rem;background:#0c1728;border-left:3px solid #334155;border-radius:.25rem">
     <b>${label}</b> · ${x.sinais||0} sinais ${maturidadeBadge(x)}<br>
     <span style="font-size:.7rem;color:#cbd5e1">${wr} · ${saldo} em ${x.avaliados_r||0} saídas · ${x.expirados||0} fechados por tempo · ${x.pendentes||0} pendentes · ${x.nao_executadas||0} não exec.</span>
+    ${cmp}
   </div>`;
 }
 function renderAmostra(){
