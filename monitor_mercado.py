@@ -416,6 +416,42 @@ def wilson_ci(wins: int, n: int, z: float = 1.96) -> tuple[float, float] | None:
     return (round((center - margin) * 100, 1), round((center + margin) * 100, 1))
 
 
+def _numero_do_texto(valor) -> float | None:
+    """'3.2%' -> 3.2 ; '-1.4K' -> -1.4 ; 'n/d' -> None."""
+    if valor in (None, ""):
+        return None
+    limpo = str(valor).strip().replace("%", "").replace(",", "")
+    for sufixo in ("K", "M", "B", "T"):
+        if limpo.upper().endswith(sufixo):
+            limpo = limpo[:-1]
+            break
+    try:
+        return float(limpo)
+    except ValueError:
+        return None
+
+
+def _desvio_do_previsto(actual, forecast) -> float | None:
+    """Surpresa em % do previsto. Forecast zero não tem percentual definido."""
+    a, f = _numero_do_texto(actual), _numero_do_texto(forecast)
+    if a is None or f is None or f == 0:
+        return None
+    return round((a - f) / abs(f) * 100, 1)
+
+
+def _leitura_ia_resultado(confirmado: dict) -> dict | None:
+    """Frase da IA sobre o mecanismo. Falha em silêncio: é texto de apoio."""
+    try:
+        from iqoption_m5.ia import ler_resultado_noticia
+        return ler_resultado_noticia(
+            confirmado.get("titulo", ""), confirmado.get("moeda", ""),
+            confirmado.get("actual"), confirmado.get("forecast"),
+            confirmado.get("previous"),
+        )
+    except Exception:
+        return None
+
+
 def contexto_noticia(calendario: CalendarioEconomico | None, ativo: str,
                       agora: datetime) -> dict:
     """Salva um fato do calendário; nunca deriva direção sem dado publicado."""
@@ -423,11 +459,23 @@ def contexto_noticia(calendario: CalendarioEconomico | None, ativo: str,
         return {"estado": "sem_calendario", "texto": "Calendário não disponível."}
     confirmado = calendario.confirmacao_recente(ativo, agora)
     if confirmado:
-        return {
+        saida = {
             "estado": "resultado_publicado", "texto": confirmado["titulo"],
             "moeda": confirmado["moeda"], "actual": confirmado["actual"],
             "forecast": confirmado["forecast"], "direcao": confirmado["direcao"],
         }
+        # Desvio pela conta, não pela IA: quando os dois lados são numéricos
+        # isto é aritmética e não precisa de modelo nenhum.
+        desvio = _desvio_do_previsto(confirmado.get("actual"), confirmado.get("forecast"))
+        if desvio is not None:
+            saida["desvio_pct"] = desvio
+        # A IA entra só para o texto do mecanismo. A direção acima continua
+        # vindo de resultado_direcao(), que sabe de que lado do par a moeda está.
+        leitura = _leitura_ia_resultado(confirmado)
+        if leitura:
+            saida["surpresa"] = leitura["surpresa"]
+            saida["leitura_ia"] = leitura["leitura"]
+        return saida
     aviso = calendario.aviso(ativo, agora)
     return {
         "estado": "janela_risco" if aviso and not aviso.startswith("próximo:") else "sem_risco",
@@ -1861,6 +1909,19 @@ function renderDossie(H){
   if(!h){ el.innerHTML='<span class="empty">Ainda não há sinais registrados.</span>'; return; }
   dossieSel=h.id;
   const a=h.dossie||{}, n=a.noticia||{}, c=h.comparaveis||{};
+  // Numero ja publicado: direcao vem da conta, a frase vem da IA e fica
+  // marcada como tal. Nenhuma das duas e sugestao de operacao.
+  function resultadoPublicado(x){
+    if(x.estado!=='resultado_publicado') return '';
+    const dir = x.direcao ? `<b style="color:${x.direcao==='CALL'?'#4ade80':'#f87171'}">${x.direcao}</b>` : '';
+    const dsv = x.desvio_pct==null ? '' :
+      ` · ${x.desvio_pct>0?'+':''}${x.desvio_pct}% vs previsto`;
+    const sur = x.surpresa ? ` · surpresa <b>${x.surpresa}</b>` : '';
+    const txt = x.leitura_ia
+      ? `<div style="font-size:.64rem;color:#94a3b8;margin-top:.15rem">🤖 ${x.leitura_ia}</div>` : '';
+    return `<div style="font-size:.66rem;color:#cbd5e1;margin-top:.2rem">`
+      + `saiu ${x.actual} (previsto ${x.forecast})${dsv}${sur} → ${dir}</div>${txt}`;
+  }
   const vol=a.volume_relativo==null?'sem dado':a.volume_relativo+'× mediana';
   const comp=c.amostra
     ? `<span class="${c.winrate>=55?'dossie-win':'dossie-aviso'}">${c.wins}W / ${c.losses}L · ${c.winrate}%</span>`
@@ -1893,7 +1954,7 @@ function renderDossie(H){
       <div class="item"><label>movimento anterior</label><span>${a.movimento_3_atr??'—'} ATR · vol ${vol}</span></div>
       <div class="item"><label>reação da vela seguinte</label><span>${reacao}</span></div>
       <div class="item"><label>casos parecidos (${c.amostra||0})</label>${comp}</div>
-      <div class="item"><label>notícia no contexto</label><span class="${n.estado==='janela_risco'?'dossie-aviso':''}">${n.texto||'sem calendário'}</span></div>
+      <div class="item"><label>notícia no contexto</label><span class="${n.estado==='janela_risco'?'dossie-aviso':''}">${n.texto||'sem calendário'}</span>${resultadoPublicado(n)}</div>
     </div>
     <div class="dossie-nota">Tags: ${(a.tags||[]).join(' · ')||'sem dados'}. Comparação usa apenas sinais antigos da mesma classe e com contexto parecido. Isto descreve padrões; não prova a causa de win ou loss.</div>
   </div>`;

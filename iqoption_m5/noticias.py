@@ -201,6 +201,7 @@ class Evento:
             "moeda": self.moeda,
             "actual": self.actual,
             "forecast": self.forecast,
+            "previous": self.previous,
             "direcao": direcao[chave].upper(),
         }
 

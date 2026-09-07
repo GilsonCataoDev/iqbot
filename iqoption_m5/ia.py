@@ -261,6 +261,93 @@ def segunda_opiniao_alerta(alerta_dados: dict) -> dict | None:
         _sem_ia.release()
 
 
+_cache_leitura: dict[tuple, dict] = {}
+
+
+def ler_resultado_noticia(
+    titulo: str, moeda: str, actual: str, forecast: str,
+    previous: str | None = None,
+) -> dict | None:
+    """Lê um número já publicado: tamanho da surpresa e o mecanismo, em texto.
+
+    NÃO devolve direção de operação — essa sai da conta determinística em
+    noticias.resultado_direcao(), que compara actual com forecast e sabe de
+    qual lado do par a moeda está. A IA entra só onde a conta não alcança:
+    dizer se a surpresa foi grande e por que ela mexe com a moeda.
+
+    Devolve {"surpresa": "forte|moderada|fraca", "leitura": "uma frase"} ou
+    None quando a IA está indisponível.
+    """
+    global _bloqueado_ate
+    if not MODELO_SEGUNDA_OPINIAO or not titulo.strip() or actual in (None, ""):
+        return None
+    chave = (titulo.strip().upper(), str(moeda).upper(), str(actual), str(forecast))
+    if chave in _cache_leitura:
+        return _cache_leitura[chave]
+    with _lock_bloqueio:
+        if time.time() < _bloqueado_ate:
+            return None
+    if not _sem_ia.acquire(blocking=False):
+        return None
+    try:
+        try:
+            api = _chave()
+        except RuntimeError:
+            return None
+        prompt = (
+            f"Indicador: {titulo.strip()} ({moeda})\n"
+            f"Divulgado: {actual} | Previsto: {forecast} | Anterior: {previous or 'n/d'}\n\n"
+            "Classifique o tamanho da surpresa frente ao previsto e explique em "
+            "UMA frase por que esse resultado tende a fortalecer ou enfraquecer "
+            f"a moeda {moeda}. Fale do mecanismo economico, nao de preco de "
+            "ativo, nao sugira operacao e nao cite niveis.\n\n"
+            'Responda SOMENTE JSON: {"surpresa": "forte|moderada|fraca", "leitura": "uma frase"}'
+        )
+        corpo = {
+            "model": MODELO_SEGUNDA_OPINIAO,
+            "messages": [
+                {"role": "system", "content": "Economista. Responda SOMENTE JSON válido."},
+                {"role": "user", "content": prompt},
+            ],
+            "temperature": 0.1,
+            "max_tokens": 160,
+        }
+        try:
+            resp = _req.post(URL_GROQ, json=corpo,
+                             headers={**_HEADERS_BASE, "Authorization": f"Bearer {api}"},
+                             timeout=TIMEOUT_SEGUNDOS)
+        except _req.RequestException:
+            return None
+        if resp.status_code == 429:
+            with _lock_bloqueio:
+                pausa = 300 if "tokens per day" in resp.text else 30
+                _bloqueado_ate = time.time() + pausa
+            return None
+        if resp.status_code != 200:
+            return None
+        try:
+            conteudo = resp.json()["choices"][0]["message"]["content"].strip()
+        except (KeyError, IndexError):
+            return None
+        inicio, fim = conteudo.find("{"), conteudo.rfind("}") + 1
+        if inicio < 0 or fim <= inicio:
+            return None
+        try:
+            obj = json.loads(conteudo[inicio:fim])
+        except json.JSONDecodeError:
+            return None
+        surpresa = str(obj.get("surpresa", "")).lower()
+        leitura = str(obj.get("leitura", "")).strip()
+        if surpresa not in ("forte", "moderada", "fraca") or not leitura:
+            return None
+        resultado = {"surpresa": surpresa, "leitura": leitura[:220],
+                     "modelo": MODELO_SEGUNDA_OPINIAO}
+        _cache_leitura[chave] = resultado
+        return resultado
+    finally:
+        _sem_ia.release()
+
+
 def classificar_indicador(titulo: str) -> str | None:
     """Um resultado ACIMA do previsto fortalece ou enfraquece a moeda?
 
