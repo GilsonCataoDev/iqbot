@@ -73,6 +73,10 @@ HORIZONTE_VELAS = 24
 # Rodando os dois lado a lado da para comparar com dado real depois.
 HORIZONTE_LONGO_VELAS = 48
 CHAVE_SIM_LONGA = "simulacao_longa"
+# Horizonte para conferir a direcao mecanica da noticia. O mecanismo e de
+# reprecificacao imediata, entao 4 velas de M15 = 1h; gravado em cada
+# registro para que mudar isto depois nao misture medicoes.
+HORIZONTE_NOTICIA_VELAS = 4
 
 
 def _rotulo_horas(velas: int) -> str:
@@ -1314,6 +1318,99 @@ class Estado:
         """Amostra isolada da varredura v2; permanece sempre em sombra."""
         return self._amostra_por_tipo("liquidity_sweep_v2")
 
+    def registrar_direcao_noticia(self, ativo: str, vela: str, preco: float,
+                                  noticia: dict) -> None:
+        """Guarda a direção mecânica para conferir depois se ela acertou.
+
+        Não é TP/SL: é uma aposta direcional simples, medida pelo fechamento
+        `HORIZONTE_NOTICIA_VELAS` velas adiante. Fica em estrutura própria
+        para nunca ser somada às amostras dos estudos.
+        """
+        if noticia.get("estado") != "resultado_publicado":
+            return
+        direcao = noticia.get("direcao")
+        if direcao not in ("CALL", "PUT"):
+            return
+        chave = f"direcao_noticia:{ativo}:{noticia.get('texto')}:{vela}"
+        with self._lock:
+            if chave in self._vistos:
+                return
+            self._vistos.add(chave)
+            self._aprendizado.append({
+                "schema_versao": SCHEMA_VERSAO, "origem": "monitor_mercado",
+                "tipo": "direcao_noticia", "id": chave,
+                "ativo": ativo, "vela": vela,
+                "quando": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+                "evento": noticia.get("texto"), "moeda": noticia.get("moeda"),
+                "actual": noticia.get("actual"), "forecast": noticia.get("forecast"),
+                "desvio_pct": noticia.get("desvio_pct"),
+                "direcao_prevista": direcao,
+                "preco_publicacao": float(preco),
+                "horizonte_velas": HORIZONTE_NOTICIA_VELAS,
+                "afericao": {"estado": "aguardando", "preco_final": None,
+                             "acertou": None, "var_pips": None},
+            })
+            self._salvar_aprendizado()
+
+    def resolver_direcoes_noticia(self, ativo: str, df: pd.DataFrame) -> None:
+        """Confere a direção prevista pelo fechamento do horizonte."""
+        alterou = False
+        with self._lock:
+            pendentes = [
+                h for h in self._aprendizado
+                if h.get("tipo") == "direcao_noticia" and h.get("ativo") == ativo
+                and (h.get("afericao") or {}).get("estado") == "aguardando"
+            ]
+        for h in pendentes:
+            try:
+                velas = int(h.get("horizonte_velas") or HORIZONTE_NOTICIA_VELAS)
+                alvo = pd.Timestamp(h["vela"]) + pd.Timedelta(seconds=TF * velas)
+                if alvo not in df.index:
+                    continue
+                final = float(df.loc[alvo]["Close"])
+                inicial = float(h["preco_publicacao"])
+                passo, _ = unidade_movimento(ativo)
+                if final == inicial:
+                    # Empate não vira erro: resultado indefinido não é perda.
+                    estado, acertou = "empate", None
+                else:
+                    subiu = final > inicial
+                    acertou = subiu if h["direcao_prevista"] == "CALL" else not subiu
+                    estado = "aferido"
+                with self._lock:
+                    h["afericao"] = {
+                        "estado": estado, "preco_final": final,
+                        "acertou": acertou,
+                        "var_pips": round((final - inicial) / passo, 1),
+                        "vela_final": str(alvo),
+                    }
+                alterou = True
+            except Exception:
+                continue
+        if alterou:
+            with self._lock:
+                self._salvar_aprendizado()
+
+    def _amostra_direcao_noticia(self) -> dict:
+        """Acerto da direção mecânica. Separado de tudo: método próprio."""
+        itens = [h for h in self._aprendizado if h.get("tipo") == "direcao_noticia"]
+        afs = [(h.get("afericao") or {}) for h in itens]
+        acertos = sum(1 for a in afs if a.get("acertou") is True)
+        erros = sum(1 for a in afs if a.get("acertou") is False)
+        n = acertos + erros
+        ic = wilson_ci(acertos, n)
+        return {
+            "sinais": len(itens), "acertos": acertos, "erros": erros,
+            "empates": sum(1 for a in afs if a.get("estado") == "empate"),
+            "pendentes": sum(1 for a in afs if a.get("estado") == "aguardando"),
+            "acerto_pct": round(acertos * 100 / n, 1) if n else None,
+            "ic_95": list(ic) if ic else None,
+            "amostra_suficiente": n >= 30,
+            "maturidade": ("INSUFICIENTE" if n < 30 else "OBSERVAR" if n < 100
+                           else "CANDIDATA" if n < 300 else "APROVADA"),
+            "horizonte": _rotulo_horas(HORIZONTE_NOTICIA_VELAS),
+        }
+
     def salvar(self) -> None:
         with self._lock:
             historico_saida = []
@@ -1333,7 +1430,8 @@ class Estado:
                        "amostraFibo": self._amostra_fibo(),
                        "amostraFluxo": self._amostra_fluxo(),
                        "amostraOrb": self._amostra_orb(),
-                       "amostraLiquidez": self._amostra_liquidez()}
+                       "amostraLiquidez": self._amostra_liquidez(),
+                       "amostraDirecaoNoticia": self._amostra_direcao_noticia()}
         try:
             arq = self.pasta / "mercado.json"
             tmp = arq.with_suffix(".tmp")
@@ -1548,6 +1646,10 @@ def loop(api, cfg, estado: Estado, calendario: CalendarioEconomico | None = None
                 ]).sort_index().tail(300)
                 estado.salvar_candles(a, df_grafico, regressao(df_grafico))
                 estado.resolver(a, df)
+                # Direcao mecanica da noticia: registra quando o numero sai e
+                # confere depois. Observacao pura, nao gera ordem.
+                estado.registrar_direcao_noticia(a, str(df.index[-1]), preco, noticia)
+                estado.resolver_direcoes_noticia(a, df)
                 # Heartbeat POR ATIVO, nao so no fim da passada. Antes, um
                 # unico ativo lento (download travado) fazia o supervisor achar
                 # que o monitor inteiro morreu, porque o JSON so era escrito
@@ -2031,6 +2133,20 @@ function linhaEstudo(label,x){
     ${cmp}
   </div>`;
 }
+function linhaDirecaoNoticia(x){
+  // Nao e TP/SL: mede so se a direcao mecanica apontou para o lado certo.
+  const txt = x.acerto_pct==null ? 'sem aferição resolvida'
+    : `${x.acertos} acertos / ${x.erros} erros · ${x.acerto_pct}%`;
+  const ic = x.ic_95 ? `<span class="ic-badge ok">IC95% ${x.ic_95[0]}–${x.ic_95[1]}%</span>`
+                     : '<span class="ic-badge insuf">IC indisponível</span>';
+  const insuf = !x.amostra_suficiente
+    ? '<span style="color:#64748b;font-size:.64rem"> ⚠ AMOSTRA INSUFICIENTE (n&lt;30)</span>' : '';
+  return `<div style="margin:.45rem 0;padding:.4rem .5rem;background:#0c1728;border-left:3px solid #7c3aed;border-radius:.25rem">
+    <b>Direção mecânica da notícia</b> · ${x.sinais||0} registros <span class="mat">${x.maturidade||'—'}</span>${ic}${insuf}<br>
+    <span style="font-size:.7rem;color:#cbd5e1">${txt} · ${x.empates||0} empates · ${x.pendentes||0} aguardando · horizonte ${x.horizonte||'—'}</span>
+    <div style="font-size:.62rem;color:#64748b;margin-top:.15rem">Sem TP/SL: só se o par foi para o lado previsto. Não entra nas amostras dos estudos.</div>
+  </div>`;
+}
 function renderAmostra(){
   const el=document.getElementById('amostra'); if(!el) return;
   el.innerHTML=
@@ -2039,6 +2155,7 @@ function renderAmostra(){
     linhaEstudo('Fluxo de sessão — estudo',D.amostraFluxo||{})+
     linhaEstudo('ORB/FVG M15 — estudo sombra',D.amostraOrb||{})+
     linhaEstudo('Liquidez V2 — estudo sombra',D.amostraLiquidez||{})+
+    linhaDirecaoNoticia(D.amostraDirecaoNoticia||{})+
     '<div class="nota">Estudos não são misturados ao sinal validado. IC95% de Wilson; amostras abaixo de 30 resolvidos não sustentam conclusões.</div>';
 }
 

@@ -278,6 +278,10 @@ MOCK_PAYLOAD = {
     "amostraFluxo": {**MOCK_AMOSTRAS_BASE},
     "amostraOrb": {**MOCK_AMOSTRAS_BASE},
     "amostraLiquidez": {**MOCK_AMOSTRAS_BASE},
+    "amostraDirecaoNoticia": {"sinais": 12, "acertos": 7, "erros": 4,
+                               "empates": 1, "pendentes": 0, "acerto_pct": 63.6,
+                               "ic_95": [35.4, 84.8], "amostra_suficiente": False,
+                               "maturidade": "INSUFICIENTE", "horizonte": "1h"},
 }
 
 (RAIZ / "mercado.json").write_text(
