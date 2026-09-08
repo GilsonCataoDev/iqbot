@@ -586,6 +586,17 @@ def plano_bof_m30_m5(df_m5: pd.DataFrame, atr_m5: pd.Series, ativo: str,
     }
 
 
+def _ic_media(valores: list[float], z: float = 1.96) -> list[float] | None:
+    """IC 95% da media, pelo erro padrao. None quando a amostra nao sustenta."""
+    n = len(valores)
+    if n < 3:
+        return None
+    media = sum(valores) / n
+    var = sum((v - media) ** 2 for v in valores) / (n - 1)
+    erro = (var / n) ** 0.5
+    return [round(media - z * erro, 3), round(media + z * erro, 3)]
+
+
 def wilson_ci(wins: int, n: int, z: float = 1.96) -> tuple[float, float] | None:
     """Wilson score interval [lower%, upper%] para uma proporção wins/n.
 
@@ -1520,6 +1531,11 @@ class Estado:
             "avaliados_r": len(resultados_r),
             "saldo_r": round(sum(resultados_r), 3) if resultados_r else None,
             "media_r": round(sum(resultados_r) / len(resultados_r), 3) if resultados_r else None,
+            # IC do R medio. O painel decide o peso do aviso por aqui: estudo
+            # com intervalo acima de zero avisa alto, o que cruza zero avisa
+            # baixo, o que esta abaixo fica mudo. O alerta segue a evidencia
+            # sozinho, sem lista fixa para manter na mao.
+            "media_r_ic": _ic_media(resultados_r),
         }
 
     def _amostra_entrada_validada(self) -> dict:
@@ -2442,31 +2458,65 @@ function alternarSomMonitor(){
   somMonitorAtivo=!somMonitorAtivo;
   localStorage.setItem('monitorMercadoSom',somMonitorAtivo?'1':'0');
   atualizarBotaoSomMonitor();
-  if(somMonitorAtivo) bip(true);
+  if(somMonitorAtivo) bip(true,'forte');
 }
-function bip(teste=false){
+// Cada estudo publica o IC do R medio. O aviso segue esse intervalo, nao uma
+// lista escrita na mao: assim, se o Fibo regredir ele se cala sozinho, e se o
+// falso rompimento acumular amostra ele passa a avisar sem eu tocar em nada.
+const AMOSTRA_DO_ESTUDO={fibo_m15:'amostraFibo', fluxo_m15:'amostraFluxo',
+  orb_fvg_m15:'amostraOrb', liquidity_sweep_v2:'amostraLiquidez',
+  bof_m30_m5:'amostraBof', rompimento_reteste:'amostraRompimentoReteste'};
+// Janela por peso: um aviso fraco nunca pode engolir um forte no rate limit.
+const ultimoAlertaPorPeso={forte:0, fraco:0};
+
+function pesoDoEstudo(tipo){
+  const a=D[AMOSTRA_DO_ESTUDO[tipo]]||{};
+  const ic=a.media_r_ic;
+  if(!Array.isArray(ic)) return 'fraco';   // amostra curta demais para opinar
+  if(ic[0]>0) return 'forte';              // vantagem sustentada pelo intervalo
+  if(ic[1]<0) return 'mudo';               // prejuizo sustentado: nao avisa
+  return 'fraco';                          // cruza zero: aparece, sem insistir
+}
+
+function bip(teste=false, peso='forte'){
   if(!somMonitorAtivo && !teste) return;
-  if(!teste && Date.now()-ultimoAlerta<60000) return;
-  ultimoAlerta=Date.now();
+  if(peso==='mudo' && !teste) return;
+  if(!teste){
+    // Janelas separadas, e a fraca e mais longa para nao virar ruido.
+    const espera = peso==='forte' ? 60000 : 180000;
+    if(Date.now()-ultimoAlertaPorPeso[peso] < espera) return;
+    ultimoAlertaPorPeso[peso]=Date.now();
+  }
   try{
     const ctx=new (window.AudioContext||window.webkitAudioContext)();
     if(ctx.state==='suspended') ctx.resume();
-    const o=ctx.createOscillator(), g=ctx.createGain();
-    o.connect(g); g.connect(ctx.destination);
-    o.frequency.value=880; g.gain.value=.08;
-    o.start(); setTimeout(()=>{o.stop();ctx.close();},220);
+    // Forte: duas notas altas, da para reconhecer sem olhar a tela.
+    // Fraco: uma nota baixa e curta, so para nao passar despercebido.
+    const notas = peso==='forte' ? [[880,0],[1175,260]] : [[440,0]];
+    const volume = peso==='forte' ? .09 : .04;
+    const duracao = peso==='forte' ? 220 : 120;
+    notas.forEach(([hz,atraso])=>setTimeout(()=>{
+      const o=ctx.createOscillator(), g=ctx.createGain();
+      o.connect(g); g.connect(ctx.destination);
+      o.frequency.value=hz; g.gain.value=volume;
+      o.start(); setTimeout(()=>{try{o.stop();}catch(e){}},duracao);
+    },atraso));
+    setTimeout(()=>{try{ctx.close();}catch(e){}}, 900);
   }catch(e){}
 }
+
 function alertarNovoEvento(){
-  const tipos=new Set(['fibo_m15','fluxo_m15','orb_fvg_m15','liquidity_sweep_v2','bof_m30_m5']);
-  const ativos=(D.historico||[]).filter(h=>tipos.has(h.tipo)
+  const ativos=(D.historico||[]).filter(h=>AMOSTRA_DO_ESTUDO[h.tipo]
     &&(h.simulacao||{}).desfecho==='aguardando');
   const recente=ativos[ativos.length-1];
   const id=recente&&(recente.id||`${recente.ativo}|${recente.tipo}|${recente.hora||recente.timestamp||''}`);
   if(!eventosSonorosInicializados){
     eventosSonorosInicializados=true; ultimoEventoPossivel=id||''; return;
   }
-  if(id && id!==ultimoEventoPossivel){ ultimoEventoPossivel=id; bip(); }
+  if(id && id!==ultimoEventoPossivel){
+    ultimoEventoPossivel=id;
+    bip(false, pesoDoEstudo(recente.tipo));
+  }
 }
 
 function cardSinal(a,x){
