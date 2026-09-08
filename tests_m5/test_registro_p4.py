@@ -16,7 +16,7 @@ def _inserir_op(registro, setup, timeframe, resultado, atraso_ms=300, data_str=N
     if data_str:
         base = datetime.fromisoformat(data_str + "T10:00:00")
     else:
-        base = datetime.now(timezone.utc).replace(tzinfo=None).replace(microsecond=0)
+        base = datetime.now().replace(microsecond=0)
     candle = pd.Timestamp(base)
     decisao = Decisao("EURUSD", "call", 1.08, candle, setup, detalhes={"setup": setup})
     ordem_id = f"op-{setup}-{timeframe}-{atraso_ms}-{resultado}-{base.isoformat()}"
@@ -37,7 +37,7 @@ def _inserir_decisao_op(registro, setup, timeframe, resultado, data_str=None, at
     if data_str:
         ts = datetime.fromisoformat(data_str + "T12:00:00")
     else:
-        ts = datetime.now(timezone.utc).replace(tzinfo=None).replace(microsecond=0)
+        ts = datetime.now().replace(microsecond=0)
     candle = pd.Timestamp(ts)
     with registro._sessao() as db:
         db.execute(

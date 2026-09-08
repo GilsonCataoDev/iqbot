@@ -16,7 +16,9 @@ def _inserir_entrada_com_detalhes(
     detalhes: dict | None = None,
 ) -> str:
     """Insere decisao (raw SQL) + abertura + resultado. Retorna id_ordem."""
-    agora_utc = datetime.now(timezone.utc).replace(tzinfo=None).replace(microsecond=0)
+    # O banco grava hora local (executor usa datetime.now()); inserir UTC
+    # so passava fora da janela 00h-03h BRT.
+    agora_utc = datetime.now().replace(microsecond=0)
     candle = pd.Timestamp(agora_utc)
     detalhes = detalhes or {
         "setup": setup,
