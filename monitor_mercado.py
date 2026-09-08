@@ -1050,12 +1050,12 @@ class Estado:
             self.dados[ativo] = {"disponivel": True, **info}
 
     def registrar_sinal(self, ativo: str, vela: str, info: dict,
-                        tipo: str = "falso_rompimento") -> None:
-        """Salva sinais de estudo por tipo, sem misturar Fibo e falso rompimento."""
+                        tipo: str = "falso_rompimento") -> bool:
+        """Salva um sinal novo e informa se ele foi realmente persistido."""
         chave = f"{tipo}:{ativo}:{vela}"
         with self._lock:
             if chave in self._vistos:
-                return
+                return False
             self._vistos.add(chave)
             item = {
                 "schema_versao": SCHEMA_VERSAO, "origem": "monitor_mercado",
@@ -1093,6 +1093,7 @@ class Estado:
             self.historico = [h for h in self.historico
                               if datetime.fromisoformat(h["quando"]).timestamp() > corte][-60:]
             self._salvar_aprendizado()
+            return True
 
     def resolver(self, ativo: str, df: pd.DataFrame) -> None:
         """Registra reação e simulação TP1/SL; não é resultado de ordem real."""
@@ -1707,9 +1708,9 @@ def loop(api, cfg, estado: Estado, calendario: CalendarioEconomico | None = None
                 estado.status = f"lendo {a} — {datetime.now(timezone.utc):%H:%M:%S} UTC"
                 estado.salvar()
                 if leitura_entrada["sinal"]:
-                    estado.registrar_sinal(a, str(df.index[-1]), estado.dados[a])
-                    print(f"[SINAL] {a} LONG @ {df.index[-1]} preco={preco} "
-                          f"regime={cls.iloc[-1]}")
+                    if estado.registrar_sinal(a, str(df.index[-1]), estado.dados[a]):
+                        print(f"[SINAL] {a} LONG @ {df.index[-1]} preco={preco} "
+                              f"regime={cls.iloc[-1]}")
                 # Fibo é um segundo estudo, independente do falso rompimento:
                 # registra somente quando a retração e a rejeição se completam.
                 # Não altera ``entrada_valida`` nem envia qualquer posição.
@@ -1723,9 +1724,9 @@ def loop(api, cfg, estado: Estado, calendario: CalendarioEconomico | None = None
                         "checklist": fibo["checklist"],
                         "alvos": None, "alvos_estudo": fibo["alvos"],
                     }
-                    estado.registrar_sinal(a, str(df.index[-1]), estudo_fibo, tipo="fibo_m15")
-                    print(f"[FIBO — ESTUDO] {a} {fibo['direcao'].upper()} @ {df.index[-1]} "
-                          f"RR={fibo['rr']}")
+                    if estado.registrar_sinal(a, str(df.index[-1]), estudo_fibo, tipo="fibo_m15"):
+                        print(f"[FIBO — ESTUDO] {a} {fibo['direcao'].upper()} @ {df.index[-1]} "
+                              f"RR={fibo['rr']}")
                 if fluxo.get("sinal_estudo"):
                     estudo_fluxo = {
                         **estado.dados[a],
@@ -1736,11 +1737,11 @@ def loop(api, cfg, estado: Estado, calendario: CalendarioEconomico | None = None
                         "checklist": fluxo["checklist"],
                         "alvos": None, "alvos_estudo": fluxo["alvos"],
                     }
-                    estado.registrar_sinal(
+                    if estado.registrar_sinal(
                         a, str(df.index[-1]), estudo_fluxo, tipo="fluxo_m15"
-                    )
-                    print(f"[FLUXO — ESTUDO] {a} {fluxo['direcao'].upper()} @ {df.index[-1]} "
-                          f"qualidade={fluxo['qualidade']} RR={fluxo['rr']}")
+                    ):
+                        print(f"[FLUXO — ESTUDO] {a} {fluxo['direcao'].upper()} @ {df.index[-1]} "
+                              f"qualidade={fluxo['qualidade']} RR={fluxo['rr']}")
                 if orb.get("sinal_estudo"):
                     estudo_orb = {
                         **estado.dados[a],
@@ -1751,11 +1752,11 @@ def loop(api, cfg, estado: Estado, calendario: CalendarioEconomico | None = None
                         "checklist": orb["checklist"],
                         "alvos": None, "alvos_estudo": orb["alvos"],
                     }
-                    estado.registrar_sinal(
+                    if estado.registrar_sinal(
                         a, str(df.index[-1]), estudo_orb, tipo="orb_fvg_m15"
-                    )
-                    print(f"[ORB/FVG — ESTUDO] {a} {orb['direcao'].upper()} "
-                          f"@ {df.index[-1]} sessão={orb['sessao']} RR={orb['rr']}")
+                    ):
+                        print(f"[ORB/FVG — ESTUDO] {a} {orb['direcao'].upper()} "
+                              f"@ {df.index[-1]} sessão={orb['sessao']} RR={orb['rr']}")
                 if liquidez.get("sinal_estudo"):
                     estudo_liquidez = {
                         **estado.dados[a],
@@ -1766,12 +1767,12 @@ def loop(api, cfg, estado: Estado, calendario: CalendarioEconomico | None = None
                         "checklist": liquidez["checklist"],
                         "alvos": None, "alvos_estudo": liquidez["alvos"],
                     }
-                    estado.registrar_sinal(
+                    if estado.registrar_sinal(
                         a, str(df.index[-1]), estudo_liquidez,
                         tipo="liquidity_sweep_v2",
-                    )
-                    print(f"[LIQUIDEZ V2 — ESTUDO] {a} BUY @ {df.index[-1]} "
-                          f"RR={liquidez['rr']}")
+                    ):
+                        print(f"[LIQUIDEZ V2 — ESTUDO] {a} BUY @ {df.index[-1]} "
+                              f"RR={liquidez['rr']}")
                 # Rompimento+reteste do forex, em sombra. A estrategia vive em
                 # forex_estrategia.py e nao tinha nenhuma amostra ao vivo: os
                 # processos que a executam nao rodam. Aqui ela so observa,
@@ -1787,13 +1788,13 @@ def loop(api, cfg, estado: Estado, calendario: CalendarioEconomico | None = None
                         "checklist": plano_rr["checklist"],
                         "alvos": None, "alvos_estudo": plano_rr["alvos"],
                     }
-                    estado.registrar_sinal(
+                    if estado.registrar_sinal(
                         a, str(df.index[-1]), estudo_rr,
                         tipo="rompimento_reteste",
-                    )
-                    print(f"[ROMPIMENTO+RETESTE — ESTUDO] {a} "
-                          f"{plano_rr['direcao'].upper()} @ {df.index[-1]} "
-                          f"risco={plano_rr['risco_atr']}ATR")
+                    ):
+                        print(f"[ROMPIMENTO+RETESTE — ESTUDO] {a} "
+                              f"{plano_rr['direcao'].upper()} @ {df.index[-1]} "
+                              f"risco={plano_rr['risco_atr']}ATR")
             except Exception as e:
                 print(f"[{a}] {e!r}")
         estado.status = f"OK — {datetime.now(timezone.utc):%H:%M:%S} UTC"

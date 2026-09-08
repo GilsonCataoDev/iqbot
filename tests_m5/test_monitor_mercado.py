@@ -34,6 +34,18 @@ def test_estado_publica_saude_do_sqlite(tmp_path):
     assert payload["saudeDados"]["eventos"] == 1
 
 
+def test_registrar_sinal_informa_se_evento_foi_novo(tmp_path):
+    estado = Estado(
+        tmp_path / "web", arquivo_aprendizado=tmp_path / "sinais.json",
+        banco_aprendizado=tmp_path / "monitor.sqlite3",
+    )
+    info = {"classe": "forex", "direcao": "buy", "entrada_valida": False}
+
+    assert estado.registrar_sinal("EURUSD", "2026-09-07 12:00:00", info, "fibo_m15") is True
+    assert estado.registrar_sinal("EURUSD", "2026-09-07 12:00:00", info, "fibo_m15") is False
+    assert len(estado._aprendizado) == 1
+
+
 def test_decisao_deixa_sinal_fora_da_janela_em_estudo():
     resultado = decisao_entrada(True, True, False)
 
