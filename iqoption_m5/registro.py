@@ -1185,12 +1185,12 @@ class RegistroSQLite:
                 """
                 SELECT og.veredicto,
                        COUNT(*) AS n,
-                       SUM(CASE WHEN op.resultado_bruto = 'win' THEN 1 ELSE 0 END) AS wins
+                       SUM(CASE WHEN op.lucro > 0 THEN 1 ELSE 0 END) AS wins
                 FROM opinioes_groq og
                 JOIN operacoes op ON og.ativo = op.ativo
                     AND op.enviada_em >= og.criado_em
                     AND op.enviada_em < datetime(og.criado_em, '+' || :jan || ' seconds')
-                    AND op.resultado_bruto IN ('win', 'loss')
+                    AND op.status = 'finalizada' AND op.lucro IS NOT NULL
                 GROUP BY og.veredicto
                 """,
                 {"jan": janela_segundos},
@@ -1255,9 +1255,9 @@ class RegistroSQLite:
             linhas = db.execute(
                 """
                 SELECT setup, COALESCE(timeframe, 0), atraso_envio_ms,
-                       CASE WHEN resultado_bruto='win' THEN 1 ELSE 0 END
+                       CASE WHEN lucro > 0 THEN 1 ELSE 0 END
                 FROM operacoes
-                WHERE status='finalizada' AND resultado_bruto IN ('win', 'loss')
+                WHERE status='finalizada' AND lucro IS NOT NULL
                 ORDER BY setup, timeframe, atraso_envio_ms
                 """,
             ).fetchall()
@@ -1534,9 +1534,9 @@ class RegistroSQLite:
                 """
                 SELECT strftime('%H', datetime(enviada_em, '-3 hours')) AS hora,
                        COUNT(*) AS n,
-                       SUM(CASE WHEN resultado_bruto = 'win' THEN 1 ELSE 0 END) AS wins
+                       SUM(CASE WHEN lucro > 0 THEN 1 ELSE 0 END) AS wins
                 FROM operacoes
-                WHERE resultado_bruto IN ('win', 'loss')
+                WHERE status = 'finalizada' AND lucro IS NOT NULL
                 GROUP BY hora
                 ORDER BY hora
                 """
@@ -1560,10 +1560,10 @@ class RegistroSQLite:
                 """
                 SELECT date(datetime(enviada_em, '-3 hours')) AS data_brt,
                        COUNT(*) AS n,
-                       SUM(CASE WHEN resultado_bruto = 'win' THEN 1 ELSE 0 END) AS wins,
+                       SUM(CASE WHEN lucro > 0 THEN 1 ELSE 0 END) AS wins,
                        SUM(CASE WHEN lucro IS NOT NULL THEN lucro ELSE 0 END) AS lucro
                 FROM operacoes
-                WHERE resultado_bruto IN ('win', 'loss')
+                WHERE status = 'finalizada' AND lucro IS NOT NULL
                   AND enviada_em >= datetime('now', '-' || :dias || ' days')
                 GROUP BY data_brt
                 ORDER BY data_brt ASC
@@ -1592,9 +1592,9 @@ class RegistroSQLite:
                 SELECT setup,
                        strftime('%H', datetime(enviada_em, '-3 hours')) AS hora,
                        COUNT(*) AS n,
-                       SUM(CASE WHEN resultado_bruto = 'win' THEN 1 ELSE 0 END) AS wins
+                       SUM(CASE WHEN lucro > 0 THEN 1 ELSE 0 END) AS wins
                 FROM operacoes
-                WHERE resultado_bruto IN ('win', 'loss')
+                WHERE status = 'finalizada' AND lucro IS NOT NULL
                   AND setup IS NOT NULL AND setup != ''
                 GROUP BY setup, hora
                 ORDER BY setup, hora
@@ -1623,9 +1623,9 @@ class RegistroSQLite:
                 """
                 SELECT setup,
                        COUNT(*) AS n,
-                       SUM(CASE WHEN resultado_bruto = 'win' THEN 1 ELSE 0 END) AS wins
+                       SUM(CASE WHEN lucro > 0 THEN 1 ELSE 0 END) AS wins
                 FROM operacoes
-                WHERE resultado_bruto IN ('win', 'loss')
+                WHERE status = 'finalizada' AND lucro IS NOT NULL
                   AND setup IS NOT NULL AND setup != ''
                 GROUP BY setup
                 HAVING n >= :min_ent
