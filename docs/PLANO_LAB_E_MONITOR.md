@@ -12,9 +12,99 @@
   validada, sem bip para estudo sombra.
 - Exportação conjunta para XLSX por `EXPORTAR_DADOS_PAINEIS.bat`.
 
-As fases de Groq rastreável, intervalo de confiança e promoção automática por
-amostra continuam deliberadamente fora desta entrega: exigem validação futura e
-não devem influenciar entradas antes de provar ganho fora da amostra.
+A promoção automática por amostra continua deliberadamente fora: exige validação
+futura e não deve influenciar entradas antes de provar ganho fora da amostra.
+Groq rastreável e intervalo de confiança foram entregues em 06–07/09, descritos
+abaixo.
+
+## Entrega de 06–07/09/2026
+
+### Gráficos
+
+- Monitor migrado de `<canvas>` desenhado à mão para Lightweight Charts 4.1.3,
+  a mesma do Lab. Ganhou zoom, pan e crosshair; os rótulos de nível passaram a
+  ser do eixo de preço e o empilhamento manual saiu.
+- Janela do Monitor de 60 para **240 velas** (15h → 60h). Os candles já estavam
+  carregados — `df_grafico` traz 300 e o corte descartava 240.
+- Fibo do Lab ancorada só na perna estrutural, com faixa sombreada e cor por
+  estado (verde confirmada, amarelo na zona, cinza invalidada).
+- Marcação manual de Fibo e linha horizontal nos dois painéis, com persistência
+  em SQLite (`marcacoes_manuais`), separada por painel e ativo.
+
+### Medição
+
+- Horizonte de 12h medido **em paralelo** ao oficial de 6h no Monitor. Os dois
+  nunca são somados: horizontes diferentes são métodos diferentes. A troca vira
+  decisão com dado, sem invalidar a amostra acumulada.
+- Direção mecânica da notícia passou a ser aferida — registra a previsão quando
+  o número sai e confere o fechamento 1h depois, com IC de Wilson.
+- Rompimento+reteste do forex ligado em sombra no Monitor. Ele não tinha
+  **nenhuma** amostra ao vivo: `forex_forward.csv` e `forex_trades.csv` vazios,
+  e os processos que o executam não rodam.
+- Lab passou a marcar no gráfico as entradas possíveis com mercado fechado, sem
+  gravar no banco — responde "teve entrada?" sem contaminar estatística.
+
+### IA
+
+A divisão de trabalho é deliberada e vale como regra:
+
+| Tarefa | Quem faz | Por quê |
+|---|---|---|
+| Direção da notícia | `resultado_direcao()` | Aritmética; a IA não participa e há teste impedindo que ela inverta |
+| Desvio do previsto | `_desvio_do_previsto()` | Aritmética pura |
+| Sentido do indicador | `ia.classificar_indicador()` | Só para títulos fora das listas de palavras-chave |
+| Frase do mecanismo | `ia.ler_resultado_noticia()` | Descrever mecanismo é tarefa de linguagem |
+
+Previsão de movimento **não** foi implementada, por decisão. O próprio
+`noticias.py` diz por quê: *"aviso de risco, nunca previsão de direção — saber
+que o payroll sai às 9h30 não diz se o dólar sobe ou cai"*.
+
+Toda chamada de IA falha fechada, tem cache por conteúdo e é opcional: sem
+`GROQ_API_KEY` o comportamento é idêntico ao determinístico.
+
+### Bugs corrigidos
+
+Quatro estavam invisíveis, e o motivo de cada um vale registrar:
+
+- **`row_factory` ausente.** Cinco consultas acessavam `row["coluna"]` sem a
+  conexão definir `sqlite3.Row`. Estouravam `TypeError` assim que a query
+  retornava linhas, mas `semear_historico()` envolve tudo num `try/except` que
+  só imprime — o `historico_hoje.json` parou de ser regenerado desde o P7, em
+  silêncio. Cinco painéis mostravam dado congelado.
+- **Dia BRT contra dia UTC.** `datetime.now().date()` comparado com
+  `date(enviada_em)`, coluna em UTC. Entre 21h e meia-noite BRT o Lab enxergava
+  zero operações do dia, e o `estado_hoje` recarregava dia vazio num restart —
+  os limites diários reiniciavam às 21h.
+- **`SyntaxError` em `ia.py`.** `global` depois da leitura da variável deixava
+  o módulo inimportável; o botão Consultar IA estava quebrado desde o P5.
+- **Chart criado com largura zero.** Abrir o painel em aba de segundo plano
+  deixava a escala de tempo sem range válido, e nem `resize()` nem
+  `fitContent()` recuperam.
+
+Removida a camada "Auxiliares" do Lab: filtrava `pullbacks`/`confluencias`, que
+nunca são preenchidos porque o split em `grafico.py` compara o setup por
+igualdade exata com nomes que o bot não usa mais.
+
+### Diagnóstico
+
+`iqoption_m5/log_arquivo.py` espelha stdout e stderr para
+`iqoption_m5/dados/logs/<nome>_<dia BRT>.log`, com carimbo de hora e flush a
+cada escrita. Antes, as mensagens que explicam por que o bot não opera morriam
+com a janela do terminal — foi exatamente o que travou uma investigação.
+
+### Onde as amostras estão
+
+Nada aprovado. As três mais promissoras têm saldo positivo e intervalo que
+ainda cruza a neutralidade:
+
+| | n | Métrica | Situação |
+|---|---|---|---|
+| `ema920_pullback` M5 (Lab) | 136 | 61,0% · IC [52,6–68,8] | cruza o breakeven de 53,8% |
+| `falso_rompimento` (Monitor) | 59 | R +0,359 · IC [−0,07;+0,79] | inconclusivo |
+| `fibo_m15` (Monitor) | 93 | R +0,195 · IC [−0,12;+0,51] | inconclusivo |
+
+Lab é binária: compara win-rate contra o breakeven do payout. Monitor é TP/SL:
+compara R médio contra zero. **As duas escalas não se misturam.**
 
 ## Objetivo
 

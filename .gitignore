@@ -38,3 +38,6 @@ relatorios/
 *.bak.bat
 /none
 /binaria)
+
+# Artefatos do trace-mcp (indice de codigo local)
+.trace-mcp/
