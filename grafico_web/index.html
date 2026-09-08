@@ -381,6 +381,12 @@
   .filtro-chip { padding: 1px 6px; border-radius: 10px; font-size: 9px; cursor: pointer;
     background: #1a2235; border: 1px solid var(--border); color: var(--muted); transition: background .15s; }
   .filtro-chip.ativo { background: var(--accent); border-color: var(--accent); color: #fff; }
+  /* Ativo com ENTRAR na lateral: o aviso vale para os oito, então a lista
+     precisa mostrar de qual deles se trata sem trocar de gráfico. Colore a
+     borda inteira, como o ativo-selecionado — numa pílula arredondada, borda
+     só de um lado fica torta. */
+  .resumo-item.resumo-entrada { background: rgba(63,185,80,.14); border-color: var(--green); }
+  .resumo-item.resumo-entrada .resumo-label { color: var(--green); font-weight: 700; }
   .marc-sep { width:1px; height:14px; background:var(--border); margin:0 3px; display:inline-block; }
   .btn-marc { background:#1a2235; border:1px solid var(--border); color:var(--muted);
     border-radius:5px; font-size:10px; padding:2px 7px; cursor:pointer; }
@@ -887,14 +893,44 @@ function _atualizarFiltrosSetup(entradas) {
 // ── P5-B: Consultar IA ──
 let _alertaAtual = null;   // alerta JSON do ciclo atual
 
-async function _dispararNotificacaoDesktop(setup, direcao, preco) {
+// Último sinal já avisado por ativo. Sem isto o mesmo alerta reavisaria a
+// cada varredura, porque o alerta continua no JSON até o candle virar.
+const _ultimoAvisoPorAtivo = {};
+
+async function _dispararNotificacaoDesktop(ativo, setup, direcao, preco) {
   if (!('Notification' in window)) return;
   if (Notification.permission === 'default') await Notification.requestPermission();
   if (Notification.permission !== 'granted') return;
-  new Notification(`🚦 ENTRAR ${direcao.toUpperCase()}`, {
+  // tag por ativo: um sinal de AUDCAD não pode substituir o de EURUSD.
+  const aviso = new Notification(`🚦 ${ativo} — ENTRAR ${String(direcao).toUpperCase()}`, {
     body: `${setup} @ ${preco}`,
-    tag: 'ema-sinal',
+    tag: `ema-sinal-${ativo}`,
+    requireInteraction: true,
   });
+  aviso.onclick = () => {
+    window.focus();
+    if (ativo && ativo !== ativoAtual) selecionarAtivo(ativo);
+    aviso.close();
+  };
+}
+
+// Avisa de QUALQUER ativo monitorado, não só do que está na tela. O bot
+// acompanha oito; antes o aviso saía apenas do selecionado, então o sinal
+// mais útil — o do ativo que você não está olhando — passava batido.
+function _avisarSeEntrada(ativo, dados) {
+  try {
+    if (!dados || !dados.alerta) return;
+    if (classificarDecisaoVisual(dados.alerta, false).acao !== 'ENTRAR') return;
+    const al = dados.alerta;
+    const id = `${al.id || al.time}-${al.direcao}`;
+    if (_ultimoAvisoPorAtivo[ativo] === id) return;
+    _ultimoAvisoPorAtivo[ativo] = id;
+    _dispararNotificacaoDesktop(
+      ativo, al.setup || '', al.direcao || '',
+      al.preco != null ? Number(al.preco).toFixed(5) : '?',
+    );
+    if (ativo !== ativoAtual) alertaSom(al.direcao === 'call' ? 'call' : 'put');
+  } catch (e) {}
 }
 
 async function consultarIA() {
@@ -1337,6 +1373,11 @@ async function atualizarResumo() {
         const rsi = d.rsi.length ? d.rsi[d.rsi.length-1].value.toFixed(0) : '?';
         label.textContent = `${item.label} ${rsi} ${seta(d.tendenciaMacro)}`;
         el.dataset.temDados = '1';
+        // Este ciclo já traz o JSON de todos os ativos; é o lugar natural
+        // para o aviso, que antes só enxergava o ativo selecionado.
+        _avisarSeEntrada(item.id, d);
+        el.classList.toggle('resumo-entrada',
+          !!(d.alerta && classificarDecisaoVisual(d.alerta, false).acao === 'ENTRAR'));
       } catch(e) { if (!el.dataset.temDados) label.textContent = `${item.label} (aguard.)`; }
     }
   } finally { resumoAtualizando = false; }
@@ -1710,7 +1751,8 @@ function renderizarSinalBadge(dados) {
   if (novaSinal) {
     const toastTxt = `${decisaoVisual.titulo}${decisaoVisual.toastAcao}\n${setup} @ ${preco}`;
     mostrarToast(toastTxt, cls);
-    if (decisaoVisual.acao === 'ENTRAR') _dispararNotificacaoDesktop(setup, direcaoRaw, preco);
+    // O aviso saiu daqui: agora nasce em atualizarResumo(), que varre todos
+    // os ativos. Manter os dois disparava duas notificações do selecionado.
   }
 }
 
