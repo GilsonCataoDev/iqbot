@@ -969,12 +969,15 @@ def configuracao_ema_laboratorio_practice(base: Configuracao | None = None) -> C
         # O laboratório tem banco próprio e mede todas as estratégias. Não pode
         # herdar o piso R$30 do antigo teste M1, que pararia uma campanha nova.
         piso_banca=0.0,
-        # NZDUSD teve desempenho prático inferior. Os demais candidatos
-        # também começam em sombra para permitir uma escolha justa e segura
-        # dos dois melhores pares no fim da campanha.
-        ativos_somente_sombra=(
-            "NZDUSD", "GBPUSD", "USDJPY", "AUDUSD", "USDCAD", "EURJPY",
-        ),
+        # NZDUSD segue em sombra: 18 ordens, 44,4% e -15,2u — já tem amostra,
+        # e ela é negativa.
+        #
+        # Os outros cinco saíram da sombra em 08/09. O motivo é que a sombra
+        # não estava produzindo o dado que ela promete: eles acumularam ZERO
+        # ordens, então não havia como compará-los com EURUSD e AUDCAD, que
+        # tinham 75 e 52. Uma "escolha justa no fim da campanha" precisa de
+        # amostra dos dois lados. Em PRACTICE, o custo de gerá-la é nenhum.
+        ativos_somente_sombra=("NZDUSD",),
         # O M5 e M15 compartilham a mesma conta. Reserva global impede duas
         # ordens do mesmo ativo (ou duas na mesma direção) em timeframes
         # diferentes ao mesmo tempo.

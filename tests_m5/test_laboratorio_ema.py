@@ -23,9 +23,10 @@ def test_laboratorio_tem_rastros_m5_e_m15_e_nzd_em_sombra():
     assert config.ativos == (
         "EURUSD", "AUDCAD", "NZDUSD", "GBPUSD", "USDJPY", "AUDUSD", "USDCAD", "EURJPY",
     )
-    assert config.ativos_somente_sombra == (
-        "NZDUSD", "GBPUSD", "USDJPY", "AUDUSD", "USDCAD", "EURJPY",
-    )
+    # Só o NZDUSD segue em sombra: ele já tem amostra e ela é negativa
+    # (18 ordens, 44,4%, -15,2u). Os outros cinco acumulavam ZERO ordens,
+    # entao a sombra nao produzia o dado que justificaria compará-los.
+    assert config.ativos_somente_sombra == ("NZDUSD",)
     assert {r.config.timeframe_segundos for r in rastros} == {300, 900}
     assert sum(r.intravela for r in rastros) == 4
     fibos = [r for r in rastros if r.config.fibo_sr_retracao_ativo]
