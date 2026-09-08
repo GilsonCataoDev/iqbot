@@ -941,6 +941,13 @@ def configuracao_ema_m5_real(base: Configuracao | None = None) -> Configuracao:
         # Expiração precisa ser fixa: sem este override o executor limita a
         # operação ao candle M5 atual, apesar do plano ser buscar 15 minutos.
         expiracao_por_setup={"ema920_pullback": 15},
+        # Zona Fibonacci do Lab. A cadeia de herança traz 0.236/0.764, que foi
+        # afinado para M1 ("retrações no M1 raramente acertam 38-62%"). Num
+        # perfil M5 isso alarga muito a zona e faz entrar em retração que a
+        # amostra medida nunca cobriu — o perfil operaria uma estratégia
+        # diferente da que rendeu os 61,7%.
+        pullback_fib_min=0.382,
+        pullback_fib_max=0.618,
         executar_estrategias_nao_validadas=False,
         sufixo_banco="ema_m5_real",
         porta_grafico=8786,
