@@ -76,7 +76,7 @@ def recuperar_operacoes_pendentes(
                 print(
                     f">> {pendente.ativo}: ordem {pendente.id_ordem} ainda nao "
                     f"expirou (idade={idade:.0f}s, expiracao={expiracao_min}min) — "
-                    f"aguardando proximo restart pra recuperar"
+                    f"aguardando a proxima consulta automatica"
                 )
                 continue
         try:

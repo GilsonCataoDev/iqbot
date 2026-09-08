@@ -780,7 +780,7 @@ let listaAtivos = [];
 let atualizando = false;
 let resumoAtualizando = false;
 let ultimoStatusValido = '';
-let somAtivo = false;
+let somAtivo = localStorage.getItem('emaLabSomAtivo') === '1';
 let ultimoSinalId = null;      // para detectar novo sinal
 let tfSegundos = 900;          // atualizado pela api
 let ultimoAtualizadoEm = null; // timestamp servidor do ultimo update
@@ -953,11 +953,17 @@ function alertaSom(direcao) {
 
 document.getElementById('btn-som').addEventListener('click', () => {
   somAtivo = !somAtivo;
+  localStorage.setItem('emaLabSomAtivo', somAtivo ? '1' : '0');
   const btn = document.getElementById('btn-som');
   btn.textContent = somAtivo ? '🔔' : '🔕';
   btn.classList.toggle('ativo', somAtivo);
   if (somAtivo) beep(880, 0.1, 0.2); // feedback
 });
+const btnSomInicial = document.getElementById('btn-som');
+if (btnSomInicial && somAtivo) {
+  btnSomInicial.textContent = '🔔';
+  btnSomInicial.classList.add('ativo');
+}
 
 // ── Toggle extra ──
 function toggleExtra() {

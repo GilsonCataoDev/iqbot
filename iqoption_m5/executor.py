@@ -72,7 +72,11 @@ class ExecutorSeguro:
             else "relógio atual da IQ indisponível"
         )
         print(f">> {decisao.ativo}: bloqueada ({motivo}: {detalhe})")
-        self.registro.registrar_falha(decisao, motivo)
+        self.registro.registrar_falha(
+            decisao, motivo,
+            timeframe=self.config.timeframe_segundos,
+            expiracao_minutos=self.config.expiracao_minutos,
+        )
 
     @staticmethod
     def lucro_numerico(resultado, valor: float, payout: float) -> float | None:
@@ -225,7 +229,11 @@ class ExecutorSeguro:
                     )
         except Exception as e:
             self.risco.cancelar_reserva(decisao.ativo)
-            self.registro.registrar_falha(decisao, f"excecao_buy:{e}", valor=valor)
+            self.registro.registrar_falha(
+                decisao, f"excecao_buy:{e}", valor=valor,
+                timeframe=self.config.timeframe_segundos,
+                expiracao_minutos=expiracao,
+            )
             logger.exception(
                 "falha_envio ativo=%s signal_id=%s",
                 decisao.ativo,
@@ -242,7 +250,11 @@ class ExecutorSeguro:
                 print(f">> {decisao.ativo}: ativo suspenso pela IQ — cooldown 10 min")
             else:
                 print(f">> {decisao.ativo}: IQ recusou a ordem — ERRO BRUTO: {id_ordem}")
-            self.registro.registrar_falha(decisao, f"buy_recusado:{id_ordem}", valor=valor)
+            self.registro.registrar_falha(
+                decisao, f"buy_recusado:{id_ordem}", valor=valor,
+                timeframe=self.config.timeframe_segundos,
+                expiracao_minutos=expiracao,
+            )
             return
 
         self.registro.registrar_abertura(
@@ -265,9 +277,13 @@ class ExecutorSeguro:
         except Exception:
             pass
         resumo = self.risco.resumo()
+        limite = (
+            str(self.config.max_operacoes_dia)
+            if self.config.max_operacoes_dia > 0 else "sem limite"
+        )
         print(
             f">> {decisao.ativo}: {decisao.direcao.upper()} enviada, id={id_ordem}, "
-            f"valor=R${valor:.2f} | operação {resumo.operacoes_enviadas}/{self.config.max_operacoes_dia}"
+            f"valor=R${valor:.2f} | operação {resumo.operacoes_enviadas}/{limite}"
         )
         try:
             winsound.Beep(600, 200)

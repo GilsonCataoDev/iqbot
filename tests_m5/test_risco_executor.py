@@ -103,6 +103,24 @@ class TestRiscoEExecutor(unittest.TestCase):
             0.0,
         )
 
+    def test_falha_de_envio_preserva_timeframe_e_expiracao(self):
+        cfg = replace(self.config, timeframe_segundos=900, expiracao_minutos=30)
+        registro = RegistroSQLite(cfg.banco_sqlite, config=cfg)
+
+        registro.registrar_falha(
+            self.decisao, "buy_recusado", valor=5.0,
+            timeframe=cfg.timeframe_segundos,
+            expiracao_minutos=cfg.expiracao_minutos,
+        )
+
+        with closing(sqlite3.connect(cfg.banco_sqlite)) as db:
+            timeframe, expiracao = db.execute(
+                "SELECT timeframe, expiracao_minutos FROM operacoes "
+                "WHERE status='falha_envio' ORDER BY enviada_em DESC LIMIT 1"
+            ).fetchone()
+        self.assertEqual(timeframe, 900)
+        self.assertEqual(expiracao, 30)
+
     def test_valor_percentual_banca_calcula_pela_banca_atual(self):
         cfg = replace(self.config, valor_percentual_banca=0.03, banca_inicial=100.0)
         risco = GerenciadorRisco(cfg)

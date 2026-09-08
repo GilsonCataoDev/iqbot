@@ -9,7 +9,7 @@ import monitor_mercado
 from monitor_mercado import (
     ATIVOS, CLASSE, Estado, adquirir_trava_monitor, decisao_entrada, janela_validada_para,
     leitura_fluxo_sessao, plano_fibo, plano_orb_sessao,
-    plano_varredura_liquidez, unidade_movimento, wilson_ci,
+    plano_bof_m30_m5, plano_varredura_liquidez, unidade_movimento, wilson_ci,
 )
 
 
@@ -161,6 +161,100 @@ def test_varredura_v2_nao_aceita_fechamento_fora_do_range():
 
     assert not plano["sinal_estudo"]
     assert not plano["reclaim"]
+
+
+def _serie_bof_sell() -> tuple[pd.DataFrame, pd.Series]:
+    inicio = pd.Timestamp("2026-09-07 00:00:00")
+    highs = [101, 102, 103, 102, 101, 100, 101, 102, 101.5, 102, 101.8, 102]
+    lows = [99, 98, 97, 96, 95, 90, 95, 96, 95.5, 96, 95.8, 96]
+    linhas, indice = [], []
+    for bloco, (hi, lo) in enumerate(zip(highs, lows)):
+        meio = (hi + lo) / 2
+        for minuto in range(6):
+            indice.append(inicio + pd.Timedelta(minutes=30 * bloco + 5 * minuto))
+            linhas.append([meio, hi, lo, meio])
+    # Varre a máxima M30 de 103, fecha dentro e confirma SELL no M5 seguinte.
+    indice.extend([inicio + pd.Timedelta(hours=6),
+                   inicio + pd.Timedelta(hours=6, minutes=5)])
+    linhas.extend([[102.9, 103.4, 102.4, 102.7],
+                   [102.7, 102.8, 101.5, 102.0]])
+    candles = pd.DataFrame(linhas, columns=["Open", "High", "Low", "Close"], index=indice)
+    return candles, pd.Series(1.0, index=indice)
+
+
+def test_bof_m30_m5_xau_confirma_sell_sem_lookahead_e_com_alvo_preexistente():
+    candles, atr = _serie_bof_sell()
+
+    plano = plano_bof_m30_m5(candles, atr, "XAUUSD", {"estado": "sem_risco"})
+
+    assert plano["disponivel"]
+    assert plano["sinal_estudo"]
+    assert plano["direcao"] == "sell"
+    assert plano["nivel_m30"] == 103.0
+    assert plano["rr"] >= 5.0
+    assert plano["alvos"]["modo_entrada"] == "market_next_open"
+
+
+def test_bof_m30_m5_tambem_aceita_forex_normal():
+    candles, atr = _serie_bof_sell()
+
+    plano = plano_bof_m30_m5(candles, atr, "EURUSD", {"estado": "sem_risco"})
+
+    assert plano["disponivel"]
+    assert plano["sinal_estudo"]
+    assert plano["direcao"] == "sell"
+
+
+def test_bof_m30_m5_nao_e_aplicado_em_cripto():
+    candles, atr = _serie_bof_sell()
+
+    plano = plano_bof_m30_m5(candles, atr, "BTCUSD", {"estado": "sem_risco"})
+
+    assert not plano["disponivel"]
+    assert not plano["sinal_estudo"]
+
+
+def test_simulador_bof_entra_na_abertura_da_proxima_vela():
+    inicio = pd.Timestamp("2026-09-07 06:05:00")
+    h = {
+        "tipo": "bof_m30_m5", "vela": str(inicio), "direcao": "sell",
+        "timeframe_segundos": 300,
+        "alvos_estudo": {
+            "entrada": 102.0, "sl": 103.5, "tp1": 99.0,
+            "modo_entrada": "market_next_open",
+        },
+    }
+    candles = pd.DataFrame(
+        {"Open": [101.8], "High": [102.0], "Low": [98.8], "Close": [99.0]},
+        index=[inicio + pd.Timedelta(minutes=5)],
+    )
+
+    resultado = Estado._resolver_tp_sl(h, candles, horizonte_velas=12)
+
+    assert resultado["desfecho"] == "win_tp1"
+    assert resultado["preenchida"] is True
+    assert resultado["vela_preenchimento"] == str(candles.index[0])
+
+
+def test_estado_nao_resolve_bof_m5_com_candles_m15(tmp_path):
+    inicio = pd.Timestamp("2026-09-07 06:05:00")
+    estado = Estado(tmp_path / "web", arquivo_aprendizado=tmp_path / "sinais.json")
+    estado.registrar_sinal("XAUUSD", str(inicio), {
+        "classe": "ouro", "direcao": "sell", "entrada_valida": False,
+        "timeframe_segundos": 300, "horizonte_velas": 12,
+        "horizonte_longo_velas": 24,
+        "alvos_estudo": {"entrada": 102.0, "sl": 103.5, "tp1": 99.0,
+                          "modo_entrada": "market_next_open"},
+    }, "bof_m30_m5")
+    candles_m15 = pd.DataFrame(
+        {"Open": [102.0], "High": [104.0], "Low": [98.0], "Close": [99.0]},
+        index=[inicio + pd.Timedelta(minutes=15)],
+    )
+
+    estado.resolver("XAUUSD", candles_m15)
+
+    assert estado.historico[0]["simulacao"]["desfecho"] == "aguardando"
+    assert estado._amostra_bof()["horizonte"] == "1h"
 
 
 def test_simulador_espera_gatilho_de_ordem_stop():
@@ -578,6 +672,8 @@ def test_resumo_nao_inverte_resultado_desconhecido_em_loss():
 def test_html_tem_cartao_decisao_principal():
     assert 'id="decisao-principal"' in monitor_mercado._HTML
     assert "renderDecisaoPrincipal" in monitor_mercado._HTML
+    assert 'id="btn-som-monitor"' in monitor_mercado._HTML
+    assert "alertarNovoEvento" in monitor_mercado._HTML
 
 
 def test_html_tem_entrada_sl_tp_na_tabela_de_historico():
@@ -594,7 +690,7 @@ def test_html_mostra_ic_e_maturidade_nos_estudos():
 def test_html_dossie_exibe_plano_completo():
     assert "PLANO (estudo" in monitor_mercado._HTML
     assert "Invalidação / SL" in monitor_mercado._HTML or "Invalidação" in monitor_mercado._HTML
-    assert "textoSimulacao(h.simulacao)" in monitor_mercado._HTML
+    assert "textoSimulacao(h.simulacao,h)" in monitor_mercado._HTML
 
 
 def test_estado_publica_campos_ic_e_maturidade_no_json(tmp_path):

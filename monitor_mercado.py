@@ -29,6 +29,7 @@ import sys
 import threading
 import time
 import webbrowser
+from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -65,7 +66,7 @@ VELAS_GRAFICO = 240
 PORTA = 8777
 INTERVALO_S = 30
 JAN = 10
-SIMULADOR_VERSAO = 2
+SIMULADOR_VERSAO = 3
 # Horizonte oficial da simulacao TP/SL, em velas. 24 x M15 = 6h.
 HORIZONTE_VELAS = 24
 # Horizonte longo medido EM PARALELO, sem substituir o oficial: um trade
@@ -77,11 +78,14 @@ CHAVE_SIM_LONGA = "simulacao_longa"
 # reprecificacao imediata, entao 4 velas de M15 = 1h; gravado em cada
 # registro para que mudar isto depois nao misture medicoes.
 HORIZONTE_NOTICIA_VELAS = 4
+TF_BOF = 300
+HORIZONTE_BOF_VELAS = 12
+HORIZONTE_BOF_LONGO_VELAS = 24
 
 
-def _rotulo_horas(velas: int) -> str:
+def _rotulo_horas(velas: int, timeframe_s: int = TF) -> str:
     """24 velas de M15 viram "6h" — mantem os desfechos ja gravados."""
-    horas = velas * TF / 3600
+    horas = velas * timeframe_s / 3600
     return f"{int(horas)}h" if horas == int(horas) else f"{horas:g}h"
 
 
@@ -401,6 +405,184 @@ def plano_varredura_liquidez(df: pd.DataFrame, atr: pd.Series, ativo: str,
             "risco_pips": round(risco / passo, 1), "risco_unidade": unidade,
             "modo_entrada": "stop",
         },
+    }
+
+
+def plano_bof_m30_m5(df_m5: pd.DataFrame, atr_m5: pd.Series, ativo: str,
+                     noticia: dict | None = None) -> dict:
+    """Breakout Failure M30→M5 para Forex normal e ouro, sempre em sombra.
+
+    Os pivôs M30 usam duas velas fechadas de cada lado. O sinal nasce somente
+    quando um M5 varre o pivô, fecha de volta no range e outro M5 confirma a
+    reversão. Assim, nenhum extremo futuro participa da decisão.
+    """
+    vazio = {
+        "disponivel": False, "sinal_estudo": False, "candidato": False,
+        "direcao": "neutro", "etapa": "SEM DADOS M5",
+        "motivo": "BOF é observado somente em Forex normal e XAUUSD.",
+    }
+    if CLASSE.get(ativo) not in ("forex", "ouro"):
+        return vazio
+    if len(df_m5) < 72 or atr_m5.empty:
+        return {**vazio, "motivo": "Aguardando pelo menos 6 horas de candles M5."}
+
+    colunas = ["Open", "High", "Low", "Close"]
+    if any(c not in df_m5 for c in colunas):
+        return {**vazio, "motivo": "Candles M5 incompletos."}
+    base = df_m5[colunas].dropna().sort_index()
+    if len(base) < 72:
+        return {**vazio, "motivo": "Histórico M5 válido ainda insuficiente."}
+
+    contagem = base["Close"].resample("30min").count()
+    m30 = base.resample("30min").agg({
+        "Open": "first", "High": "max", "Low": "min", "Close": "last",
+    })
+    # Um bloco M30 parcial jamais vira nível estrutural.
+    m30 = m30[contagem.reindex(m30.index).eq(6)].dropna()
+    if len(m30) < 7:
+        return {**vazio, "motivo": "Aguardando pivôs M30 confirmados."}
+
+    pivos: list[dict] = []
+    for i in range(2, len(m30) - 2):
+        janela = m30.iloc[i - 2:i + 3]
+        atual = m30.iloc[i]
+        confirmado_em = m30.index[i + 2] + pd.Timedelta(minutes=30)
+        if float(atual["High"]) > float(janela.drop(janela.index[2])["High"].max()):
+            pivos.append({"lado": "high", "nivel": float(atual["High"]),
+                          "pivo_em": m30.index[i], "confirmado_em": confirmado_em})
+        if float(atual["Low"]) < float(janela.drop(janela.index[2])["Low"].min()):
+            pivos.append({"lado": "low", "nivel": float(atual["Low"]),
+                          "pivo_em": m30.index[i], "confirmado_em": confirmado_em})
+    if not pivos:
+        return {**vazio, "motivo": "Nenhuma máxima/mínima M30 confirmou pivô 2+2."}
+
+    av = float(atr_m5.reindex(base.index).iloc[-1])
+    if not np.isfinite(av) or av <= 0:
+        return {**vazio, "motivo": "ATR M5 indisponível."}
+    ultimo_fechamento = base.index[-1] + pd.Timedelta(minutes=5)
+    candidatos: list[dict] = []
+
+    # No máximo duas velas após a varredura para retornar ao range, seguidas
+    # por uma confirmação. Olhar só as quatro últimas mantém o evento local.
+    inicio_busca = max(0, len(base) - 4)
+    for pivo in pivos:
+        if pivo["confirmado_em"] > ultimo_fechamento:
+            continue
+        nivel = pivo["nivel"]
+        for pos_sweep in range(inicio_busca, len(base)):
+            sweep = base.iloc[pos_sweep]
+            sweep_em = base.index[pos_sweep]
+            if pivo["confirmado_em"] > sweep_em:
+                continue
+            extensao = ((float(sweep["High"]) - nivel) if pivo["lado"] == "high"
+                        else (nivel - float(sweep["Low"])))
+            if not (.10 * av <= extensao <= .75 * av):
+                continue
+            limite_reclaim = min(len(base) - 1, pos_sweep + 2)
+            pos_reclaim = None
+            for k in range(pos_sweep, limite_reclaim + 1):
+                fechamento = float(base.iloc[k]["Close"])
+                voltou = fechamento < nivel if pivo["lado"] == "high" else fechamento > nivel
+                if voltou:
+                    pos_reclaim = k
+                    break
+            etapa = "VARREU M30 — AGUARDAR RETORNO"
+            confirmou = False
+            pos_confirmacao = None
+            if pos_reclaim is not None:
+                etapa = "VOLTOU AO RANGE — AGUARDAR M5"
+                if pos_reclaim + 1 < len(base):
+                    conf = base.iloc[pos_reclaim + 1]
+                    reclaim = base.iloc[pos_reclaim]
+                    confirmou = (
+                        float(conf["Close"]) < float(reclaim["Low"])
+                        if pivo["lado"] == "high"
+                        else float(conf["Close"]) > float(reclaim["High"])
+                    )
+                    if confirmou:
+                        pos_confirmacao = pos_reclaim + 1
+                        etapa = "CONFIRMOU M5"
+                    else:
+                        # A confirmação pertence obrigatoriamente ao M5
+                        # seguinte. Se ele fechou sem romper, a tentativa acabou.
+                        continue
+            if confirmou and pos_confirmacao != len(base) - 1:
+                continue
+            candidatos.append({
+                "pivo": pivo, "sweep": sweep, "sweep_em": sweep_em,
+                "pos_sweep": pos_sweep, "pos_reclaim": pos_reclaim,
+                "pos_confirmacao": pos_confirmacao, "confirmou": confirmou,
+                "etapa": etapa, "extensao_atr": extensao / av,
+            })
+
+    if not candidatos:
+        recente = max(pivos, key=lambda x: x["confirmado_em"])
+        passo, _ = unidade_movimento(ativo)
+        casas_preco = 3 if passo >= .01 else 5
+        return {
+            **vazio, "disponivel": True, "etapa": "NÍVEL M30",
+            "motivo": "Nível confirmado; aguardando uma varredura curta no M5.",
+            "nivel_m30": round(recente["nivel"], casas_preco),
+            "lado_nivel": recente["lado"],
+            "pivo_em": str(recente["pivo_em"]),
+        }
+
+    # Confirmação tem prioridade; depois, o evento mais recente.
+    cand = max(candidatos, key=lambda x: (x["confirmou"], x["sweep_em"]))
+    pivo, sweep = cand["pivo"], cand["sweep"]
+    direcao = "sell" if pivo["lado"] == "high" else "buy"
+    confirmado = bool(cand["confirmou"] and cand["pos_confirmacao"] == len(base) - 1)
+    entrada = float(base.iloc[-1]["Close"])
+    buffer = .10 * av
+    sl = (float(sweep["High"]) + buffer if direcao == "sell"
+          else float(sweep["Low"]) - buffer)
+    risco = abs(entrada - sl)
+
+    # O alvo precisa existir e estar confirmado antes da varredura; escolher o
+    # mais próximo evita chamar retrospectivamente qualquer extremo de "alvo".
+    alvos_pivo = [x["nivel"] for x in pivos
+                  if x["confirmado_em"] <= cand["sweep_em"]
+                  and ((direcao == "sell" and x["lado"] == "low" and x["nivel"] < entrada)
+                       or (direcao == "buy" and x["lado"] == "high" and x["nivel"] > entrada))]
+    tp = (max(alvos_pivo) if direcao == "sell" and alvos_pivo
+          else min(alvos_pivo) if direcao == "buy" and alvos_pivo else None)
+    recompensa = abs(tp - entrada) if tp is not None else 0.0
+    rr = recompensa / risco if risco > 0 else 0.0
+    noticia_risco = (noticia or {}).get("estado") == "janela_risco"
+    elegivel = bool(confirmado and tp is not None and rr >= 5.0 and not noticia_risco)
+    if noticia_risco and confirmado:
+        etapa, motivo = "NOTÍCIA — BLOQUEADO", "BOF confirmou dentro da janela de notícia."
+    elif elegivel:
+        etapa, motivo = "ELEGÍVEL — SOMBRA", "Falha M30 confirmou no M5 e o alvo preexistente oferece pelo menos 5R."
+    elif confirmado and tp is None:
+        etapa, motivo = "SEM ALVO M30", "Confirmação ocorreu, mas não há pivô M30 preexistente como alvo."
+    elif confirmado:
+        etapa, motivo = "R:R INSUFICIENTE", f"Confirmação ocorreu, mas o alvo oferece apenas {rr:.2f}R."
+    else:
+        etapa, motivo = cand["etapa"], "Varredura detectada; a sequência ainda não confirmou uma reversão M5."
+
+    passo, unidade = unidade_movimento(ativo)
+    casas_preco = 3 if passo >= .01 else 5
+    arred = lambda valor: round(float(valor), casas_preco) if valor is not None else None
+    checklist = [
+        {"nome": "Pivô M30 confirmado sem olhar o futuro", "ok": True},
+        {"nome": "Varredura entre 0.10 e 0.75 ATR", "ok": True},
+        {"nome": "Fechamento voltou ao range em até 2 M5", "ok": cand["pos_reclaim"] is not None},
+        {"nome": "M5 seguinte rompeu a vela de retorno", "ok": confirmado},
+        {"nome": "Alvo M30 preexistente oferece ≥ 5R", "ok": tp is not None and rr >= 5.0},
+        {"nome": "Fora da janela de notícia", "ok": not noticia_risco},
+    ]
+    return {
+        "disponivel": True, "sinal_estudo": elegivel, "candidato": True,
+        "direcao": direcao, "etapa": etapa, "estado": etapa, "motivo": motivo,
+        "nivel_m30": arred(pivo["nivel"]), "lado_nivel": pivo["lado"],
+        "pivo_em": str(pivo["pivo_em"]), "varredura_em": str(cand["sweep_em"]),
+        "extremo_varredura": arred(float(sweep["High"] if direcao == "sell" else sweep["Low"])),
+        "extensao_atr": round(cand["extensao_atr"], 2), "rr": round(rr, 2),
+        "checklist": checklist,
+        "alvos": ({"entrada": arred(entrada), "sl": arred(sl), "tp1": arred(tp),
+                    "risco_pips": round(risco / passo, 1), "risco_unidade": unidade,
+                    "modo_entrada": "market_next_open"} if tp is not None else None),
     }
 
 
@@ -1057,10 +1239,14 @@ class Estado:
             if chave in self._vistos:
                 return False
             self._vistos.add(chave)
+            timeframe_s = int(info.get("timeframe_segundos") or TF)
+            sem_simulacao = bool(info.get("sem_simulacao"))
             item = {
                 "schema_versao": SCHEMA_VERSAO, "origem": "monitor_mercado",
                 "modo": "entrada_validada" if info.get("entrada_valida") else "estudo",
-                "timeframe": TF,
+                "timeframe": timeframe_s, "timeframe_segundos": timeframe_s,
+                "horizonte_velas": info.get("horizonte_velas"),
+                "horizonte_longo_velas": info.get("horizonte_longo_velas"),
                 "id": chave, "tipo": tipo, "ativo": ativo, "classe": info.get("classe"), "vela": vela,
                 "direcao": info.get("direcao", "buy"),
                 "quando": datetime.now(timezone.utc).isoformat(timespec="seconds"),
@@ -1078,9 +1264,11 @@ class Estado:
                 "fibo": info.get("fibo"),
                 "fluxo": info.get("fluxo"),
                 "orb": info.get("orb"),
+                "bof": info.get("bof"),
                 "resultado": None,
                 "simulacao": {
-                    "versao": SIMULADOR_VERSAO, "desfecho": "aguardando",
+                    "versao": SIMULADOR_VERSAO,
+                    "desfecho": "nao_elegivel" if sem_simulacao else "aguardando",
                     "bateu_tp1_sem_stop": None,
                     "primeiro_toque": None,
                     "vela_desfecho": None,
@@ -1095,12 +1283,17 @@ class Estado:
             self._salvar_aprendizado()
             return True
 
-    def resolver(self, ativo: str, df: pd.DataFrame) -> None:
+    def resolver(self, ativo: str, df: pd.DataFrame,
+                 timeframe_s: int = TF) -> None:
         """Registra reação e simulação TP1/SL; não é resultado de ordem real."""
         with self._lock:
             pend = []
             for h in self._aprendizado:
                 if h.get("ativo") != ativo:
+                    continue
+                if h.get("tipo") == "bof_m30_m5_candidato":
+                    continue
+                if int(h.get("timeframe_segundos") or h.get("timeframe") or TF) != timeframe_s:
                     continue
                 simulacao = h.get("simulacao") or {}
                 desfecho = simulacao.get("desfecho", "aguardando")
@@ -1124,17 +1317,19 @@ class Estado:
         alterou = False
         for h in pend:
             try:
-                ts = pd.Timestamp(h["vela"]) + pd.Timedelta(seconds=TF)
+                ts = pd.Timestamp(h["vela"]) + pd.Timedelta(seconds=timeframe_s)
                 if ts not in df.index:
                     continue
                 lin = df.loc[ts]
                 o, c = float(lin["Open"]), float(lin["Close"])
                 reacao = "subiu" if c > o else ("caiu" if c < o else "igual")
-                simulacao = self._resolver_tp_sl(h, df)
+                horizonte = int(h.get("horizonte_velas") or HORIZONTE_VELAS)
+                horizonte_longo = int(h.get("horizonte_longo_velas") or HORIZONTE_LONGO_VELAS)
+                simulacao = self._resolver_tp_sl(h, df, horizonte_velas=horizonte)
                 # Horizonte longo em paralelo, em chave propria: o oficial
                 # acima nao muda, entao a amostra ja acumulada segue valida.
                 simulacao_longa = self._resolver_tp_sl(
-                    h, df, horizonte_velas=HORIZONTE_LONGO_VELAS
+                    h, df, horizonte_velas=horizonte_longo
                 )
                 with self._lock:
                     h["resultado"] = reacao
@@ -1175,7 +1370,7 @@ class Estado:
         entrada = float(alvo.get("entrada", h.get("preco", 0.0)) or 0.0)
         venda = h.get("direcao") == "sell"
         modo_entrada = alvo.get("modo_entrada")
-        ordem_pendente = modo_entrada in ("limite", "stop") or h.get("tipo") == "fibo_m15"
+        ordem_pendente = modo_entrada in ("limite", "stop", "market_next_open") or h.get("tipo") == "fibo_m15"
         preenchida = not ordem_pendente
         vela_preenchimento = None
 
@@ -1189,7 +1384,10 @@ class Estado:
         for numero, (instante, vela) in enumerate(futuras.iterrows(), start=1):
             acabou_de_preencher = False
             if not preenchida:
-                if modo_entrada == "stop":
+                if modo_entrada == "market_next_open":
+                    entrada = float(vela["Open"])
+                    tocou_entrada = True
+                elif modo_entrada == "stop":
                     tocou_entrada = (
                         float(vela["Low"]) <= entrada if venda
                         else float(vela["High"]) >= entrada
@@ -1214,7 +1412,7 @@ class Estado:
                     "preenchida": preenchida,
                     "vela_preenchimento": vela_preenchimento,
                 }
-            if acabou_de_preencher and tocou_tp:
+            if acabou_de_preencher and modo_entrada != "market_next_open" and tocou_tp:
                 return {
                     "versao": SIMULADOR_VERSAO,
                     "desfecho": "ambíguo_entrada_tp_mesma_vela", "velas": numero,
@@ -1269,7 +1467,7 @@ class Estado:
         if not preenchida:
             return {
                 "versao": SIMULADOR_VERSAO,
-                "desfecho": f"nao_executada_{_rotulo_horas(horizonte_velas)}", "velas": len(futuras),
+                "desfecho": f"nao_executada_{_rotulo_horas(horizonte_velas, int(h.get('timeframe_segundos') or h.get('timeframe') or TF))}", "velas": len(futuras),
                 "bateu_tp1_sem_stop": None, "primeiro_toque": None,
                 "vela_desfecho": str(futuras.index[-1]),
                 "preco_saida": None, "resultado_r": None,
@@ -1278,7 +1476,7 @@ class Estado:
         preco_saida = float(futuras.iloc[-1]["Close"])
         return {
             "versao": SIMULADOR_VERSAO,
-            "desfecho": f"expirado_{_rotulo_horas(horizonte_velas)}", "velas": len(futuras),
+            "desfecho": f"expirado_{_rotulo_horas(horizonte_velas, int(h.get('timeframe_segundos') or h.get('timeframe') or TF))}", "velas": len(futuras),
             "bateu_tp1_sem_stop": None, "primeiro_toque": None,
             "vela_desfecho": str(futuras.index[-1]),
             "preco_saida": preco_saida, "resultado_r": resultado_r(preco_saida),
@@ -1341,10 +1539,14 @@ class Estado:
         trocar o oficial.
         """
         itens = [h for h in self._aprendizado if h.get("tipo") == tipo]
+        primeiro = itens[0] if itens else {}
+        timeframe_s = int(primeiro.get("timeframe_segundos") or primeiro.get("timeframe") or TF)
+        horizonte = int(primeiro.get("horizonte_velas") or HORIZONTE_VELAS)
+        horizonte_longo = int(primeiro.get("horizonte_longo_velas") or HORIZONTE_LONGO_VELAS)
         resumo = self._resumo_simulacoes(itens)
-        resumo["horizonte"] = _rotulo_horas(HORIZONTE_VELAS)
+        resumo["horizonte"] = _rotulo_horas(horizonte, timeframe_s)
         longo = self._resumo_simulacoes(itens, CHAVE_SIM_LONGA)
-        longo["horizonte"] = _rotulo_horas(HORIZONTE_LONGO_VELAS)
+        longo["horizonte"] = _rotulo_horas(horizonte_longo, timeframe_s)
         resumo["comparacao_longa"] = longo
         return resumo
 
@@ -1367,6 +1569,10 @@ class Estado:
     def _amostra_rompimento_reteste(self) -> dict:
         """Rompimento+reteste do forex, observado aqui por falta de amostra."""
         return self._amostra_por_tipo("rompimento_reteste")
+
+    def _amostra_bof(self) -> dict:
+        """BOF M30→M5 de Forex/ouro, isolado dos demais rompimentos."""
+        return self._amostra_por_tipo("bof_m30_m5")
 
     def registrar_direcao_noticia(self, ativo: str, vela: str, preco: float,
                                   noticia: dict) -> None:
@@ -1482,6 +1688,7 @@ class Estado:
                        "amostraOrb": self._amostra_orb(),
                        "amostraLiquidez": self._amostra_liquidez(),
                        "amostraRompimentoReteste": self._amostra_rompimento_reteste(),
+                       "amostraBof": self._amostra_bof(),
                        "amostraDirecaoNoticia": self._amostra_direcao_noticia()}
         try:
             arq = self.pasta / "mercado.json"
@@ -1531,6 +1738,9 @@ class Estado:
 
 def loop(api, cfg, estado: Estado, calendario: CalendarioEconomico | None = None) -> None:
     hist: dict[str, pd.DataFrame] = {}
+    cfg_bof = replace(cfg, timeframe_segundos=TF_BOF)
+    hist_bof: dict[str, pd.DataFrame] = {}
+    ultimo_bucket_bof: dict[str, int] = {}
     for a in ATIVOS:
         df = backtest.carregar_cache(cfg, a)
         if df is None or len(df) < 600:
@@ -1612,6 +1822,36 @@ def loop(api, cfg, estado: Estado, calendario: CalendarioEconomico | None = None
                 fluxo = leitura_fluxo_sessao(df, atr, a)
                 orb = plano_orb_sessao(df, atr, a)
                 liquidez = plano_varredura_liquidez(df, atr, a, noticia)
+                bof = {
+                    "disponivel": False, "sinal_estudo": False,
+                    "candidato": False, "direcao": "neutro",
+                    "etapa": "FORA DO ESTUDO",
+                    "motivo": "BOF M30→M5 é observado em Forex normal e ouro.",
+                }
+                df_bof = None
+                if CLASSE.get(a) in ("forex", "ouro"):
+                    try:
+                        # São 15 ativos elegíveis. Atualizar todos a cada 30s
+                        # sobrecarrega o WebSocket da IQ e causa reconnects.
+                        # O estudo usa candle M5 fechado, então uma coleta por
+                        # bloco de cinco minutos preserva exatamente o sinal.
+                        bucket_bof = int(time.time() // TF_BOF)
+                        if (a not in hist_bof
+                                or ultimo_bucket_bof.get(a) != bucket_bof):
+                            ultimo_bucket_bof[a] = bucket_bof
+                            novo_bof = backtest.baixar_historico(api, cfg_bof, a, 180)
+                            novo_bof = novo_bof.iloc[:-1]
+                            base_bof = hist_bof.get(a)
+                            df_bof = (novo_bof if base_bof is None else pd.concat([
+                                base_bof[~base_bof.index.isin(novo_bof.index)], novo_bof,
+                            ]).sort_index()).tail(1200)
+                            hist_bof[a] = df_bof
+                        else:
+                            df_bof = hist_bof[a]
+                        bof = plano_bof_m30_m5(df_bof, M.atr(df_bof), a, noticia)
+                    except Exception as erro_bof:
+                        bof = {**bof, "etapa": "M5 INDISPONÍVEL",
+                               "motivo": f"Falha ao atualizar candles M5: {erro_bof}"}
 
                 # Alvos medidos em 01/09/2026 (janela 21-22h UTC, SL=1 ATR,
                 # holdout confirma em todos os niveis). O EV cresce com o alvo
@@ -1688,6 +1928,7 @@ def loop(api, cfg, estado: Estado, calendario: CalendarioEconomico | None = None
                     "fluxo": fluxo,
                     "orb": orb,
                     "liquidez": liquidez,
+                    "bof": bof,
                 })
                 # A análise continua usando somente candles fechados, mas o
                 # desenho recebe também a vela atual para se mover como na IQ.
@@ -1697,6 +1938,8 @@ def loop(api, cfg, estado: Estado, calendario: CalendarioEconomico | None = None
                 ]).sort_index().tail(300)
                 estado.salvar_candles(a, df_grafico, regressao(df_grafico))
                 estado.resolver(a, df)
+                if df_bof is not None:
+                    estado.resolver(a, df_bof, timeframe_s=TF_BOF)
                 # Direcao mecanica da noticia: registra quando o numero sai e
                 # confere depois. Observacao pura, nao gera ordem.
                 estado.registrar_direcao_noticia(a, str(df.index[-1]), preco, noticia)
@@ -1773,6 +2016,33 @@ def loop(api, cfg, estado: Estado, calendario: CalendarioEconomico | None = None
                     ):
                         print(f"[LIQUIDEZ V2 — ESTUDO] {a} BUY @ {df.index[-1]} "
                               f"RR={liquidez['rr']}")
+                if CLASSE.get(a) in ("forex", "ouro") and bof.get("candidato"):
+                    vela_bof = str(df_bof.index[-1]) if df_bof is not None else str(df.index[-1])
+                    info_bof = {
+                        **estado.dados[a],
+                        "sinal": True, "direcao": bof["direcao"],
+                        "entrada_valida": False,
+                        "estado_entrada": f"BOF — {bof['etapa']}",
+                        "motivo_entrada": bof["motivo"],
+                        "checklist": bof.get("checklist", []),
+                        "alvos": None,
+                        "alvos_estudo": bof.get("alvos") if bof.get("sinal_estudo") else None,
+                        "preco": (round(float(df_bof.iloc[-1]["Close"]), 3)
+                                  if df_bof is not None else estado.dados[a].get("preco")),
+                        "timeframe_segundos": TF_BOF,
+                        "horizonte_velas": HORIZONTE_BOF_VELAS,
+                        "horizonte_longo_velas": HORIZONTE_BOF_LONGO_VELAS,
+                        "bof": bof,
+                    }
+                    if bof.get("sinal_estudo"):
+                        tipo_bof = "bof_m30_m5"
+                    else:
+                        tipo_bof = "bof_m30_m5_candidato"
+                        info_bof["sem_simulacao"] = True
+                    if estado.registrar_sinal(a, vela_bof, info_bof, tipo=tipo_bof):
+                        print(f"[BOF M30→M5 — {'ESTUDO' if bof.get('sinal_estudo') else 'CANDIDATO'}] "
+                              f"{a} {bof['direcao'].upper()} @ {vela_bof} etapa={bof['etapa']} "
+                              f"RR={bof.get('rr', 0)}")
                 # Rompimento+reteste do forex, em sombra. A estrategia vive em
                 # forex_estrategia.py e nao tinha nenhuma amostra ao vivo: os
                 # processos que a executam nao rodam. Aqui ela so observa,
@@ -1862,6 +2132,7 @@ tr:hover{background:#16203450;cursor:pointer}
 .fibo-zona{color:#c4b5fd;border-color:#6d28d9;background:#251145}
 .fibo-card{border-left-color:#8b5cf6}.fibo-card.ok{border-left-color:#22c55e}
 .orb-card{border-left-color:#f59e0b}.orb-card.ok{border-left-color:#22c55e}
+.bof-card{border-left-color:#06b6d4}.bof-card.ok{border-left-color:#22c55e}
 .nav{display:flex;gap:.35rem;position:sticky;top:0;z-index:5;background:#0b1220;padding:.35rem 0}
 .nav button,.filtro{background:#17233a;color:#94a3b8;border:1px solid #334155;border-radius:.3rem;padding:.3rem .55rem;font:inherit;font-size:.7rem}
 .nav button.on{color:#fff;border-color:#38bdf8;background:#0f4c75}.view{display:none}.view.on{display:block}
@@ -1910,6 +2181,7 @@ Testado em 01/09/2026: operar a favor do canal (51.14%) rende o mesmo que contra
   <button data-view="entradas" onclick="mudarVisao('entradas')">Entradas</button>
   <button data-view="estudos" onclick="mudarVisao('estudos')">Estudos</button>
   <button data-view="dados" onclick="mudarVisao('dados')">Dados</button>
+  <button id="btn-som-monitor" type="button" onclick="alternarSomMonitor()" title="Ativa som para novas oportunidades">🔕 Som</button>
 </div>
 
 <section class="view" data-view="grafico">
@@ -1938,6 +2210,9 @@ Testado em 01/09/2026: operar a favor do canal (51.14%) rende o mesmo que contra
 
 <div class="sec">VARREDURA DE LIQUIDEZ V2 — ESTUDO SOMBRA</div>
 <div id="liquidez"><span class="empty">Selecione um ativo.</span></div>
+
+<div class="sec">BOF M30→M5 FOREX + OURO — ESTUDO SOMBRA</div>
+<div id="bof"><span class="empty">Selecione um par Forex ou XAUUSD.</span></div>
 
 <div class="sec">PLANO FIBO M15 — ESTUDO</div>
 <div id="fibo"><span class="empty">Selecione um ativo.</span></div>
@@ -1977,6 +2252,9 @@ Testado em 01/09/2026: operar a favor do canal (51.14%) rende o mesmo que contra
 let D={}, sel=null, dossieSel=null;
 let visao=localStorage.getItem('monitorMercadoVisao')||'agora';
 let ultimaChaveAlerta='';
+let somMonitorAtivo=localStorage.getItem('monitorMercadoSom')==='1';
+let ultimoEventoPossivel='';
+let eventosSonorosInicializados=false;
 function mudarVisao(nome){
   visao=nome; localStorage.setItem('monitorMercadoVisao',nome);
   document.querySelectorAll('.view').forEach(e=>e.classList.toggle('on',e.dataset.view===nome));
@@ -2041,11 +2319,11 @@ function histLinha(h){
             : `<span class="${cor}">${r} ${h.var_pips>0?'+':''}${h.var_pips??''} ${h.var_unidade||'pips'}</span>`;
   const hh = horaBrt(h.quando);
   const estado=h.entrada_valida?'<span class="estado go">válida</span>':'<span class="estado study">estudo</span>';
-  const tipo=h.tipo==='fibo_m15'?'FIBO':h.tipo==='fluxo_m15'?'FLUXO':h.tipo==='orb_fvg_m15'?'ORB/FVG':h.tipo==='liquidity_sweep_v2'?'LIQUIDEZ V2':'SINAL';
+  const tipo=h.tipo==='fibo_m15'?'FIBO':h.tipo==='fluxo_m15'?'FLUXO':h.tipo==='orb_fvg_m15'?'ORB/FVG':h.tipo==='liquidity_sweep_v2'?'LIQUIDEZ V2':h.tipo==='bof_m30_m5'?'BOF M30→M5':h.tipo==='bof_m30_m5_xau'?'BOF M30→M5 (legado)':h.tipo==='bof_m30_m5_candidato'?'BOF candidato':'SINAL';
   const av=h.alvos_estudo||h.alvos||{};
   const simDesfecho=(h.simulacao||{}).desfecho||'aguardando';
   const simCor=simDesfecho==='win_tp1'?'up':simDesfecho==='loss_sl'?'dn':'ind';
-  const simTexto=simDesfecho==='win_tp1'?'TP1':simDesfecho==='loss_sl'?'SL':simDesfecho==='nao_executada_6h'?'n/exec':simDesfecho==='expirado_6h'?'exp6h':simDesfecho.startsWith('ambíguo')?'ambíg':'?';
+  const simTexto=simDesfecho==='win_tp1'?'TP1':simDesfecho==='loss_sl'?'SL':simDesfecho.startsWith('nao_executada_')?'n/exec':simDesfecho.startsWith('expirado_')?simDesfecho.replace('expirado_','exp '):simDesfecho==='nao_elegivel'?'candidato':simDesfecho.startsWith('ambíguo')?'ambíg':'?';
   const alvosTexto=av.entrada!=null
     ?`<span class="hist-alvos">E ${av.entrada} · <span class="dn">SL ${av.sl}</span> · <span class="up">TP ${av.tp1}</span></span>`
     :'<span class="hist-alvos ind">—</span>';
@@ -2066,16 +2344,19 @@ function checklist(x){
   return `<div class="checklist">${itens.map(i=>`<span class="check ${i.ok?'ok':'no'}">${i.ok?'✓':'✗'} ${i.nome}</span>`).join('')}</div>`;
 }
 
-function textoSimulacao(s){
+function textoSimulacao(s,h={}){
   const d=(s||{}).desfecho||'aguardando';
   const rr=s&&s.resultado_r!=null?` · ${Number(s.resultado_r).toFixed(2)}R`:'';
+  const total=Number(h.horizonte_velas||24);
+  const horas=total*Number(h.timeframe_segundos||h.timeframe||900)/3600;
+  const prazo=Number.isInteger(horas)?`${horas}h`:`${horas.toFixed(1)}h`;
   if(d==='win_tp1') return `<span class="dossie-win">TP1 atingido (simulado)${rr}</span>`;
   if(d==='loss_sl') return `<span class="dossie-loss">SL atingido (simulado)${rr}</span>`;
   if(d==='ambíguo_mesma_vela') return '<span class="dossie-aviso">TP e SL na mesma vela — ordem desconhecida</span>';
   if(d==='ambíguo_entrada_tp_mesma_vela') return '<span class="dossie-aviso">entrada e TP na mesma vela — sequência desconhecida</span>';
-  if(d==='nao_executada_6h') return '<span class="ind">preço de entrada não foi tocado em 6h</span>';
-  if(d==='expirado_6h') return `<span class="dossie-aviso">fechado por tempo após 6h${rr}</span>`;
-  return `<span class="ind">aguardando candles futuros (${(s&&s.velas)||0}/24)</span>`;
+  if(d.startsWith('nao_executada_')) return `<span class="ind">preço de entrada não foi tocado em ${prazo}</span>`;
+  if(d.startsWith('expirado_')) return `<span class="dossie-aviso">fechado por tempo após ${prazo}${rr}</span>`;
+  return `<span class="ind">aguardando candles futuros (${(s&&s.velas)||0}/${total})</span>`;
 }
 
 function renderDossie(H){
@@ -2114,7 +2395,7 @@ function renderDossie(H){
         <div><label>alvo TP1</label><span class="up">${av.tp1}</span></div>
         ${av.tp2!=null?`<div><label>alvo TP2</label><span class="up">${av.tp2}</span></div>`:''}
         <div><label>risco</label><span>${av.risco_pips??'—'} ${av.risco_unidade||'pips'}</span></div>
-        <div><label>simulação</label>${textoSimulacao(h.simulacao)}</div>
+        <div><label>simulação</label>${textoSimulacao(h.simulacao,h)}</div>
       </div>
     </div>`
     :`<div class="nota" style="margin:.4rem 0">Sem plano de alvos registrado para este sinal.</div>`;
@@ -2151,16 +2432,41 @@ setInterval(tickRelogio,1000);
 
 // alerta sonoro (WebAudio, sem arquivo externo)
 let ultimoAlerta=0;
-function bip(){
-  if(Date.now()-ultimoAlerta<60000) return;
+function atualizarBotaoSomMonitor(){
+  const b=document.getElementById('btn-som-monitor');
+  if(!b) return;
+  b.textContent=somMonitorAtivo?'🔔 Som':'🔕 Som';
+  b.classList.toggle('on',somMonitorAtivo);
+}
+function alternarSomMonitor(){
+  somMonitorAtivo=!somMonitorAtivo;
+  localStorage.setItem('monitorMercadoSom',somMonitorAtivo?'1':'0');
+  atualizarBotaoSomMonitor();
+  if(somMonitorAtivo) bip(true);
+}
+function bip(teste=false){
+  if(!somMonitorAtivo && !teste) return;
+  if(!teste && Date.now()-ultimoAlerta<60000) return;
   ultimoAlerta=Date.now();
   try{
     const ctx=new (window.AudioContext||window.webkitAudioContext)();
+    if(ctx.state==='suspended') ctx.resume();
     const o=ctx.createOscillator(), g=ctx.createGain();
     o.connect(g); g.connect(ctx.destination);
     o.frequency.value=880; g.gain.value=.08;
     o.start(); setTimeout(()=>{o.stop();ctx.close();},220);
   }catch(e){}
+}
+function alertarNovoEvento(){
+  const tipos=new Set(['fibo_m15','fluxo_m15','orb_fvg_m15','liquidity_sweep_v2','bof_m30_m5']);
+  const ativos=(D.historico||[]).filter(h=>tipos.has(h.tipo)
+    &&(h.simulacao||{}).desfecho==='aguardando');
+  const recente=ativos[ativos.length-1];
+  const id=recente&&(recente.id||`${recente.ativo}|${recente.tipo}|${recente.hora||recente.timestamp||''}`);
+  if(!eventosSonorosInicializados){
+    eventosSonorosInicializados=true; ultimoEventoPossivel=id||''; return;
+  }
+  if(id && id!==ultimoEventoPossivel){ ultimoEventoPossivel=id; bip(); }
 }
 
 function cardSinal(a,x){
@@ -2229,6 +2535,7 @@ function renderAmostra(){
     linhaEstudo('ORB/FVG M15 — estudo sombra',D.amostraOrb||{})+
     linhaEstudo('Liquidez V2 — estudo sombra',D.amostraLiquidez||{})+
     linhaEstudo('Rompimento+reteste (forex) — estudo sombra',D.amostraRompimentoReteste||{})+
+    linhaEstudo('BOF M30→M5 Forex + ouro — estudo sombra',D.amostraBof||{})+
     linhaDirecaoNoticia(D.amostraDirecaoNoticia||{})+
     '<div class="nota">Estudos não são misturados ao sinal validado. IC95% de Wilson; amostras abaixo de 30 resolvidos não sustentam conclusões.</div>';
 }
@@ -2303,6 +2610,33 @@ function renderLiquidez(){
       <div><label>TP1 no teto do range</label><span class="up">${a.tp1??'—'}</span></div>
       <div><label>R:R estrutural</label><span>${l.rr??'—'}x</span></div>
     </div><div class="nota">${l.motivo} Ainda é estudo e não envia ordem.</div>
+  </div>`;
+}
+
+function renderBof(){
+  const el=document.getElementById('bof');
+  const x=(D.ativos||{})[sel]||{}, b=x.bof||{}, a=b.alvos||{};
+  if(x.classe!=='forex' && x.classe!=='ouro'){
+    el.innerHTML='<div class="card bof-card"><b>FORA DO ESTUDO</b><div class="nota">BOF M30→M5 está disponível nos pares Forex normais e no ouro.</div></div>';
+    return;
+  }
+  if(!b.disponivel){
+    el.innerHTML=`<div class="card bof-card"><b>${b.etapa||'BOF INDISPONÍVEL'}</b><div class="nota">${b.motivo||'Aguardando candles M5.'}</div></div>`;
+    return;
+  }
+  const dir=b.direcao==='sell'?'VENDA':b.direcao==='buy'?'COMPRA':'AGUARDAR';
+  el.innerHTML=`<div class="card bof-card ${b.sinal_estudo?'okjan ok':'nojan'}">
+    <div style="display:flex;justify-content:space-between;align-items:center"><b>${sel} — ${dir}</b><span class="estado ${b.sinal_estudo?'go':'study'}">${b.etapa}</span></div>
+    ${checklist(b)}
+    <div class="alvos">
+      <div><label>nível M30 confirmado</label><span>${b.nivel_m30??'—'} (${b.lado_nivel||'—'})</span></div>
+      <div><label>extremo da varredura</label><span>${b.extremo_varredura??'—'} · ${b.extensao_atr??'—'} ATR</span></div>
+      <div><label>referência no fechamento M5</label><span>${a.entrada??'—'} ${a.entrada!=null?'(executa na próxima abertura)':''}</span></div>
+      <div><label>SL além da varredura</label><span class="dn">${a.sl??'—'}</span></div>
+      <div><label>próximo pivô M30 / TP</label><span class="up">${a.tp1??'—'}</span></div>
+      <div><label>R:R planejado</label><span>${b.rr??'—'}x</span></div>
+    </div>
+    <div class="nota">${b.motivo} Somente estudo: não toca alerta operacional nem envia ordem.</div>
   </div>`;
 }
 
@@ -2406,6 +2740,7 @@ function render(){
   const chaveAlerta=entradas.join('|');
   if(chaveAlerta && chaveAlerta!==ultimaChaveAlerta) bip();
   ultimaChaveAlerta=chaveAlerta;
+  alertarNovoEvento();
   const s=D.saudeDados||{};
   document.getElementById('saude').innerHTML=[
     ['Armazenamento',s.armazenamento||'—'],['Eventos',s.eventos??0],
@@ -2422,6 +2757,7 @@ function render(){
   renderFluxo();
   renderOrb();
   renderLiquidez();
+  renderBof();
   renderFibo();
 }
 
@@ -2520,7 +2856,8 @@ async function grafico(){
   seriesZonaM.forEach(s=>chartM.removeSeries(s)); seriesZonaM=[];
 
   const A=(D.ativos||{})[sel]||{}, F=A.fibo||{}, FA=F.alvos||{}, FL=A.fluxo||{},
-        FLA=FL.alvos||{}, O=A.orb||{}, OA=O.alvos||{}, L=A.liquidez||{}, LA=L.alvos||{};
+        FLA=FL.alvos||{}, O=A.orb||{}, OA=O.alvos||{}, L=A.liquidez||{}, LA=L.alvos||{},
+        B=A.bof||{}, BA=B.alvos||{};
   const candleVals=K.flatMap(k=>[Number(k.h),Number(k.l)]).filter(Number.isFinite);
   const candleMax=Math.max(...candleVals), candleMin=Math.min(...candleVals);
   const faixa=Math.max(candleMax-candleMin,Math.abs(candleMax)*1e-6,1e-9);
@@ -2594,6 +2931,15 @@ async function grafico(){
     nivel(Number(LA.sl),'#ef4444','Liquidez: SL sombra');
     nivel(Number(LA.tp1),'#86efac','Liquidez: TP1 range');
   }
+  if((A.classe==='forex' || A.classe==='ouro') && B.disponivel){
+    nivel(Number(B.nivel_m30),'#06b6d4','BOF nível M30');
+    if(B.extremo_varredura!=null) nivel(Number(B.extremo_varredura),'#f59e0b','BOF varredura');
+    if(B.sinal_estudo && BA){
+      nivel(Number(BA.entrada),'#38bdf8','BOF entrada M5');
+      nivel(Number(BA.sl),'#ef4444','BOF SL');
+      nivel(Number(BA.tp1),'#22c55e','BOF alvo M30');
+    }
+  }
   if(F.disponivel){
     zona(F.zona_inf,F.zona_sup,'#8b5cf622','ZONA FIBO 38.2-61.8%');
     nivel(Number(FA.entrada),'#a78bfa','Fibo entrada 61.8%');
@@ -2620,6 +2966,7 @@ async function tick(){
     render(); await grafico();
   }catch(e){ document.getElementById('status').textContent='Erro: '+e; }
 }
+atualizarBotaoSomMonitor();
 tick(); setInterval(tick,30000);
 mudarVisao(visao);
 </script></body></html>"""

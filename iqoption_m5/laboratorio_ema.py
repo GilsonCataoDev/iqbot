@@ -354,12 +354,15 @@ def _atualizar_grafico_laboratorio(
     setup: str | None = None,
 ) -> dict:
     """Desenha o M5 e todos os sinais auditados (M5/M15) daquele ativo."""
+    sinais = list(registro.decisoes_grafico(snapshot.ativo)) + _sinais_so_para_ver(
+        estrategia, snapshot, indicadores, setup
+    )
     dados = grafico.montar_dados(
         snapshot=snapshot,
         indicadores=indicadores,
-        sinais=list(registro.decisoes_grafico(snapshot.ativo))
-        + _sinais_so_para_ver(estrategia, snapshot, indicadores, setup),
+        sinais=sinais,
         possivel=None,
+        alerta=_alerta_ema920_m5(snapshot, sinais),
         operacoes=registro.operacoes_grafico(snapshot.ativo),
         desempenho=registro.resumo_desempenho(snapshot.ativo),
         desempenho_por_setup=registro.desempenho_por_setup(),
@@ -371,6 +374,41 @@ def _atualizar_grafico_laboratorio(
     )
     grafico.atualizar(snapshot.ativo, dados)
     return dados
+
+
+def _alerta_ema920_m5(snapshot: SnapshotMercado, sinais: list[Decisao]) -> dict | None:
+    """Expõe somente o melhor candidato do Lab para alerta manual.
+
+    EMA9/20 M5 em EURUSD/AUDCAD é o único rastro com desempenho histórico
+    positivo dos dois lados no banco. O sinal precisa estar confirmado no último
+    candle fechado; rastros intravela, M15 e sombra continuam apenas no gráfico.
+    """
+    if len(snapshot.candles.index) < 2:
+        return None
+    candle_fechado = pd.Timestamp(snapshot.candles.index[-2])
+    candidatos = [
+        sinal
+        for sinal in sinais
+        if sinal.motivo == "ema920_pullback"
+        and str(sinal.detalhes.get("setup", "")).startswith("M5 ")
+        and sinal.detalhes.get("status_grafico") == "confirmado"
+        and pd.Timestamp(sinal.candle_hora) == candle_fechado
+        and sinal.ativo in {"EURUSD", "AUDCAD"}
+    ]
+    if not candidatos:
+        return None
+    sinal = candidatos[-1]
+    return {
+        "id": f"ema920_m5:{sinal.ativo}:{candle_fechado.isoformat()}:{sinal.direcao}",
+        "ativo": sinal.ativo,
+        "direcao": sinal.direcao,
+        "preco": float(sinal.preco),
+        "hora": candle_fechado.isoformat(),
+        "setup": "EMA9/20 M5",
+        "fatores": list(sinal.detalhes.get("razao") or ["toque na faixa EMA9/20"]),
+        "entradaConfirmada": True,
+        "mensagem": "Alerta manual: EMA9/20 M5 confirmado. Não envia ordem REAL.",
+    }
 
 
 def _patch_candle_ao_vivo(

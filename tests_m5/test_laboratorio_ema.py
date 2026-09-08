@@ -9,7 +9,7 @@ from iqoption_m5.estrategia import EstrategiaReversaoM5
 from iqoption_m5.laboratorio_ema import (
     _alvo_sombra, _rastros, _recuperar_pendencias_periodicas, _setup_do_rastro,
     _patch_candle_ao_vivo, ProgressoLaboratorio, _reconectar_laboratorio_estagnado,
-    _armar_watchdog_apos_inicializacao,
+    _armar_watchdog_apos_inicializacao, _alerta_ema920_m5,
 )
 from iqoption_m5.modelos import Autorizacao, Decisao, ResultadoOrdem, SnapshotMercado
 from iqoption_m5.registro import RegistroSQLite
@@ -170,6 +170,25 @@ def test_patch_ao_vivo_substitui_a_vela_em_formacao_sem_mudar_o_historico():
     assert len(patch["candles"]) == 1
     assert patch["candles"][-1]["close"] == 1.102
     assert patch["atualizado_em"] == 123.0
+
+
+def test_alerta_ema920_m5_so_aceita_sinal_confirmado_no_ultimo_fechamento():
+    inicio = pd.Timestamp("2026-09-02 12:00:00")
+    indice = pd.date_range(inicio, periods=3, freq="5min")
+    snapshot = SnapshotMercado(
+        "EURUSD",
+        pd.DataFrame({"Open": [1.1] * 3, "High": [1.101] * 3, "Low": [1.099] * 3, "Close": [1.1] * 3}, index=indice),
+        0.85, True, int(indice[-1].timestamp()) + 45,
+    )
+    sinal = Decisao(
+        "EURUSD", "call", 1.1, indice[-2], "ema920_pullback",
+        detalhes={"setup": "M5 ema920_pullback", "status_grafico": "confirmado"},
+    )
+
+    alerta = _alerta_ema920_m5(snapshot, [sinal])
+
+    assert alerta and alerta["setup"] == "EMA9/20 M5"
+    assert alerta["entradaConfirmada"] is True
 
 
 def test_watchdog_do_lab_reconecta_quando_nao_ha_progresso():

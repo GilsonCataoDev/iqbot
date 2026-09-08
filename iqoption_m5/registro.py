@@ -586,14 +586,21 @@ class RegistroSQLite:
                 ),
             )
 
-    def registrar_falha(self, decisao: Decisao, motivo: str, valor: float = 0.0) -> None:
+    def registrar_falha(
+        self,
+        decisao: Decisao,
+        motivo: str,
+        valor: float = 0.0,
+        timeframe: int | None = None,
+        expiracao_minutos: int | None = None,
+    ) -> None:
         with self._lock, self._sessao() as db:
             db.execute(
                 """
                 INSERT INTO operacoes (
                     id_ordem, ativo, direcao, enviada_em, valor, payout, setup,
-                    resultado_bruto, campanha_id, status
-                ) VALUES (?, ?, ?, ?, ?, 0, ?, ?, ?, 'falha_envio')
+                    resultado_bruto, campanha_id, timeframe, expiracao_minutos, status
+                ) VALUES (?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?, 'falha_envio')
                 """,
                 (
                     f"falha-{decisao.ativo}-{decisao.candle_hora.isoformat()}-{datetime.now().timestamp()}",
@@ -604,6 +611,12 @@ class RegistroSQLite:
                     decisao.detalhes.get("setup", "desconhecido"),
                     motivo,
                     self.campanha_id if self.config is not None else None,
+                    int(timeframe if timeframe is not None else (
+                        self.config.timeframe_segundos if self.config else 0
+                    )),
+                    int(expiracao_minutos if expiracao_minutos is not None else (
+                        self.config.expiracao_minutos if self.config else 0
+                    )),
                 ),
             )
 
