@@ -71,6 +71,26 @@ class TestEspelho(unittest.TestCase):
         e.write("ainda no console\n")
         self.assertIn("ainda no console", self.console.getvalue())
 
+    def test_console_sem_utf8_nao_derruba_o_bot(self):
+        """cp1252 e o padrao do Windows sem chcp; um print com seta estourava.
+
+        Perder o simbolo no terminal e aceitavel; derrubar o bot por causa de
+        um print, num perfil que opera dinheiro real, nao e.
+        """
+        console = io.TextIOWrapper(io.BytesIO(), encoding="cp1252", errors="strict")
+        e = log_arquivo._Espelho(console, self.pasta, "teste")
+        self.addCleanup(e._fechar)
+
+        e.write("decisão → bloqueada\n")
+        e.flush()   # o console adia a codificacao para o flush
+
+        conteudo = e.caminho.read_text(encoding="utf-8")
+        self.assertIn("→", conteudo, "o arquivo guarda o texto integral")
+        console.flush()
+        console.buffer.seek(0)
+        self.assertIn("?", console.buffer.read().decode("cp1252"),
+                      "no console o simbolo degrada, mas a linha sai")
+
     def test_acentos_e_setas_sobrevivem(self):
         e = self._espelho()
         e.write("decisão → bloqueada por atraso\n")

@@ -74,7 +74,21 @@ class _Espelho:
 
     # -- interface de stream ----------------------------------------------
     def write(self, texto: str) -> int:
-        escrito = self._original.write(texto)
+        try:
+            escrito = self._original.write(texto)
+        except UnicodeEncodeError:
+            # Console fora de UTF-8 (cp1252 é o padrão do Windows sem chcp)
+            # nao consegue escrever "→" e afins. Perder o acento no terminal e
+            # aceitável; derrubar o bot por causa de um print, nao. O arquivo
+            # abaixo continua recebendo o texto integral.
+            codec = getattr(self._original, "encoding", None) or "ascii"
+            seguro = texto.encode(codec, errors="replace").decode(codec, errors="replace")
+            try:
+                escrito = self._original.write(seguro)
+            except Exception:
+                escrito = len(texto)
+        except Exception:
+            escrito = len(texto)
         if texto:
             self._abrir()  # vira o arquivo quando o dia BRT muda
             if self._arquivo is not None:
@@ -87,7 +101,13 @@ class _Espelho:
         return escrito
 
     def flush(self) -> None:
-        self._original.flush()
+        # O console pode adiar a codificação para o flush, entao o erro de
+        # encoding aparece aqui e nao no write. Se ele escapasse, derrubaria o
+        # bot E deixaria o arquivo por esvaziar — perdendo justo o rastro.
+        try:
+            self._original.flush()
+        except Exception:
+            pass
         if self._arquivo is not None:
             try:
                 self._arquivo.flush()
