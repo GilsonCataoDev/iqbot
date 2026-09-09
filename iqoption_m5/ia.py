@@ -11,6 +11,7 @@ from dataclasses import dataclass, field
 import requests as _req
 
 URL_GROQ = "https://api.groq.com/openai/v1/chat/completions"
+URL_OPENAI = "https://api.openai.com/v1/chat/completions"
 MODELO = ""  # desativado — nenhum modelo Groq disponível na conta atual
 TIMEOUT_SEGUNDOS = 15
 MAX_TOKENS_RESPOSTA = 400
@@ -61,6 +62,17 @@ def _chave() -> str:
             return _chave_cache
         _chave_cache = _obter_chave()
         return _chave_cache
+
+
+def _chave_openai() -> str:
+    chave = os.environ.get("OPENAI_API_KEY", "").strip()
+    if not chave:
+        raise RuntimeError("OPENAI_API_KEY nao definida")
+    return chave
+
+
+def _modelo_openai() -> str:
+    return os.environ.get("OPENAI_MODEL", "gpt-4o-mini").strip() or "gpt-4o-mini"
 
 
 def _montar_prompt(contexto: dict) -> str:
@@ -257,6 +269,110 @@ def segunda_opiniao_alerta(alerta_dados: dict) -> dict | None:
             "modelo": MODELO_SEGUNDA_OPINIAO,
             "latencia_ms": latencia_ms,
         }
+    finally:
+        _sem_ia.release()
+
+
+def segunda_opiniao_grafico(contexto: dict) -> dict | None:
+    """Lê um recorte de candles e apenas confirma ou veta um plano já calculado.
+
+    ``BUY``/``SELL`` nunca são criados pela IA: só são aceitos se coincidirem
+    com a direção mecânica de um plano qualificado. Sem plano, a resposta é
+    forçada para ``AGUARDAR``. Assim a opinião é auditável e não vira executor.
+    """
+    global _bloqueado_ate
+    plano = contexto.get("plano") if isinstance(contexto.get("plano"), dict) else {}
+    direcao = str(plano.get("direcao", "")).upper()
+    permitida = direcao if plano.get("qualificada") and direcao in {"BUY", "SELL"} else "AGUARDAR"
+    tp1 = plano.get("tp1")
+    try:
+        tp1 = float(tp1)
+    except (TypeError, ValueError):
+        tp1 = None
+    def indisponivel(motivo: str) -> dict:
+        return {"status": "INDISPONÍVEL", "veredicto": "AGUARDAR",
+                "confianca": "—", "motivo": motivo, "fonte": "GROQ"}
+
+    if not _sem_ia.acquire(blocking=False):
+        return indisponivel("Groq já está analisando outra consulta. Tente novamente em alguns segundos.")
+    try:
+        prompt = (
+            "Você é a segunda opinião conservadora de um gráfico M15 de Forex, cripto ou commodity. "
+            "Leia somente os dados fornecidos; não invente preço, notícia, padrão ou alvo. "
+            f"A direção mecânica permitida é {permitida}. "
+            "O único alvo curto permitido é TP1 do plano; escolha TP1 somente se a estrutura ainda o sustentar. "
+            "Se houver conflito, notícia, candle sem rejeição ou contexto insuficiente, responda AGUARDAR. "
+            "Não recomende executar uma ordem. Responda SOMENTE JSON: "
+            '{"veredicto":"BUY|SELL|AGUARDAR","alvo":"TP1|AGUARDAR","confianca":"ALTA|MEDIA|BAIXA","motivo":"até 180 caracteres"}.\n'
+            f"Contexto objetivo: {json.dumps(contexto, ensure_ascii=False, default=str)}"
+        )
+        base = {
+            "messages": [
+                {"role": "system", "content": "Analista técnico conservador. JSON válido, sem texto extra."},
+                {"role": "user", "content": prompt},
+            ], "temperature": 0, "max_tokens": 220,
+            "response_format": {"type": "json_object"},
+        }
+        provedores = []
+        with _lock_bloqueio:
+            groq_em_pausa = time.time() < _bloqueado_ate
+        if not groq_em_pausa:
+            try:
+                provedores.append(("GROQ", URL_GROQ, MODELO_SEGUNDA_OPINIAO, _chave()))
+            except RuntimeError:
+                pass
+        try:
+            provedores.append(("OPENAI", URL_OPENAI, _modelo_openai(), _chave_openai()))
+        except RuntimeError:
+            pass
+        if not provedores:
+            return indisponivel("Nenhuma chave de IA foi carregada. Reinicie pelo MONITOR_MERCADO.bat.")
+
+        falhas = []
+        for fonte, url, modelo, chave in provedores:
+            inicio = time.time()
+            try:
+                resposta = _req.post(url, json={**base, "model": modelo},
+                                     headers={**_HEADERS_BASE, "Authorization": f"Bearer {chave}"},
+                                     timeout=TIMEOUT_SEGUNDOS)
+            except _req.RequestException as erro:
+                falhas.append(f"{fonte}: conexão ({type(erro).__name__})")
+                continue
+            if resposta.status_code == 429:
+                if fonte == "GROQ":
+                    with _lock_bloqueio:
+                        _bloqueado_ate = time.time() + 60
+                falhas.append(f"{fonte}: limite temporário")
+                continue
+            if resposta.status_code != 200:
+                falhas.append(f"{fonte}: HTTP {resposta.status_code}")
+                continue
+            try:
+                texto = resposta.json()["choices"][0]["message"]["content"]
+                inicio_json, fim_json = texto.find("{"), texto.rfind("}") + 1
+                dados = json.loads(texto[inicio_json:fim_json])
+            except (KeyError, IndexError, TypeError, json.JSONDecodeError):
+                falhas.append(f"{fonte}: resposta inválida")
+                continue
+            veredicto = str(dados.get("veredicto", "AGUARDAR")).upper()
+            # Segurança: não pode contrariar nem criar direção nova.
+            if veredicto not in {permitida, "AGUARDAR"}:
+                veredicto = "AGUARDAR"
+            confianca = str(dados.get("confianca", "BAIXA")).upper()
+            if confianca not in {"ALTA", "MEDIA", "BAIXA"}:
+                confianca = "BAIXA"
+            alvo_codigo = str(dados.get("alvo", "AGUARDAR")).upper()
+            if alvo_codigo != "TP1" or veredicto == "AGUARDAR" or tp1 is None:
+                alvo_codigo, alvo_curto = "AGUARDAR", None
+            else:
+                alvo_curto = tp1
+            return {
+                "status": "DISPONÍVEL", "veredicto": veredicto,
+                "confianca": confianca, "motivo": str(dados.get("motivo", ""))[:180],
+                "alvo_codigo": alvo_codigo, "alvo_curto": alvo_curto,
+                "fonte": fonte, "latencia_ms": int((time.time() - inicio) * 1000),
+            }
+        return indisponivel("; ".join(falhas) or "IA não respondeu.")
     finally:
         _sem_ia.release()
 

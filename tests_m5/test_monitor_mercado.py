@@ -1,15 +1,21 @@
 import json
+from datetime import datetime, timezone
 from pathlib import Path
+from unittest.mock import Mock, patch
 
 import numpy as np
 import pandas as pd
 import pytest
+import requests
 
 import monitor_mercado
+from iqoption_m5.ia import segunda_opiniao_grafico
 from monitor_mercado import (
     ATIVOS, CLASSE, Estado, adquirir_trava_monitor, decisao_entrada, janela_validada_para,
-    leitura_fluxo_sessao, plano_fibo, plano_orb_sessao,
-    plano_bof_m30_m5, plano_varredura_liquidez, unidade_movimento, wilson_ci,
+    detectar_fvg_m15, leitura_fluxo_sessao, noticias_do_dia, plano_fibo, plano_ouro_movimento,
+    plano_tp1_curto_forex, plano_orb_sessao,
+    plano_bof_m30_m5, plano_varredura_liquidez, plano_confluencia_local, unidade_movimento, wilson_ci,
+    candle_atual_para_grafico, sanitizar_candles_m15,
 )
 
 
@@ -18,6 +24,46 @@ def test_painel_separa_agora_grafico_entradas_estudos_e_dados():
         assert f'data-view="{visao}"' in monitor_mercado._HTML
     assert 'id="filtro-tipo"' in monitor_mercado._HTML
     assert 'id="saude"' in monitor_mercado._HTML
+    assert 'id="confluencia"' in monitor_mercado._HTML
+    assert 'function renderConfluencia()' in monitor_mercado._HTML
+    assert 'function alternarNiveis()' in monitor_mercado._HTML
+    assert 'niveisDetalhados' in monitor_mercado._HTML
+
+
+def test_grafico_descarta_tick_fora_do_bloco_m15_que_achata_eurusd():
+    indice = pd.date_range("2026-09-09 09:00", periods=4, freq="15min", tz="UTC")
+    fechados = pd.DataFrame({
+        "Open": [1.1640, 1.1641, 1.1642, 1.1643],
+        "High": [1.1642, 1.1643, 1.1644, 1.1645],
+        "Low": [1.1638, 1.1639, 1.1640, 1.1641],
+        "Close": [1.1641, 1.1642, 1.1643, 1.1644],
+    }, index=indice)
+    # Reprodução do payload recebido: tick de 09:31 com preço impossível.
+    atual = pd.DataFrame({
+        "Open": [1.35534], "High": [1.355355],
+        "Low": [1.35534], "Close": [1.355355],
+    }, index=[pd.Timestamp("2026-09-09 09:31", tz="UTC")])
+
+    assert candle_atual_para_grafico(fechados, atual) is None
+
+
+def test_sanitizar_candles_m15_remove_tick_fora_do_bloco_antes_da_analise():
+    indice = pd.date_range("2026-09-09 09:00", periods=4, freq="15min", tz="UTC")
+    bons = pd.DataFrame({
+        "Open": [1.1640, 1.1641, 1.1642, 1.1643],
+        "High": [1.1642, 1.1643, 1.1644, 1.1645],
+        "Low": [1.1638, 1.1639, 1.1640, 1.1641],
+        "Close": [1.1641, 1.1642, 1.1643, 1.1644],
+    }, index=indice)
+    falso = pd.DataFrame({
+        "Open": [1.35534], "High": [1.355355],
+        "Low": [1.35534], "Close": [1.355355],
+    }, index=[pd.Timestamp("2026-09-09 09:31", tz="UTC")])
+
+    limpo = sanitizar_candles_m15(pd.concat([bons, falso]).sort_index())
+
+    assert len(limpo) == len(bons)
+    assert pd.Timestamp("2026-09-09 09:31", tz="UTC") not in limpo.index
 
 
 def test_estado_publica_saude_do_sqlite(tmp_path):
@@ -108,6 +154,166 @@ def test_plano_fibo_m15_qualifica_retracao_com_tendencias_alinhadas():
     assert plano["rr"] >= 1.5
     assert plano["zona_inf"] < plano["zona_sup"]
     assert plano["alvos"]["tp2"] > plano["alvos"]["tp1"]
+
+
+def test_confluencia_local_entrega_plano_visual_sem_virar_sinal_operacional():
+    indice = pd.date_range("2026-08-25", periods=120, freq="15min")
+    fechamento = np.linspace(100, 112, 120)
+    abertura = np.r_[fechamento[0] - .10, fechamento[:-1] - .10]
+    candles = pd.DataFrame({
+        "Open": abertura, "High": np.maximum(abertura, fechamento) + .15,
+        "Low": np.minimum(abertura, fechamento) - .15, "Close": fechamento,
+    }, index=indice)
+    # Deslocamento que deixa FVG comprador: a terceira mínima fica acima da
+    # máxima da primeira vela do padrão de três candles.
+    candles.iloc[-3] = [111.1, 111.3, 110.9, 111.0]
+    candles.iloc[-2] = [111.0, 113.1, 110.9, 112.9]
+    candles.iloc[-1] = [112.9, 113.4, 111.6, 113.2]
+    atr = pd.Series(.50, index=indice)
+
+    plano = plano_confluencia_local(candles, atr, "XAUUSD", {"estado": "sem_risco"})
+
+    assert plano["disponivel"]
+    assert plano["direcao"] == "buy"
+    assert 0 <= plano["score"] <= 10
+    assert len(plano["checklist"]) == 7
+    assert plano["estrutura"]["minimo"] < plano["estrutura"]["equilibrio"] < plano["estrutura"]["maximo"]
+    assert plano["alvos"]["sl"] < plano["alvos"]["entrada"] < plano["alvos"]["tp1"]
+
+
+def test_tp1_curto_forex_usa_rejeicao_fibo_e_alvo_382():
+    candles, atr = _serie_fibo_alta()
+    # Para TP1 curto, o pavio de confirmação precisa deixar um stop tático
+    # compacto. A estrutura Fibo original continua válida com um pavio maior.
+    candles.loc[candles.index[-1], "Low"] = 106.9
+
+    plano = plano_tp1_curto_forex(candles, atr, "EURUSD", {"estado": "sem_risco"})
+
+    assert plano["disponivel"]
+    assert plano["sinal_estudo"]
+    assert plano["direcao"] == "buy"
+    assert 1.2 <= plano["rr"] <= 3.0
+    assert plano["alvos"]["tp1"] == pytest.approx(plano_fibo(candles, atr, "EURUSD")["fib382"])
+
+
+def test_tp1_curto_nao_serve_para_cripto():
+    candles, atr = _serie_fibo_alta()
+
+    plano = plano_tp1_curto_forex(candles, atr, "BTCUSD")
+
+    assert not plano["disponivel"]
+
+
+def test_fvg_m15_mostra_gap_bullish_ainda_nao_preenchido():
+    indice = pd.date_range("2026-09-08 10:00", periods=6, freq="15min")
+    candles = pd.DataFrame({
+        "Open": [100, 101, 103, 104, 104, 104],
+        "High": [101, 102, 105, 105, 105, 105],
+        "Low": [99, 100, 103, 102, 102, 102],
+        "Close": [100, 101, 104, 104, 104, 104],
+    }, index=indice)
+    atr = pd.Series([2.0] * len(candles), index=indice)
+
+    fvg = detectar_fvg_m15(candles, atr)
+
+    assert fvg["disponivel"]
+    assert fvg["direcao"] == "buy"
+    assert fvg["zona_inf"] == pytest.approx(101.0)
+    assert fvg["zona_sup"] == pytest.approx(103.0)
+    assert fvg["estado"] == "FVG BUY ATIVO"
+
+
+def test_ouro_movimento_aguarda_dado_usd_sem_chamar_noticia_de_bloqueio():
+    indice = pd.date_range("2026-09-07 00:00", periods=104, freq="15min")
+    base = np.linspace(4300.0, 4350.0, len(indice))
+    candles = pd.DataFrame({
+        "Open": base - .2, "High": base + .4, "Low": base - .5, "Close": base,
+    }, index=indice)
+    # Impulso e FVG BUY, seguido por retorno/rejeição dentro da zona.
+    candles.iloc[-5:] = [[4345, 4346, 4344, 4345], [4346, 4349, 4346, 4348],
+                         [4349, 4351, 4347, 4350], [4349, 4350, 4346.5, 4347],
+                         [4347, 4350, 4346.5, 4349.5]]
+    atr = pd.Series([2.0] * len(candles), index=indice)
+
+    plano = plano_ouro_movimento(candles, atr, "XAUUSD", {"estado": "janela_risco"})
+
+    assert plano["disponivel"]
+    assert not plano["sinal_estudo"]
+    assert plano["estado"] == "NOTÍCIA USD — AGUARDAR DADO"
+
+
+def test_noticias_do_dia_expoe_como_usar_resultado_publicado():
+    agora = datetime(2026, 9, 9, 14, 0, tzinfo=timezone.utc)
+    class EventoFalso:
+        titulo, moeda, impacto = "CPI m/m", "USD", "high"
+        quando = agora
+        actual, forecast, previous = "0.1", "0.3", "0.2"
+        def resultado_direcao(self, ativo): return {"direcao": "BUY"}
+        def sugestao(self, ativo): return None
+    class CalendarioFalso:
+        def eventos_do_ativo(self, ativo): return [EventoFalso()]
+
+    agenda = noticias_do_dia(CalendarioFalso(), "XAUUSD", agora)
+
+    assert agenda[0]["direcao"] == "BUY"
+    assert "após confirmação M15" in agenda[0]["uso"]
+
+
+def test_groq_grafico_nao_pode_inventar_direcao_contraria():
+    resposta = Mock(status_code=200)
+    resposta.json.return_value = {"choices": [{"message": {"content":
+        '{"veredicto":"SELL","confianca":"ALTA","motivo":"Texto."}'
+    }}]}
+    contexto = {"plano": {"qualificada": True, "direcao": "BUY"}, "candles_fechados": []}
+    with patch.dict("os.environ", {"GROQ_API_KEY": "teste"}, clear=False), \
+         patch("iqoption_m5.ia._req.post", return_value=resposta):
+        parecer = segunda_opiniao_grafico(contexto)
+
+    assert parecer is not None
+    assert parecer["veredicto"] == "AGUARDAR"
+
+
+def test_groq_grafico_expoe_falha_de_conexao_sem_executar_ordem():
+    contexto = {"plano": {"qualificada": False}, "candles_fechados": []}
+    with patch.dict("os.environ", {"GROQ_API_KEY": "teste"}, clear=False), \
+         patch("iqoption_m5.ia._req.post", side_effect=requests.ConnectionError("offline")):
+        parecer = segunda_opiniao_grafico(contexto)
+
+    assert parecer is not None
+    assert parecer["status"] == "INDISPONÍVEL"
+    assert parecer["veredicto"] == "AGUARDAR"
+    assert "conexão" in parecer["motivo"].lower()
+
+
+def test_groq_grafico_usa_openai_como_reserva_quando_groq_recusa():
+    groq = Mock(status_code=503)
+    openai = Mock(status_code=200)
+    openai.json.return_value = {"choices": [{"message": {"content":
+        '{"veredicto":"BUY","confianca":"MEDIA","motivo":"Rejeição confirmada."}'
+    }}]}
+    contexto = {"plano": {"qualificada": True, "direcao": "BUY"}, "candles_fechados": []}
+    with patch.dict("os.environ", {"GROQ_API_KEY": "groq", "OPENAI_API_KEY": "openai"}, clear=False), \
+         patch("iqoption_m5.ia._req.post", side_effect=[groq, openai]):
+        parecer = segunda_opiniao_grafico(contexto)
+
+    assert parecer is not None
+    assert parecer["status"] == "DISPONÍVEL"
+    assert parecer["fonte"] == "OPENAI"
+    assert parecer["veredicto"] == "BUY"
+
+
+def test_ia_grafico_so_exibe_tp_curto_ja_calculado_no_plano():
+    resposta = Mock(status_code=200)
+    resposta.json.return_value = {"choices": [{"message": {"content":
+        '{"veredicto":"BUY","alvo":"TP1","confianca":"ALTA","motivo":"Tendência e rejeição alinhadas."}'
+    }}]}
+    contexto = {"plano": {"qualificada": True, "direcao": "BUY", "tp1": 1.23456}, "candles_fechados": []}
+    with patch.dict("os.environ", {"GROQ_API_KEY": "teste"}, clear=False), \
+         patch("iqoption_m5.ia._req.post", return_value=resposta):
+        parecer = segunda_opiniao_grafico(contexto)
+
+    assert parecer["alvo_codigo"] == "TP1"
+    assert parecer["alvo_curto"] == pytest.approx(1.23456)
 
 
 def test_simulador_fibo_sell_usa_low_para_tp_e_high_para_stop():
@@ -674,6 +880,24 @@ def test_html_tem_cartao_decisao_principal():
     assert "renderDecisaoPrincipal" in monitor_mercado._HTML
     assert 'id="btn-som-monitor"' in monitor_mercado._HTML
     assert "alertarNovoEvento" in monitor_mercado._HTML
+    assert "dadosMonitorAoVivo" in monitor_mercado._HTML
+    assert 'id="tp1-curto"' in monitor_mercado._HTML
+    assert "renderTp1Curto" in monitor_mercado._HTML
+    assert 'id="fvg"' in monitor_mercado._HTML
+    assert "renderFvg" in monitor_mercado._HTML
+    assert "FVG M15" in monitor_mercado._HTML
+    assert 'id="ouro-movimento"' in monitor_mercado._HTML
+    assert "renderOuroMovimento" in monitor_mercado._HTML
+    assert "OURO — MOVIMENTO A FAVOR M15" in monitor_mercado._HTML
+    assert "NOTÍCIAS USD HOJE" in monitor_mercado._HTML
+    assert "noticiasGrafico" in monitor_mercado._HTML
+    assert 'id="ia-grafico"' in monitor_mercado._HTML
+    assert "renderIaGrafico" in monitor_mercado._HTML
+    assert "lerGroqSelecionado" in monitor_mercado._HTML
+    assert "Analisar momento + TP curto" in monitor_mercado._HTML
+    assert "TP curto aprovado" in monitor_mercado._HTML
+    assert "/opiniao_groq_grafico" in monitor_mercado._HTML
+    assert "ouro prioriza o scanner próprio quando qualificado" in monitor_mercado._HTML
 
 
 def test_html_tem_entrada_sl_tp_na_tabela_de_historico():

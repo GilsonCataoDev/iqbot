@@ -441,6 +441,7 @@
     <label><input type="checkbox" id="camada-niveis" checked> S/R</label>
     <label><input type="checkbox" id="camada-fib" checked> Fib</label>
     <label><input type="checkbox" id="camada-bloqueados"> Bloqueados</label>
+    <label><input type="checkbox" id="camada-todos-sinais"> Todos sinais</label>
     <span class="marc-sep"></span>
     <button class="btn-marc" id="btn-marc-fibo" onclick="marcarFibo()" title="Marcar Fibo: clique na origem e depois no extremo">✎ Fibo</button>
     <button class="btn-marc" id="btn-marc-linha" onclick="marcarLinha()" title="Marcar linha horizontal: um clique no preço">✎ Linha</button>
@@ -790,6 +791,7 @@ let somAtivo = localStorage.getItem('emaLabSomAtivo') === '1';
 let ultimoSinalId = null;      // para detectar novo sinal
 let tfSegundos = 900;          // atualizado pela api
 let ultimoAtualizadoEm = null; // timestamp servidor do ultimo update
+let dadosAoVivo = true;        // bloqueia som/decisão quando o feed envelhece
 const entradasAbertas = new Set();
 let _dataEntradas = null;   // null = hoje (ao vivo); "YYYY-MM-DD" = histórico
 let _entradasHoje = [];     // cache do último ciclo para o dia atual
@@ -1142,6 +1144,7 @@ const chkEma    = document.getElementById('camada-ema');
 const chkNiveis = document.getElementById('camada-niveis');
 const chkFib    = document.getElementById('camada-fib');
 const chkBloqueados = document.getElementById('camada-bloqueados');
+const chkTodosSinais = document.getElementById('camada-todos-sinais');
 // Fora do Lab preservamos a visualização histórica anterior. No Lab, a tela
 // nasce limpa e o operador escolhe quando quer inspecionar ruído de pesquisa.
 if (!modoLab) {
@@ -1238,6 +1241,7 @@ function _toggleFib() {
   _toggleFib();
 }));
 chkBloqueados.addEventListener('change', atualizar);
+chkTodosSinais.addEventListener('change', atualizar);
 
 function abreviarSetup(valor) {
   const texto = String(valor || '')
@@ -1509,7 +1513,14 @@ async function atualizar() {
     }
 
     // Marcadores no chart
+    // Por padrão o gráfico mostra só as últimas 36 velas de pesquisa. O
+    // histórico completo continua acessível em "Todos sinais", sem cobrir o
+    // preço com setas antigas.
+    const ultimoTempo = dados.candles.length ? dados.candles[dados.candles.length - 1].time : 0;
+    const corteSinais = chkTodosSinais.checked ? -Infinity : ultimoTempo - (tfSegundos * 36);
+    const recente = item => item.time >= corteSinais;
     const marcadoresSinal = dados.sinais
+      .filter(recente)
       .filter(s => s.status !== 'bloqueado' || chkBloqueados.checked)
       .map(s => ({
       time: s.time,
@@ -1522,6 +1533,7 @@ async function atualizar() {
     }));
     const temposConfl = new Set((dados.confluencias||[]).map(c => c.time));
     const marcadoresPullback = (dados.pullbacks||[])
+      .filter(recente)
       .filter(p => !temposConfl.has(p.time))
       .filter(p => p.status !== 'bloqueado' || chkBloqueados.checked).map(p => ({
       time: p.time,
@@ -1531,6 +1543,7 @@ async function atualizar() {
       _prioridade: 15,
     }));
     const marcadoresConfl = (dados.confluencias||[])
+      .filter(recente)
       .filter(c => c.status !== 'bloqueado' || chkBloqueados.checked).map(c => ({
       time: c.time,
       position: c.direcao === 'compra' ? 'belowBar' : 'aboveBar',
@@ -1587,9 +1600,13 @@ async function atualizar() {
     const desemp = dados.desempenho;
     const wrTexto = desemp && desemp.winrate != null ? ` | ${desemp.winrate}% (${desemp.vitorias}/${desemp.total})` : '';
     const emojiT = t => t==='alta'?'↑':(t==='baixa'?'↓':'→');
+    const idadeDados = Math.max(0, Date.now()/1000 - Number(dados.atualizado_em || 0));
+    const limiteDados = Math.max(120, tfSegundos * 2 + 30);
+    dadosAoVivo = idadeDados <= limiteDados;
     ultimoStatusValido = `${dados.par} ${dados.timeframe} | ${dados.mercadoAberto?'ABERTO':'FECHADO'} | payout ${dados.payout==null?'—':(dados.payout*100).toFixed(0)+'%'} | ${emojiT(dados.tendenciaMacro)}${dados.tendenciaMacro||'?'}${wrTexto} | ${new Date(dados.atualizado_em*1000).toLocaleTimeString('pt-BR')}`;
     document.getElementById('status').textContent = ultimoStatusValido;
-    document.getElementById('status').style.color = '';
+    document.getElementById('status').style.color = dadosAoVivo ? '' : '#ef5350';
+    if (!dadosAoVivo) document.getElementById('status').textContent += ' | DADOS ATRASADOS — NÃO OPERAR';
     if (dados.timeframe) {
       document.getElementById('barra-logo').textContent = `IQ ${dados.timeframe}`;
       document.title = `IQ Option ${dados.timeframe} — ${dados.par}`;
@@ -1605,6 +1622,14 @@ async function atualizar() {
 }
 
 function classificarDecisaoVisual(src, ehProximo=false) {
+  if (!dadosAoVivo) {
+    return {
+      acao: 'NÃO ENTRAR', classe: 'nao-entrar', titulo: 'DADOS ATRASADOS',
+      direcao: 'AVISO', label: '■ DADOS ATRASADOS', badge: 'NÃO ENTRAR',
+      nota: 'feed sem atualização recente', linhaEntrada: 'REFERÊNCIA',
+      toastAcao: ' — aguardar atualização',
+    };
+  }
   const direcaoRaw = (src?.direcao || '').replace('_proxima', '').toLowerCase();
   const direcaoNormal = (direcaoRaw === 'call' || direcaoRaw === 'compra') ? 'call'
     : ((direcaoRaw === 'put' || direcaoRaw === 'venda') ? 'put' : null);
@@ -1680,7 +1705,7 @@ function renderizarSinalBadge(dados) {
   const srcPrioritario = al || ap;
   const sinalIdAtual = srcPrioritario ? `${srcPrioritario.id || srcPrioritario.time}-${srcPrioritario.direcao}` : null;
   const novaSinal = sinalIdAtual && sinalIdAtual !== ultimoSinalId;
-  if (novaSinal) {
+  if (novaSinal && dadosAoVivo) {
     ultimoSinalId = sinalIdAtual;
     const dir = ap ? ap.direcao : (al ? al.direcao : null);
     if (dir) alertaSom(dir.replace('_proxima', ''));

@@ -29,6 +29,7 @@ import sys
 import threading
 import time
 import webbrowser
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path
@@ -44,6 +45,7 @@ from iqoption_m5.grafico import GraficoM5
 from iqoption_m5.mercado_iq import MercadoIQ
 from iqoption_m5.monitor_store import MonitorEventStore, SCHEMA_VERSAO
 from iqoption_m5.noticias import CalendarioEconomico
+from iqoption_m5.ia import segunda_opiniao_grafico
 
 FOREX = ["EURUSD", "GBPUSD", "USDJPY", "AUDUSD", "EURJPY", "USDCAD", "NZDUSD",
          "EURGBP", "EURCHF", "EURCAD", "GBPJPY", "GBPCHF", "GBPCAD", "CADCHF"]
@@ -121,6 +123,89 @@ def unidade_movimento(ativo: str) -> tuple[float, str]:
     if classe == "ouro":
         return 0.01, "pontos"
     return M.pip(ativo), "pips"
+
+
+def sanitizar_candles_m15(candles: pd.DataFrame, timeframe_s: int = TF) -> pd.DataFrame:
+    """Remove ticks corrompidos antes de eles virarem histórico/análise M15.
+
+    A API ocasionalmente mistura um tick em minuto intermediário ao lote M15.
+    Além de não representar uma vela fechada, esse ponto pode estar em uma
+    cotação errada e destruir a escala. A filtragem ocorre antes de qualquer
+    indicador, Fibo ou escrita do gráfico.
+    """
+    if candles is None or candles.empty:
+        return candles
+    try:
+        resultado = candles.copy().sort_index()
+        instante = pd.DatetimeIndex(resultado.index)
+        if instante.tz is None:
+            instante = instante.tz_localize("UTC")
+        # O dtype interno do pandas pode estar em microssegundos ou
+        # nanossegundos conforme a versão; ``timestamp()`` evita supor a
+        # unidade e preserva o alinhamento real do candle.
+        segundos = np.asarray([int(valor.timestamp()) for valor in instante])
+        alinhada = segundos % timeframe_s == 0
+        ohlc = resultado[["Open", "High", "Low", "Close"]].apply(pd.to_numeric, errors="coerce")
+        estrutural = (
+            ohlc.notna().all(axis=1)
+            & (ohlc["High"] >= ohlc[["Open", "Close"]].max(axis=1))
+            & (ohlc["Low"] <= ohlc[["Open", "Close"]].min(axis=1))
+        )
+        # Evita que uma cotação corrompida porém alinhada contamine a série.
+        # 5% em 15 minutos é deliberadamente amplo para não apagar movimento
+        # real de cripto ou notícia, mas bloqueia o salto EURUSD 1.164→1.355.
+        basico = np.asarray(alinhada) & estrutural.to_numpy()
+        # Calcula o salto somente entre velas já alinhadas. Caso contrário um
+        # tick corrompido no minuto 31 faria a vela M15 seguinte parecer um
+        # segundo salto inválido e a apagaria também.
+        plausivel = pd.Series(False, index=resultado.index)
+        fechados_basicos = ohlc.loc[basico, "Close"]
+        plausivel.loc[fechados_basicos.index] = (
+            fechados_basicos.pct_change().abs().fillna(0) <= .05
+        )
+        return resultado.loc[basico & plausivel.to_numpy()].copy()
+    except (KeyError, TypeError, ValueError, OverflowError):
+        return candles.copy().sort_index()
+
+
+def candle_atual_para_grafico(
+    fechados: pd.DataFrame,
+    candidatos: pd.DataFrame,
+    timeframe_s: int = TF,
+) -> pd.DataFrame | None:
+    """Devolve a vela em formação somente se ela puder ser desenhada com segurança.
+
+    A IQ pode devolver um tick isolado com minuto e preço incompatíveis com o
+    histórico M15. Ele não entra na análise (que usa ``fechados``), mas antes
+    era anexado ao gráfico e esticava a escala inteira. Esta barreira é apenas
+    visual: candle fora do bloco M15, OHLC inválido ou salto absurdo é omitido.
+    """
+    if fechados is None or fechados.empty or candidatos is None or candidatos.empty:
+        return None
+    atual = candidatos.tail(1).copy()
+    try:
+        instante = pd.Timestamp(atual.index[-1])
+        if instante.tzinfo is None:
+            instante = instante.tz_localize("UTC")
+        if int(instante.timestamp()) % timeframe_s:
+            return None
+        valores = atual.iloc[0][["Open", "High", "Low", "Close"]].astype(float)
+        if (not np.isfinite(valores.to_numpy()).all()
+                or valores["High"] < max(valores["Open"], valores["Close"])
+                or valores["Low"] > min(valores["Open"], valores["Close"])):
+            return None
+
+        referencia = fechados.tail(32)[["High", "Low", "Close"]].astype(float)
+        amplitude_mediana = float((referencia["High"] - referencia["Low"]).median())
+        ultimo_preco = float(referencia["Close"].iloc[-1])
+        # Permite movimentos reais de notícia, mas não uma cotação corrompida
+        # como EURUSD 1.164 → 1.355 em um tick M15.
+        salto_maximo = max(12 * amplitude_mediana, abs(ultimo_preco) * .02, 1e-9)
+        if float((valores - ultimo_preco).abs().max()) > salto_maximo:
+            return None
+        return atual
+    except (KeyError, TypeError, ValueError, OverflowError):
+        return None
 
 
 def tendencia_dia(df: pd.DataFrame) -> dict:
@@ -201,6 +286,285 @@ def _ultimo_impulso(df: pd.DataFrame, atr: pd.Series, direcao: str) -> dict | No
                 "atr": atr_fim,
             }
     return None
+
+
+def detectar_fvg_m15(df: pd.DataFrame, atr: pd.Series) -> dict:
+    """Retorna o FVG M15 mais recente que ainda não foi totalmente preenchido.
+
+    Um FVG é o espaço entre a máxima do primeiro candle e a mínima do terceiro
+    (BUY), ou o inverso (SELL). Exige tamanho mínimo de 0,15 ATR para não
+    transformar ruído de cotação em uma zona. É leitura de confluência, não
+    ordem nem sinal operacional.
+    """
+    vazio = {"disponivel": False, "estado": "SEM FVG ATIVO",
+             "motivo": "Nenhum desequilíbrio M15 relevante e não preenchido."}
+    if len(df) < 3 or atr.empty:
+        return vazio
+    try:
+        dados = df[["High", "Low", "Close"]].apply(pd.to_numeric, errors="coerce").dropna().tail(64)
+        atr_local = atr.reindex(dados.index).ffill()
+        if len(dados) < 3:
+            return vazio
+        atr_atual = float(atr_local.iloc[-1])
+        if not np.isfinite(atr_atual) or atr_atual <= 0:
+            return vazio
+        preco = float(dados["Close"].iloc[-1])
+        for fim in range(len(dados) - 1, 1, -1):
+            primeiro, terceiro = dados.iloc[fim - 2], dados.iloc[fim]
+            if float(terceiro["Low"]) > float(primeiro["High"]):
+                direcao, zona_inf, zona_sup = "buy", float(primeiro["High"]), float(terceiro["Low"])
+            elif float(terceiro["High"]) < float(primeiro["Low"]):
+                direcao, zona_inf, zona_sup = "sell", float(terceiro["High"]), float(primeiro["Low"])
+            else:
+                continue
+            tamanho = zona_sup - zona_inf
+            if tamanho < .15 * atr_atual:
+                continue
+            posteriores = dados.iloc[fim + 1:]
+            preenchido = (
+                (not posteriores.empty and float(posteriores["Low"].min()) <= zona_inf)
+                if direcao == "buy" else
+                (not posteriores.empty and float(posteriores["High"].max()) >= zona_sup)
+            )
+            if preenchido:
+                continue
+            em_zona = zona_inf <= preco <= zona_sup
+            if direcao == "buy":
+                distancia = max(0.0, preco - zona_sup) / atr_atual
+            else:
+                distancia = max(0.0, zona_inf - preco) / atr_atual
+            estado = f"FVG {direcao.upper()} {'NA ZONA' if em_zona else 'ATIVO'}"
+            return {
+                "disponivel": True, "direcao": direcao, "estado": estado,
+                "zona_inf": round(zona_inf, 6), "zona_sup": round(zona_sup, 6),
+                "em_zona": em_zona, "tamanho_atr": round(tamanho / atr_atual, 2),
+                "distancia_atr": round(distancia, 2),
+                "inicio": str(dados.index[fim - 2]), "fim": str(dados.index[fim]),
+                "motivo": (
+                    "Preço está dentro do desequilíbrio; espere rejeição fechada antes de decidir."
+                    if em_zona else "FVG ainda aberto; é uma zona possível de retorno, não uma entrada."
+                ),
+            }
+    except (ValueError, TypeError, IndexError, KeyError):
+        return vazio
+    return vazio
+
+
+def _order_block_m15(df: pd.DataFrame, atr: pd.Series, direcao: str) -> dict | None:
+    """Última vela contrária antes de deslocamento, sem usar candles futuros."""
+    dados = df[["Open", "High", "Low", "Close"]].dropna().tail(48)
+    if len(dados) < 6:
+        return None
+    av = float(atr.reindex(dados.index).iloc[-1])
+    if not np.isfinite(av) or av <= 0:
+        return None
+    for pos in range(len(dados) - 4, 0, -1):
+        vela = dados.iloc[pos]
+        o, h, l, c = (float(vela[x]) for x in ("Open", "High", "Low", "Close"))
+        depois = dados.iloc[pos + 1:min(pos + 4, len(dados))]
+        if direcao == "buy":
+            oposta = c < o
+            deslocou = not depois.empty and float(depois["High"].max()) - h >= .75 * av
+        else:
+            oposta = c > o
+            deslocou = not depois.empty and l - float(depois["Low"].min()) >= .75 * av
+        if oposta and deslocou:
+            return {"zona_inf": round(l, 6), "zona_sup": round(h, 6),
+                    "vela": str(dados.index[pos])}
+    return None
+
+
+def plano_confluencia_local(df: pd.DataFrame, atr: pd.Series, ativo: str,
+                            noticia: dict | None = None) -> dict:
+    """Leitura SMC local: estrutura, FVG, OB e liquidez; nunca envia ordem."""
+    vazio = {"disponivel": False, "qualificada": False, "direcao": "neutro",
+             "score": 0, "nota": "—", "estado": "AGUARDANDO ESTRUTURA",
+             "motivo": "São necessários candles M15 suficientes."}
+    if len(df) < 96 or atr.empty:
+        return vazio
+    try:
+        dados = df[["Open", "High", "Low", "Close"]].apply(pd.to_numeric, errors="coerce").dropna()
+        av = float(atr.reindex(dados.index).ffill().iloc[-1])
+        if not np.isfinite(av) or av <= 0:
+            return {**vazio, "motivo": "ATR M15 indisponível."}
+        m15, h1 = _tendencia_ema(dados["Close"]), _tendencia_h1_a_partir_m15(dados)
+        fvg = detectar_fvg_m15(dados, atr.reindex(dados.index).ffill())
+        vela = dados.iloc[-1]
+        o, h, l, preco = (float(vela[x]) for x in ("Open", "High", "Low", "Close"))
+        anteriores = dados.iloc[-11:-1]
+        teto, piso = float(anteriores["High"].max()), float(anteriores["Low"].min())
+        faixa_estrutura = dados.tail(48)
+        minimo_estrutura, maximo_estrutura = float(faixa_estrutura["Low"].min()), float(faixa_estrutura["High"].max())
+        equilibrio = (minimo_estrutura + maximo_estrutura) / 2
+        estrutura = {
+            "minimo": round(minimo_estrutura, 6), "maximo": round(maximo_estrutura, 6),
+            "equilibrio": round(equilibrio, 6),
+            "supply_inf": round(maximo_estrutura - .25 * av, 6), "supply_sup": round(maximo_estrutura, 6),
+            "demand_inf": round(minimo_estrutura, 6), "demand_sup": round(minimo_estrutura + .25 * av, 6),
+        }
+        varreu_baixo = l < piso and preco > piso
+        varreu_cima = h > teto and preco < teto
+        bos_buy, bos_sell = preco > teto, preco < piso
+        direcao = "buy" if m15 == h1 == "alta" else "sell" if m15 == h1 == "baixa" else "neutro"
+        if direcao == "neutro" and fvg.get("disponivel"):
+            direcao = str(fvg.get("direcao"))
+        if direcao not in ("buy", "sell"):
+            return {**vazio, "m15": m15, "h1": h1,
+                    "motivo": "M15 e H1 divergentes; sem viés estrutural."}
+        ob = _order_block_m15(dados, atr, direcao)
+        fvg_ok = bool(fvg.get("disponivel") and fvg.get("direcao") == direcao)
+        liquidez_ok = varreu_baixo if direcao == "buy" else varreu_cima
+        bos_ok = bos_buy if direcao == "buy" else bos_sell
+        rejeicao = ((preco > o and (min(o, preco) - l) >= abs(preco - o) * .5)
+                    if direcao == "buy" else
+                    (preco < o and (h - max(o, preco)) >= abs(preco - o) * .5))
+        zona = (fvg if fvg_ok else ob) or {}
+        zona_inf, zona_sup = zona.get("zona_inf"), zona.get("zona_sup")
+        em_zona = (zona_inf is not None and float(zona_inf) <= preco <= float(zona_sup))
+        itens = [
+            ("Tendência H1 e M15 alinhadas", m15 == h1 and m15 in ("alta", "baixa"), 2),
+            ("FVG M15 na direção", fvg_ok, 2),
+            ("Order block antes do deslocamento", ob is not None, 2),
+            ("Liquidez varrida e retomada", liquidez_ok, 1),
+            ("BOS no lado do viés", bos_ok, 1),
+            ("Preço dentro da zona", em_zona, 1),
+            ("Vela de rejeição fechada", rejeicao, 1),
+        ]
+        score = sum(peso for _, ok, peso in itens if ok)
+        nota = "A" if score >= 8 else "B" if score >= 6 else "C" if score >= 4 else "D"
+        noticia_risco = (noticia or {}).get("estado") == "janela_risco"
+        qualificada = bool(score >= 7 and em_zona and rejeicao and not noticia_risco)
+        if zona_inf is None or zona_sup is None:
+            return {
+                "disponivel": True, "qualificada": False, "direcao": direcao,
+                "score": score, "nota": nota, "estado": f"CONFLUÊNCIA {nota} — SEM ZONA",
+                "motivo": "Viés identificado, mas falta FVG ou order block objetivo para planejar entrada.",
+                "m15": m15, "h1": h1, "fvg": fvg, "order_block": ob,
+                "estrutura": estrutura, "bos": bos_ok, "liquidez": liquidez_ok,
+                "zona_inf": None, "zona_sup": None, "em_zona": False,
+                "checklist": [{"nome": nome, "ok": ok} for nome, ok, _ in itens],
+                "alvos": None,
+            }
+        entrada = (float(zona_inf) + float(zona_sup)) / 2 if zona_inf is not None else preco
+        sinal = 1 if direcao == "buy" else -1
+        sl_base = min(float(zona_inf), l) if direcao == "buy" else max(float(zona_sup), h)
+        sl = sl_base - sinal * .20 * av
+        risco = abs(entrada - sl)
+        tp1 = entrada + sinal * max(1.5 * risco, av)
+        tp2, tp3 = entrada + sinal * 2 * risco, entrada + sinal * 3 * risco
+        estado = (f"CONFLUÊNCIA {nota} — ZONA + REJEIÇÃO" if qualificada else
+                  f"CONFLUÊNCIA {nota} — AGUARDAR")
+        if noticia_risco:
+            motivo = "Notícia de alto impacto na janela: leitura permanece, entrada fica em espera."
+        elif not em_zona:
+            motivo = "Há estrutura, mas o preço ainda não voltou à zona; não perseguir o movimento."
+        elif not rejeicao:
+            motivo = "Preço chegou à zona; aguarde fechamento M15 rejeitando antes de decidir."
+        else:
+            motivo = "Confluências locais alinhadas. Estudo visual: confirme spread e contexto antes de operar."
+        return {
+            "disponivel": True, "qualificada": qualificada, "direcao": direcao,
+            "score": score, "nota": nota, "estado": estado, "motivo": motivo,
+            "m15": m15, "h1": h1, "fvg": fvg, "order_block": ob,
+            "estrutura": estrutura, "bos": bos_ok, "liquidez": liquidez_ok,
+            "zona_inf": round(float(zona_inf), 6) if zona_inf is not None else None,
+            "zona_sup": round(float(zona_sup), 6) if zona_sup is not None else None,
+            "em_zona": em_zona, "checklist": [{"nome": nome, "ok": ok} for nome, ok, _ in itens],
+            "alvos": {"entrada": round(entrada, 6), "sl": round(sl, 6),
+                       "tp1": round(tp1, 6), "tp2": round(tp2, 6), "tp3": round(tp3, 6),
+                       "rr": round(abs(tp1 - entrada) / risco, 2) if risco else None},
+        }
+    except (ValueError, TypeError, IndexError, KeyError):
+        return vazio
+
+
+def plano_ouro_movimento(df: pd.DataFrame, atr: pd.Series, ativo: str,
+                         noticia: dict | None = None) -> dict:
+    """Scanner M15 de continuação do ouro: tendência, FVG e rejeição fechada.
+
+    É deliberadamente um estudo em sombra. O objetivo é avisar uma estrutura
+    repetível para aferição, nunca prometer que o ouro seguirá a direção.
+    """
+    vazio = {"disponivel": False, "sinal_estudo": False,
+             "estado": "OURO — AGUARDANDO ESTRUTURA",
+             "motivo": "Exclusivo para XAUUSD M15."}
+    if ativo != "XAUUSD" or len(df) < 96 or atr.empty:
+        return vazio
+    try:
+        m15, h1 = _tendencia_ema(df["Close"]), _tendencia_h1_a_partir_m15(df)
+        fvg = detectar_fvg_m15(df, atr)
+        atr_atual = float(atr.reindex(df.index).iloc[-1])
+        if not np.isfinite(atr_atual) or atr_atual <= 0:
+            return {**vazio, "motivo": "ATR M15 indisponível."}
+        vela = df.iloc[-1]
+        abertura, maxima, minima, fechamento = (float(vela[c]) for c in ("Open", "High", "Low", "Close"))
+        direcao = "buy" if m15 == "alta" and h1 == "alta" else "sell" if m15 == "baixa" and h1 == "baixa" else "neutro"
+        esperada = "alta" if direcao == "buy" else "baixa"
+        fvg_ok = bool(fvg.get("disponivel") and fvg.get("direcao") == direcao)
+        zona_inf, zona_sup = fvg.get("zona_inf"), fvg.get("zona_sup")
+        if fvg_ok:
+            rejeicao = (
+                minima <= float(zona_sup) and fechamento > abertura and fechamento >= float(zona_sup)
+                if direcao == "buy" else
+                maxima >= float(zona_inf) and fechamento < abertura and fechamento <= float(zona_inf)
+            )
+        else:
+            rejeicao = False
+        corpo_atr = abs(fechamento - abertura) / atr_atual
+        impulso_ok = float(fvg.get("tamanho_atr") or 0) >= .15
+        noticia_estado = (noticia or {}).get("estado")
+        noticia_bruta = str((noticia or {}).get("direcao", "")).lower()
+        direcao_noticia = {"call": "buy", "buy": "buy", "put": "sell", "sell": "sell"}.get(noticia_bruta)
+        dado_publicado = noticia_estado == "resultado_publicado" and direcao_noticia in ("buy", "sell")
+        noticia_alinhada = not dado_publicado or direcao_noticia == direcao
+        checklist = [
+            {"nome": "Tendência H1 e M15 alinhadas", "ok": direcao != "neutro"},
+            {"nome": "FVG M15 na direção da tendência", "ok": fvg_ok},
+            {"nome": "Candle fechou rejeitando a zona", "ok": rejeicao},
+            {"nome": "Candle de confirmação ≥ 0,20 ATR", "ok": corpo_atr >= .20},
+            {"nome": "Dado USD confirma a direção", "ok": noticia_alinhada if dado_publicado else False},
+        ]
+        qualificada = bool(direcao != "neutro" and fvg_ok and impulso_ok and rejeicao
+                           and corpo_atr >= .20 and dado_publicado and noticia_alinhada)
+        alvos = None
+        rr = None
+        if direcao in ("buy", "sell"):
+            buffer = .15 * atr_atual
+            sl = minima - buffer if direcao == "buy" else maxima + buffer
+            risco = abs(fechamento - sl)
+            sinal = 1.0 if direcao == "buy" else -1.0
+            tp1 = fechamento + sinal * 1.5 * risco
+            passo, unidade = unidade_movimento(ativo)
+            alvos = {"entrada": round(fechamento, 3), "sl": round(sl, 3),
+                      "tp1": round(tp1, 3), "risco_pips": round(risco / passo, 1),
+                      "risco_unidade": unidade}
+            rr = 1.5
+        if noticia_estado == "janela_risco":
+            estado, motivo = "NOTÍCIA USD — AGUARDAR DADO", "O número ainda não saiu; sem actual versus forecast não existe direção objetiva para operar a favor."
+        elif dado_publicado and not noticia_alinhada:
+            estado, motivo = "NOTÍCIA USD CONTRA A ESTRUTURA", "O resultado publicado aponta para o lado oposto ao setup técnico; não há confluência."
+        elif not dado_publicado:
+            estado, motivo = "OURO — SEM DIREÇÃO DE NOTÍCIA", "O scanner técnico está visível; para sinal de notícia, espere actual versus forecast publicado."
+        elif direcao == "neutro":
+            estado, motivo = "OURO — SEM TENDÊNCIA H1/M15", "Aguardar as duas leituras apontarem para o mesmo lado."
+        elif not fvg_ok:
+            estado, motivo = "OURO — AGUARDAR FVG", "Aguardar um FVG M15 alinhado com a tendência; não perseguir impulso."
+        elif not rejeicao:
+            estado, motivo = "OURO — FVG ATIVO", "Preço precisa testar a zona e fechar com rejeição na direção da tendência."
+        elif corpo_atr < .20:
+            estado, motivo = "OURO — REJEIÇÃO FRACA", "Candle tocou a zona, mas o corpo ainda é pequeno para confirmar movimento."
+        else:
+            estado, motivo = "OURO MOVIMENTO — ESTUDO", "Tendência, FVG e rejeição M15 alinhados; registrar e observar o desfecho."
+        return {
+            "disponivel": True, "sinal_estudo": qualificada, "direcao": direcao,
+            "estado": estado, "motivo": motivo, "fvg": fvg,
+            "noticia_direcao": direcao_noticia,
+            "zona_inf": zona_inf, "zona_sup": zona_sup,
+            "corpo_atr": round(corpo_atr, 2), "rr": rr, "alvos": alvos,
+            "checklist": checklist,
+        }
+    except (ValueError, TypeError, IndexError, KeyError):
+        return vazio
 
 
 def plano_fibo(df: pd.DataFrame, atr: pd.Series, ativo: str,
@@ -312,6 +676,166 @@ def plano_fibo(df: pd.DataFrame, atr: pd.Series, ativo: str,
             "risco_unidade": unidade, "modo_entrada": "limite",
         },
     }
+
+
+def plano_tp1_curto_forex(df: pd.DataFrame, atr: pd.Series, ativo: str,
+                           noticia: dict | None = None) -> dict:
+    """Plano curto de continuação: rejeição na zona e saída no Fib 38,2%.
+
+    Recebe candles fechados, ATR, ativo e contexto de notícia; devolve o plano
+    completo ou o motivo para aguardar. Reaproveita a estrutura do Fibo, mas
+    reduz o alvo para a primeira fatia da retração. É estudo isolado: nunca
+    promove ``entrada_valida``.
+    """
+    vazio = {
+        "disponivel": False, "qualificada": False, "sinal_estudo": False,
+        "estado": "TP1 CURTO INDISPONÍVEL",
+        "motivo": "Disponível somente para Forex normal.",
+    }
+    if CLASSE.get(ativo) != "forex":
+        return vazio
+    fibo = plano_fibo(df, atr, ativo, noticia)
+    if not fibo.get("disponivel"):
+        return {**vazio, "estado": fibo.get("estado", vazio["estado"]),
+                "motivo": fibo.get("motivo", vazio["motivo"])}
+
+    direcao = fibo["direcao"]
+    preco = float(df["Close"].iloc[-1])
+    vela = df.iloc[-1]
+    atr_atual = float(atr.iloc[-1])
+    if not np.isfinite(atr_atual) or atr_atual <= 0:
+        return {**vazio, "estado": "ATR INDISPONÍVEL"}
+    margem = .15 * atr_atual
+    # É um stop tático, além do pavio de rejeição. A invalidação estrutural em
+    # 78,6% continua visível no plano Fibo, mas seria larga demais para TP1.
+    if direcao == "buy":
+        sl = float(vela["Low"]) - margem
+        tp1 = float(fibo["fib382"])
+        recompensa = tp1 - preco
+    else:
+        sl = float(vela["High"]) + margem
+        tp1 = float(fibo["fib382"])
+        recompensa = preco - tp1
+    risco = abs(preco - sl)
+    rr = recompensa / risco if risco > 0 else 0.0
+    risco_atr = risco / atr_atual
+    noticia_risco = (noticia or {}).get("estado") == "janela_risco"
+    qualificada = bool(
+        fibo.get("na_zona") and fibo.get("confirmou") and not noticia_risco
+        and recompensa > 0 and 1.2 <= rr <= 3.0 and .10 <= risco_atr <= .85
+    )
+    if noticia_risco:
+        estado, motivo = "NOTÍCIA — AGUARDAR", "Notícia relevante na janela de risco."
+    elif not fibo.get("na_zona"):
+        estado, motivo = "AGUARDAR ZONA", "Preço ainda não retornou à zona 38,2%–61,8%."
+    elif not fibo.get("confirmou"):
+        estado, motivo = "NA ZONA — ESPERAR REJEIÇÃO", "Falta candle fechado rejeitando a zona."
+    elif recompensa <= 0:
+        estado, motivo = "TP1 JÁ PASSOU", "O preço já percorreu a primeira fatia; não perseguir."
+    elif not (1.2 <= rr <= 3.0):
+        estado, motivo = "R:R CURTO FORA DA FAIXA", "TP1 não compensa o risco estrutural."
+    elif not (.10 <= risco_atr <= .85):
+        estado, motivo = "STOP FORA DO TAMANHO", "Distância até a invalidação não cabe numa operação curta."
+    else:
+        estado = f"TP1 CURTO {direcao.upper()} — ESTUDO"
+        motivo = "Zona Fibo, rejeição confirmada e saída no 38,2% da retração."
+    passo, unidade = unidade_movimento(ativo)
+    arred = lambda valor: round(float(valor), 6)
+    checklist = [
+        {"nome": "Tendência H1 e M15 alinhadas", "ok": fibo.get("h1") == fibo.get("m15")},
+        {"nome": "Preço dentro da zona 38,2%–61,8%", "ok": bool(fibo.get("na_zona"))},
+        {"nome": "Rejeição fechada a favor", "ok": bool(fibo.get("confirmou"))},
+        {"nome": "R:R curto entre 1,2 e 3,0", "ok": 1.2 <= rr <= 3.0},
+        {"nome": "Stop entre 0,10 e 0,85 ATR", "ok": .10 <= risco_atr <= .85},
+        {"nome": "Sem notícia de alto impacto", "ok": not noticia_risco},
+    ]
+    return {
+        "disponivel": True, "direcao": direcao, "estado": estado,
+        "motivo": motivo, "qualificada": qualificada,
+        "sinal_estudo": qualificada, "rr": round(rr, 2),
+        "risco_atr": round(risco_atr, 2),
+        "zona_inf": fibo["zona_inf"], "zona_sup": fibo["zona_sup"],
+        "checklist": checklist,
+        "alvos": {
+            "entrada": arred(preco), "sl": arred(sl), "tp1": arred(tp1),
+            "risco_pips": round(risco / passo, 1), "risco_unidade": unidade,
+            "modo_entrada": "market_next_open",
+        },
+    }
+
+
+class AnalistaGraficoGroq:
+    """Uma interface: solicita uma leitura assíncrona por candle qualificado.
+
+    Mantém rate limit, serialização do gráfico e falhas da rede internos. O
+    Monitor recebe somente o parecer pronto por callback, sem travar a coleta
+    de candles nem tratar a resposta como autorização de ordem.
+    """
+
+    def __init__(self, intervalo_s: int = 900):
+        self._intervalo_s = intervalo_s
+        self._ultima: dict[str, float] = {}
+        self._chave_candle: dict[str, str] = {}
+        self._andamento: set[str] = set()
+        self._lock = threading.Lock()
+        self._pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="groq-grafico")
+
+    @staticmethod
+    def _resumir_candles(df: pd.DataFrame) -> list[dict]:
+        """Últimas 12 velas fechadas: suficientes para contexto, sem prompt gigante."""
+        saida = []
+        for _, vela in df.tail(12).iterrows():
+            saida.append({
+                "o": round(float(vela["Open"]), 6), "h": round(float(vela["High"]), 6),
+                "l": round(float(vela["Low"]), 6), "c": round(float(vela["Close"]), 6),
+            })
+        return saida
+
+    def solicitar(self, ativo: str, df: pd.DataFrame, plano: dict, noticia: dict,
+                  callback) -> None:
+        if not os.getenv("GROQ_API_KEY", "").strip():
+            callback(ativo, {"status": "DESATIVADA", "veredicto": "AGUARDAR",
+                              "motivo": "Configure GROQ_API_KEY para ativar.", "fonte": "GROQ"})
+            return
+        vela = str(df.index[-1])
+        agora = time.time()
+        with self._lock:
+            if (ativo in self._andamento or self._chave_candle.get(ativo) == vela
+                    or agora - self._ultima.get(ativo, 0) < self._intervalo_s):
+                return
+            self._andamento.add(ativo)
+            self._ultima[ativo] = agora
+            self._chave_candle[ativo] = vela
+        callback(ativo, {"status": "ANALISANDO", "veredicto": "AGUARDAR",
+                         "motivo": "Groq lendo o candle fechado e a zona.", "fonte": "GROQ",
+                         "vela": vela})
+        contexto = {
+            "ativo": ativo, "timeframe": "M15", "vela": vela,
+            "candles_fechados": self._resumir_candles(df),
+            "plano": {
+                "qualificada": bool(plano.get("qualificada")),
+                "direcao": str(plano.get("direcao", "")).upper(),
+                "zona": [plano.get("zona_inf"), plano.get("zona_sup")],
+                "entrada": (plano.get("alvos") or {}).get("entrada"),
+                "sl": (plano.get("alvos") or {}).get("sl"),
+                "tp1": (plano.get("alvos") or {}).get("tp1"),
+                "rr": plano.get("rr"), "risco_atr": plano.get("risco_atr"),
+            },
+            "noticia": {"estado": noticia.get("estado"), "texto": noticia.get("texto")},
+        }
+        self._pool.submit(self._executar, ativo, vela, contexto, callback)
+
+    def _executar(self, ativo: str, vela: str, contexto: dict, callback) -> None:
+        try:
+            resposta = segunda_opiniao_grafico(contexto)
+            callback(ativo, resposta or {
+                "status": "INDISPONÍVEL", "veredicto": "AGUARDAR",
+                "motivo": "Groq não respondeu; use somente a leitura mecânica.",
+                "fonte": "GROQ", "vela": vela,
+            })
+        finally:
+            with self._lock:
+                self._andamento.discard(ativo)
 
 
 def plano_varredura_liquidez(df: pd.DataFrame, atr: pd.Series, ativo: str,
@@ -723,6 +1247,42 @@ def contexto_noticia(calendario: CalendarioEconomico | None, ativo: str,
         "estado": "janela_risco" if aviso and not aviso.startswith("próximo:") else "sem_risco",
         "texto": aviso or "Sem evento relevante na janela de risco.",
     }
+
+
+def noticias_do_dia(calendario: CalendarioEconomico | None, ativo: str,
+                    agora: datetime) -> list[dict]:
+    """Agenda serializável do dia para o gráfico, incluindo o sentido pós-dado.
+
+    Antes da divulgação, a direção é condicional (acima/abaixo do previsto).
+    Após existir actual, a direção vem de ``resultado_direcao`` — não da IA.
+    """
+    if calendario is None:
+        return []
+    try:
+        saida = []
+        for evento in calendario.eventos_do_ativo(ativo):
+            if evento.quando.date() != agora.date():
+                continue
+            resultado = evento.resultado_direcao(ativo) if evento.actual is not None else None
+            sugestao = evento.sugestao(ativo) if evento.actual is None else None
+            if resultado:
+                uso = f"Dado publicado: {resultado['direcao']} somente após confirmação M15."
+                direcao = resultado["direcao"]
+            elif sugestao:
+                uso = (f"Se acima do previsto: {sugestao['acima_do_forecast']}; "
+                       f"se abaixo: {sugestao['abaixo_do_forecast']}. Espere o actual.")
+                direcao = None
+            else:
+                uso, direcao = "Sem regra objetiva para direção; espere reação M15.", None
+            saida.append({
+                "titulo": evento.titulo, "moeda": evento.moeda, "impacto": evento.impacto,
+                "quando": evento.quando.isoformat(), "quando_ts": int(evento.quando.timestamp()),
+                "actual": evento.actual, "forecast": evento.forecast, "previous": evento.previous,
+                "direcao": direcao, "uso": uso,
+            })
+        return sorted(saida, key=lambda item: item["quando_ts"])
+    except (AttributeError, KeyError, TypeError, ValueError):
+        return []
 
 
 def dossie_candle(df: pd.DataFrame, atr: pd.Series, ativo: str, noticia: dict) -> dict:
@@ -1242,6 +1802,13 @@ class Estado:
         with self._lock:
             self.dados[ativo] = {"disponivel": True, **info}
 
+    def atualizar_ia(self, ativo: str, parecer: dict) -> None:
+        """Atualiza somente a segunda opinião sem apagar a leitura do ativo."""
+        with self._lock:
+            atual = dict(self.dados.get(ativo) or self._ativo_aguardando(ativo))
+            atual["ia_groq"] = dict(parecer)
+            self.dados[ativo] = atual
+
     def registrar_sinal(self, ativo: str, vela: str, info: dict,
                         tipo: str = "falso_rompimento") -> bool:
         """Salva um sinal novo e informa se ele foi realmente persistido."""
@@ -1273,6 +1840,7 @@ class Estado:
                 "alvos_estudo": info.get("alvos_estudo"),
                 "dossie": info.get("dossie", {}),
                 "fibo": info.get("fibo"),
+                "ouro_movimento": info.get("ouro_movimento"),
                 "fluxo": info.get("fluxo"),
                 "orb": info.get("orb"),
                 "bof": info.get("bof"),
@@ -1570,6 +2138,10 @@ class Estado:
         """Amostra separada: Fibo não pode contaminar o sinal já validado."""
         return self._amostra_por_tipo("fibo_m15")
 
+    def _amostra_tp1_curto(self) -> dict:
+        """TP1 curto é medido isoladamente antes de qualquer recomendação."""
+        return self._amostra_por_tipo("tp1_curto_forex")
+
     def _amostra_fluxo(self) -> dict:
         """Amostra isolada da leitura de fluxo; nunca vira entrada validada."""
         return self._amostra_por_tipo("fluxo_m15")
@@ -1700,6 +2272,7 @@ class Estado:
                        "ativos": dict(self.dados),
                        "amostraEntrada": self._amostra_entrada_validada(),
                        "amostraFibo": self._amostra_fibo(),
+                       "amostraTp1Curto": self._amostra_tp1_curto(),
                        "amostraFluxo": self._amostra_fluxo(),
                        "amostraOrb": self._amostra_orb(),
                        "amostraLiquidez": self._amostra_liquidez(),
@@ -1752,11 +2325,16 @@ class Estado:
             pass
 
 
-def loop(api, cfg, estado: Estado, calendario: CalendarioEconomico | None = None) -> None:
+def loop(api, cfg, estado: Estado, calendario: CalendarioEconomico | None = None,
+         analista_groq: AnalistaGraficoGroq | None = None) -> None:
     hist: dict[str, pd.DataFrame] = {}
     cfg_bof = replace(cfg, timeframe_segundos=TF_BOF)
     hist_bof: dict[str, pd.DataFrame] = {}
     ultimo_bucket_bof: dict[str, int] = {}
+
+    def receber_ia(ativo: str, parecer: dict) -> None:
+        estado.atualizar_ia(ativo, parecer)
+        estado.salvar()
     for a in ATIVOS:
         df = backtest.carregar_cache(cfg, a)
         if df is None or len(df) < 600:
@@ -1772,6 +2350,7 @@ def loop(api, cfg, estado: Estado, calendario: CalendarioEconomico | None = None
                 estado.salvar()
                 print(f"  {a}: indisponível — {erro}")
                 continue
+        df = sanitizar_candles_m15(df)
         if df is not None and len(df) >= 600:
             hist[a] = df
             print(f"  {a}: {len(df)} velas")
@@ -1787,6 +2366,9 @@ def loop(api, cfg, estado: Estado, calendario: CalendarioEconomico | None = None
             try:
                 novo = backtest.baixar_historico(api, cfg, a, 60)
                 if novo is None or novo.empty:
+                    continue
+                novo = sanitizar_candles_m15(novo)
+                if novo.empty:
                     continue
                 novo_grafico = novo.copy()
                 novo = novo.iloc[:-1]
@@ -1834,7 +2416,12 @@ def loop(api, cfg, estado: Estado, calendario: CalendarioEconomico | None = None
                 av = float(atr.iloc[-1]) if np.isfinite(atr.iloc[-1]) else None
                 agora = datetime.now(timezone.utc)
                 noticia = contexto_noticia(calendario, a, agora)
+                noticias_dia = noticias_do_dia(calendario, a, agora)
                 fibo = plano_fibo(df, atr, a, noticia)
+                fvg = detectar_fvg_m15(df, atr)
+                confluencia = plano_confluencia_local(df, atr, a, noticia)
+                ouro_movimento = plano_ouro_movimento(df, atr, a, noticia)
+                tp1_curto = plano_tp1_curto_forex(df, atr, a, noticia)
                 fluxo = leitura_fluxo_sessao(df, atr, a)
                 orb = plano_orb_sessao(df, atr, a)
                 liquidez = plano_varredura_liquidez(df, atr, a, noticia)
@@ -1903,6 +2490,11 @@ def loop(api, cfg, estado: Estado, calendario: CalendarioEconomico | None = None
                 janela_validada = janela_validada_para(CLASSE[a], int(df.index[-1].hour))
                 leitura_entrada = decisao_entrada(acum, rompeu_piso, janela_validada)
 
+                ia_anterior = estado.dados.get(a, {}).get("ia_groq")
+                ia_atual = ia_anterior if tp1_curto.get("qualificada") else {
+                    "status": "AGUARDAR", "veredicto": "AGUARDAR", "fonte": "GROQ",
+                    "motivo": "A IA só analisa quando zona, rejeição e R:R curto passam no filtro.",
+                }
                 estado.atualiza(a, {
                     "classe": CLASSE[a],
                     "preco": round(preco, 6),
@@ -1939,19 +2531,32 @@ def loop(api, cfg, estado: Estado, calendario: CalendarioEconomico | None = None
                     "janela_boa": janela_validada,
                     "hora": int(df.index[-1].hour),
                     "vela": str(df.index[-1]),
+                    "noticias_dia": noticias_dia,
                     "dossie": dossie_candle(df, atr, a, noticia),
                     "fibo": fibo,
+                    "fvg": fvg,
+                    "confluencia": confluencia,
+                    "ouro_movimento": ouro_movimento,
+                    "tp1_curto": tp1_curto,
+                    "ia_groq": ia_atual,
                     "fluxo": fluxo,
                     "orb": orb,
                     "liquidez": liquidez,
                     "bof": bof,
                 })
+                if analista_groq is not None and tp1_curto.get("qualificada"):
+                    analista_groq.solicitar(a, df, tp1_curto, noticia, receber_ia)
                 # A análise continua usando somente candles fechados, mas o
                 # desenho recebe também a vela atual para se mover como na IQ.
-                atual = novo_grafico.tail(1)
-                df_grafico = pd.concat([
-                    df[~df.index.isin(atual.index)], atual
-                ]).sort_index().tail(300)
+                atual = candle_atual_para_grafico(df, novo_grafico)
+                if atual is None:
+                    # Mantém os fechados — são a fonte da análise — quando o
+                    # tick aberto não corresponde a uma vela M15 confiável.
+                    df_grafico = df.tail(300)
+                else:
+                    df_grafico = pd.concat([
+                        df[~df.index.isin(atual.index)], atual
+                    ]).sort_index().tail(300)
                 estado.salvar_candles(a, df_grafico, regressao(df_grafico))
                 estado.resolver(a, df)
                 if df_bof is not None:
@@ -1986,6 +2591,37 @@ def loop(api, cfg, estado: Estado, calendario: CalendarioEconomico | None = None
                     if estado.registrar_sinal(a, str(df.index[-1]), estudo_fibo, tipo="fibo_m15"):
                         print(f"[FIBO — ESTUDO] {a} {fibo['direcao'].upper()} @ {df.index[-1]} "
                               f"RR={fibo['rr']}")
+                if tp1_curto.get("sinal_estudo"):
+                    estudo_curto = {
+                        **estado.dados[a],
+                        "sinal": True, "direcao": tp1_curto["direcao"],
+                        "entrada_valida": False,
+                        "estado_entrada": "TP1 CURTO — ESTUDO",
+                        "motivo_entrada": tp1_curto["motivo"],
+                        "checklist": tp1_curto["checklist"],
+                        "alvos": None, "alvos_estudo": tp1_curto["alvos"],
+                        "horizonte_velas": 4, "horizonte_longo_velas": 8,
+                    }
+                    if estado.registrar_sinal(
+                        a, str(df.index[-1]), estudo_curto, tipo="tp1_curto_forex"
+                    ):
+                        print(f"[TP1 CURTO — ESTUDO] {a} {tp1_curto['direcao'].upper()} "
+                              f"@ {df.index[-1]} RR={tp1_curto['rr']}")
+                if ouro_movimento.get("sinal_estudo"):
+                    estudo_ouro = {
+                        **estado.dados[a], "sinal": True,
+                        "direcao": ouro_movimento["direcao"], "entrada_valida": False,
+                        "estado_entrada": "OURO MOVIMENTO — ESTUDO",
+                        "motivo_entrada": ouro_movimento["motivo"],
+                        "checklist": ouro_movimento["checklist"],
+                        "alvos": None, "alvos_estudo": ouro_movimento["alvos"],
+                        "horizonte_velas": 4, "horizonte_longo_velas": 8,
+                        "ouro_movimento": ouro_movimento,
+                    }
+                    if estado.registrar_sinal(a, str(df.index[-1]), estudo_ouro,
+                                              tipo="ouro_movimento_m15"):
+                        print(f"[OURO MOVIMENTO — ESTUDO] {a} {ouro_movimento['direcao'].upper()} "
+                              f"@ {df.index[-1]} RR={ouro_movimento['rr']}")
                 if fluxo.get("sinal_estudo"):
                     estudo_fluxo = {
                         **estado.dados[a],
@@ -2113,7 +2749,9 @@ tr:hover{background:#16203450;cursor:pointer}
 .bar{display:inline-block;width:60px;height:7px;background:#1e293b;border-radius:3px;
   position:relative;vertical-align:middle}
 .bar>i{position:absolute;top:-2px;width:3px;height:11px;background:#38bdf8;border-radius:1px}
-#cv{width:100%;height:58vh;min-height:340px;background:#0d1526;border-radius:.4rem;margin:.4rem 0}
+#cv{width:100%;height:58vh;min-height:340px;background:#0d1526;border-radius:.4rem;margin:.4rem 0;position:relative;overflow:hidden}
+#chart-hud{position:absolute;left:.7rem;top:.7rem;z-index:3;pointer-events:none;width:152px;background:#101a2ce8;border:1px solid #334155;border-radius:.35rem;font-size:.61rem;color:#cbd5e1;box-shadow:0 5px 18px #0008}
+#chart-hud b{display:block;padding:.3rem .4rem;background:#17233a;color:#e2e8f0;font-size:.64rem}.hud-linha{display:flex;justify-content:space-between;gap:.4rem;padding:.16rem .4rem;border-top:1px solid #233149}.hud-linha span:last-child{font-weight:700}.hud-ok{color:#4ade80}.hud-wait{color:#fbbf24}.hud-no{color:#f87171}
 #cv-titulo{color:#94a3b8;font-size:.7rem;margin:.3rem 0 0}
 #marc-barra{display:flex;gap:.3rem;align-items:center;margin:.35rem 0}
 .btn-marc{background:#16233a;border:1px solid #1e293b;color:#94a3b8;border-radius:.25rem;font-size:.68rem;padding:.15rem .5rem;cursor:pointer}
@@ -2147,6 +2785,10 @@ tr:hover{background:#16203450;cursor:pointer}
 .dossie-aviso{color:#fbbf24}.dossie-win{color:#4ade80}.dossie-loss{color:#f87171}
 .fibo-zona{color:#c4b5fd;border-color:#6d28d9;background:#251145}
 .fibo-card{border-left-color:#8b5cf6}.fibo-card.ok{border-left-color:#22c55e}
+.fvg-card{border-left-color:#14b8a6}.fvg-card.ok{border-left-color:#22c55e}
+.conflu-card{border-left-color:#a78bfa}.conflu-card.ok{border-left-color:#22c55e}
+.ouro-card{border-left-color:#fbbf24}.ouro-card.ok{border-left-color:#22c55e}
+.curto-card{border-left-color:#f97316}.curto-card.ok{border-left-color:#22c55e}
 .orb-card{border-left-color:#f59e0b}.orb-card.ok{border-left-color:#22c55e}
 .bof-card{border-left-color:#06b6d4}.bof-card.ok{border-left-color:#22c55e}
 .nav{display:flex;gap:.35rem;position:sticky;top:0;z-index:5;background:#0b1220;padding:.35rem 0}
@@ -2208,6 +2850,7 @@ Testado em 01/09/2026: operar a favor do canal (51.14%) rende o mesmo que contra
 <div id="marc-barra">
   <button class="btn-marc" id="btn-marc-fibo" onclick="marcarFibo()" title="Clique na origem e depois no extremo">✎ Fibo</button>
   <button class="btn-marc" id="btn-marc-linha" onclick="marcarLinha()" title="Um clique no preço">✎ Linha</button>
+  <button class="btn-marc" id="btn-niveis" onclick="alternarNiveis()">☷ Essenciais</button>
   <button class="btn-marc" id="btn-marc-limpar" onclick="limparMarcacoes()" title="Apagar marcações deste ativo">✕</button>
   <span id="marc-dica"></span>
 </div>
@@ -2217,6 +2860,9 @@ Testado em 01/09/2026: operar a favor do canal (51.14%) rende o mesmo que contra
 
 <section class="view" data-view="estudos">
 <div class="amostra" id="amostra">Amostra validada: carregando…</div>
+
+<div class="sec">TP1 CURTO FOREX — ZONA + REJEIÇÃO — ESTUDO SOMBRA</div>
+<div id="tp1-curto"><span class="empty">Selecione um par Forex.</span></div>
 
 <div class="sec">LEITURA DE FLUXO E SESSÃO — ESTUDO</div>
 <div id="fluxo"><span class="empty">Selecione um ativo.</span></div>
@@ -2230,6 +2876,12 @@ Testado em 01/09/2026: operar a favor do canal (51.14%) rende o mesmo que contra
 <div class="sec">BOF M30→M5 FOREX + OURO — ESTUDO SOMBRA</div>
 <div id="bof"><span class="empty">Selecione um par Forex ou XAUUSD.</span></div>
 
+<div class="sec">FVG M15 — CONFLUÊNCIA</div>
+<div id="fvg"><span class="empty">Selecione um ativo.</span></div>
+
+<div class="sec">OURO — MOVIMENTO A FAVOR M15</div>
+<div id="ouro-movimento"><span class="empty">Selecione XAUUSD.</span></div>
+
 <div class="sec">PLANO FIBO M15 — ESTUDO</div>
 <div id="fibo"><span class="empty">Selecione um ativo.</span></div>
 </section>
@@ -2237,6 +2889,13 @@ Testado em 01/09/2026: operar a favor do canal (51.14%) rende o mesmo que contra
 <section class="view" data-view="agora">
 
 <div id="decisao-principal"></div>
+
+<div class="sec">IA DO GRÁFICO — GROQ</div>
+<button class="btn-marc" type="button" onclick="lerGroqSelecionado()">🤖 Analisar momento + TP curto</button>
+<div id="ia-grafico"><span class="empty">Aguardando leitura mecânica.</span></div>
+
+<div class="sec">CONFLUÊNCIA LOCAL — ESTRUTURA, FVG, OB E LIQUIDEZ</div>
+<div id="confluencia"><span class="empty">Selecione um ativo.</span></div>
 
 <div class="sec">SINAIS ATIVOS</div>
 <div id="sinais"></div>
@@ -2266,11 +2925,14 @@ Testado em 01/09/2026: operar a favor do canal (51.14%) rende o mesmo que contra
 
 <script>
 let D={}, sel=null, dossieSel=null;
+let iaManualGrafico={}, candlesGroq=[];
+let niveisDetalhados=localStorage.getItem('monitorNiveisDetalhados')==='1';
 let visao=localStorage.getItem('monitorMercadoVisao')||'agora';
 let ultimaChaveAlerta='';
 let somMonitorAtivo=localStorage.getItem('monitorMercadoSom')==='1';
 let ultimoEventoPossivel='';
 let eventosSonorosInicializados=false;
+let dadosMonitorAoVivo=true;
 function mudarVisao(nome){
   visao=nome; localStorage.setItem('monitorMercadoVisao',nome);
   document.querySelectorAll('.view').forEach(e=>e.classList.toggle('on',e.dataset.view===nome));
@@ -2464,6 +3126,7 @@ function alternarSomMonitor(){
 // lista escrita na mao: assim, se o Fibo regredir ele se cala sozinho, e se o
 // falso rompimento acumular amostra ele passa a avisar sem eu tocar em nada.
 const AMOSTRA_DO_ESTUDO={fibo_m15:'amostraFibo', fluxo_m15:'amostraFluxo',
+  tp1_curto_forex:'amostraTp1Curto',
   orb_fvg_m15:'amostraOrb', liquidity_sweep_v2:'amostraLiquidez',
   bof_m30_m5:'amostraBof', rompimento_reteste:'amostraRompimentoReteste'};
 // Janela por peso: um aviso fraco nunca pode engolir um forte no rate limit.
@@ -2479,7 +3142,7 @@ function pesoDoEstudo(tipo){
 }
 
 function bip(teste=false, peso='forte'){
-  if(!somMonitorAtivo && !teste) return;
+  if((!somMonitorAtivo || !dadosMonitorAoVivo) && !teste) return;
   if(peso==='mudo' && !teste) return;
   if(!teste){
     // Janelas separadas, e a fraca e mais longa para nao virar ruido.
@@ -2506,6 +3169,7 @@ function bip(teste=false, peso='forte'){
 }
 
 function alertarNovoEvento(){
+  if(!dadosMonitorAoVivo) return;
   const ativos=(D.historico||[]).filter(h=>AMOSTRA_DO_ESTUDO[h.tipo]
     &&(h.simulacao||{}).desfecho==='aguardando');
   const recente=ativos[ativos.length-1];
@@ -2539,6 +3203,56 @@ function cardSinal(a,x){
     </div><div class="nota">TP1: 40.4% de acerto, EV +0.41R. TP2: 24.6%, EV +0.48R. Medido na janela validada.</div>`
     : `<div class="nota">NÃO ABRIR operação. ${x.motivo_entrada||'Sinal salvo apenas para estudo.'} Alvos permanecem ocultos para não sugerir uma entrada fora do teste.</div>`}
   </div>`;
+}
+
+function cardTp1Curto(a,x){
+  const c=x.tp1_curto||{}, v=c.alvos||{};
+  const ia=x.ia_groq||{};
+  if(!c.disponivel || !c.qualificada) return '';
+  const dir=c.direcao==='sell'?'SELL':'BUY';
+  return `<div class="card curto-card">
+    <div style="display:flex;justify-content:space-between;align-items:center"><b>${a} ${dir} — TP1 CURTO</b><span class="estado study">ESTUDO SOMBRA</span></div>
+    ${checklist(c)}
+    <div class="alvos"><div><label>entrada após fechamento</label><span>${v.entrada}</span></div><div><label>stop tático</label><span class="dn">${v.sl}</span></div><div><label>TP1 38,2%</label><span class="up">${v.tp1}</span></div><div><label>R:R</label><span>${c.rr}x</span></div></div>
+    <div class="nota">${c.motivo} IA: ${ia.veredicto||'AGUARDAR'} · ${ia.motivo||'aguardando análise.'} Registrado e simulado por 1h; ainda não é entrada validada.</div>
+  </div>`;
+}
+
+function renderIaGrafico(){
+  const el=document.getElementById('ia-grafico');
+  const x=(D.ativos||{})[sel]||{}, ia=iaManualGrafico[sel]||x.ia_groq||{};
+  const c=x.classe==='forex'?(x.tp1_curto||{}):(x.classe==='ouro'&&x.ouro_movimento?.sinal_estudo?(x.ouro_movimento||{}):(x.fibo||{}));
+  const planoNome=x.classe==='forex'?'TP1 curto':x.classe==='ouro'?'Ouro movimento':'Fibo M15';
+  const v=ia.veredicto||'AGUARDAR';
+  const texto={BUY:'BUY / CALL',SELL:'SELL / PUT',AGUARDAR:'AGUARDAR'}[v]||'AGUARDAR';
+  const cor=v==='BUY'?'up':v==='SELL'?'dn':'morno';
+  const status=ia.status||'AGUARDAR';
+  const aviso=v==='AGUARDAR' ? 'Não é sugestão de entrada.' : 'Confirme spread e preço na corretora; a IA não executa ordem.';
+  el.innerHTML=`<div class="card ${v==='AGUARDAR'?'nojan':'okjan'}"><b class="${cor}">${texto}</b> <span class="estado study">${status}</span>
+    <div class="alvos"><div><label>confiança</label><span>${ia.confianca||'—'}</span></div><div><label>plano técnico</label><span>${(c.qualificada||c.sinal_estudo)?planoNome+' qualificado':'não qualificado'}</span></div><div><label>TP curto aprovado</label><span class="up">${ia.alvo_codigo==='TP1'?ia.alvo_curto:'—'}</span></div><div><label>fonte</label><span>${ia.fonte||'GROQ'}</span></div></div>
+    <div class="nota">${ia.motivo||'Clique em Ler gráfico selecionado para consultar o Groq.'} ${aviso}</div></div>`;
+}
+
+async function lerGroqSelecionado(){
+  const x=(D.ativos||{})[sel]||{};
+  iaManualGrafico[sel]={status:'ANALISANDO',veredicto:'AGUARDAR',fonte:'GROQ',motivo:'Lendo tendência, zona, candles fechados e TP curto calculado.'};
+  renderIaGrafico();
+  // Forex usa TP1 curto; ouro prioriza o scanner próprio quando qualificado.
+  const p=x.classe==='forex'?(x.tp1_curto||{}):(x.classe==='ouro'&&x.ouro_movimento?.sinal_estudo?(x.ouro_movimento||{}):(x.fibo||{})), a=p.alvos||{};
+  try{
+    if(!candlesGroq.length){
+      const r=await fetch('mkt_'+sel+'.json?t='+Date.now());
+      const j=await r.json(); candlesGroq=Array.isArray(j.candles)?j.candles:[];
+    }
+    const f=x.fibo||{}, g=x.fvg||{};
+    const contexto={ativo:sel,classe:x.classe||'',timeframe:'M15',vela:x.vela||'',candles_fechados:candlesGroq.slice(-12).map(k=>({o:k.o,h:k.h,l:k.l,c:k.c})),mercado:{preco:x.preco,tendencia_m15:f.m15||'—',tendencia_h1:f.h1||'—',fvg:g.disponivel?{direcao:g.direcao,zona:[g.zona_inf,g.zona_sup],em_zona:g.em_zona}:null},plano:{qualificada:Boolean(p.qualificada||p.sinal_estudo),direcao:(p.direcao||'').toUpperCase(),zona:[p.zona_inf,p.zona_sup],entrada:a.entrada,sl:a.sl,tp1:a.tp1,rr:p.rr,risco_atr:p.risco_atr},noticia:{estado:(x.noticia||{}).estado,texto:(x.noticia||{}).texto}};
+    const r=await fetch('/opiniao_groq_grafico',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(contexto)});
+    if(!r.ok) throw new Error('HTTP '+r.status);
+    iaManualGrafico[sel]=await r.json();
+  }catch(e){
+    iaManualGrafico[sel]={status:'INDISPONÍVEL',veredicto:'AGUARDAR',fonte:'GROQ',motivo:'Falha ao consultar Groq: '+e.name};
+  }
+  renderIaGrafico();
 }
 
 function maturidadeBadge(x){
@@ -2580,6 +3294,7 @@ function renderAmostra(){
   const el=document.getElementById('amostra'); if(!el) return;
   el.innerHTML=
     linhaEstudo('Entradas válidas (falso rompimento)',D.amostraEntrada||{})+
+    linhaEstudo('TP1 curto Forex — zona + rejeição',D.amostraTp1Curto||{})+
     linhaEstudo('Fibo M15 — estudo',D.amostraFibo||{})+
     linhaEstudo('Fluxo de sessão — estudo',D.amostraFluxo||{})+
     linhaEstudo('ORB/FVG M15 — estudo sombra',D.amostraOrb||{})+
@@ -2690,6 +3405,59 @@ function renderBof(){
   </div>`;
 }
 
+function renderFvg(){
+  const el=document.getElementById('fvg');
+  const x=(D.ativos||{})[sel]||{}, g=x.fvg||{};
+  if(!g.disponivel){
+    el.innerHTML=`<div class="card fvg-card"><b>${g.estado||'SEM FVG ATIVO'}</b><div class="nota">${g.motivo||'Nenhuma zona de desequilíbrio M15 relevante agora.'}</div></div>`;
+    return;
+  }
+  const dir=g.direcao==='sell'?'VENDA':'COMPRA';
+  const cor=g.direcao==='sell'?'dn':'up';
+  el.innerHTML=`<div class="card fvg-card ${g.em_zona?'okjan ok':'nojan'}">
+    <div style="display:flex;justify-content:space-between;align-items:center"><b>${sel} — ${dir}</b><span class="estado ${g.em_zona?'study':'wait'}">${g.estado}</span></div>
+    <div class="alvos"><div><label>zona FVG</label><span class="${cor}">${g.zona_inf} — ${g.zona_sup}</span></div><div><label>tamanho</label><span>${g.tamanho_atr} ATR</span></div><div><label>distância</label><span>${g.distancia_atr} ATR</span></div></div>
+    <div class="nota">${g.motivo} FVG não é entrada isolada: use apenas junto com tendência, zona e rejeição fechada.</div>
+  </div>`;
+}
+
+function renderConfluencia(){
+  const el=document.getElementById('confluencia');
+  const x=(D.ativos||{})[sel]||{}, c=x.confluencia||{}, a=c.alvos||{};
+  if(!c.disponivel){
+    el.innerHTML=`<div class="card conflu-card"><b>${c.estado||'AGUARDANDO ESTRUTURA'}</b><div class="nota">${c.motivo||'Aguardando candles M15.'}</div></div>`;
+    return;
+  }
+  const dir=c.direcao==='sell'?'VENDA':'COMPRA';
+  el.innerHTML=`<div class="card conflu-card ${c.qualificada?'okjan ok':'nojan'}">
+    <div style="display:flex;justify-content:space-between;align-items:center"><b>${sel} — ${dir}</b><span class="estado ${c.qualificada?'go':'study'}">${c.estado} · ${c.score||0}/10</span></div>
+    ${checklist(c)}
+    <div class="alvos"><div><label>viés M15 / H1</label><span>${c.m15||'—'} / ${c.h1||'—'}</span></div><div><label>zona SMC</label><span class="fibo-zona">${c.zona_inf??'—'} — ${c.zona_sup??'—'}</span></div><div><label>entrada no meio da zona</label><span>${a.entrada??'—'}</span></div><div><label>invalidação</label><span class="dn">${a.sl??'—'}</span></div><div><label>TP1 / TP2 / TP3</label><span class="up">${a.tp1??'—'} · ${a.tp2??'—'} · ${a.tp3??'—'}</span></div><div><label>R:R TP1</label><span>${a.rr??'—'}x</span></div></div>
+    <div class="nota">${c.motivo} Leitura local em estudo: não cria sinal validado nem envia ordem.</div>
+  </div>`;
+}
+
+function renderOuroMovimento(){
+  const el=document.getElementById('ouro-movimento');
+  const x=(D.ativos||{})[sel]||{}, o=x.ouro_movimento||{}, a=o.alvos||{}, noticias=x.noticias_dia||[];
+  if(x.classe!=='ouro'){
+    el.innerHTML='<div class="card ouro-card"><b>EXCLUSIVO XAUUSD</b><div class="nota">Este scanner procura continuação com tendência, FVG e candle de rejeição no ouro.</div></div>';
+    return;
+  }
+  if(!o.disponivel){
+    el.innerHTML=`<div class="card ouro-card"><b>${o.estado||'AGUARDANDO'}</b><div class="nota">${o.motivo||'Aguardando candles M15.'}</div></div>`;
+    return;
+  }
+  const dir=o.direcao==='sell'?'VENDA':o.direcao==='buy'?'COMPRA':'—';
+  const agenda=noticias.length?`<div class="nota" style="margin-top:.55rem"><b>NOTÍCIAS USD HOJE</b>${noticias.map(n=>`<br>• ${FMT_HORA_BRT.format(new Date(Number(n.quando_ts)*1000))} · ${n.impacto} ${n.moeda} — ${n.titulo}<br><span style="color:#94a3b8">${n.actual!=null?'actual '+n.actual+' · previsto '+(n.forecast??'—'):'programada'} · ${n.uso}</span>`).join('')}</div>`:'<div class="nota" style="margin-top:.55rem">Sem notícia relevante do ativo no calendário de hoje.</div>';
+  el.innerHTML=`<div class="card ouro-card ${o.sinal_estudo?'okjan ok':'nojan'}">
+    <div style="display:flex;justify-content:space-between;align-items:center"><b>XAUUSD — ${dir}</b><span class="estado ${o.sinal_estudo?'study':'wait'}">${o.estado}</span></div>
+    ${checklist(o)}
+    <div class="alvos"><div><label>zona FVG</label><span class="fibo-zona">${o.zona_inf??'—'} — ${o.zona_sup??'—'}</span></div><div><label>corpo confirmação</label><span>${o.corpo_atr??'—'} ATR</span></div><div><label>entrada após fechamento</label><span>${a.entrada??'—'}</span></div><div><label>SL técnico</label><span class="dn">${a.sl??'—'}</span></div><div><label>TP1</label><span class="up">${a.tp1??'—'}</span></div></div>
+    <div class="nota">${o.motivo} Estudo em sombra: o Monitor registra o resultado, mas não abre ordem.</div>${agenda}
+  </div>`;
+}
+
 function renderFibo(){
   const el=document.getElementById('fibo');
   const x=(D.ativos||{})[sel]||{}, f=x.fibo||{};
@@ -2716,26 +3484,55 @@ function renderFibo(){
   </div>`;
 }
 
+function renderTp1Curto(){
+  const el=document.getElementById('tp1-curto');
+  const x=(D.ativos||{})[sel]||{}, c=x.tp1_curto||{}, a=c.alvos||{};
+  if(x.classe!=='forex'){
+    el.innerHTML='<div class="card curto-card"><b>FORA DO ESTUDO</b><div class="nota">TP1 curto foi desenhado apenas para Forex normal; cripto e ouro seguem seus próprios ritmos.</div></div>';
+    return;
+  }
+  if(!c.disponivel){
+    el.innerHTML=`<div class="card curto-card"><b>${c.estado||'AGUARDANDO'}</b><div class="nota">${c.motivo||'Aguardando candles M15.'}</div></div>`;
+    return;
+  }
+  const dir=c.direcao==='sell'?'VENDA':'COMPRA';
+  el.innerHTML=`<div class="card curto-card ${c.qualificada?'okjan ok':'nojan'}">
+    <div style="display:flex;justify-content:space-between;align-items:center"><b>${sel} — ${dir}</b><span class="estado ${c.qualificada?'go':'study'}">${c.estado}</span></div>
+    ${checklist(c)}
+    <div class="alvos"><div><label>zona</label><span class="fibo-zona">${c.zona_inf} — ${c.zona_sup}</span></div><div><label>entrada após fechamento</label><span>${a.entrada??'—'}</span></div><div><label>stop tático</label><span class="dn">${a.sl??'—'}</span></div><div><label>TP1 38,2%</label><span class="up">${a.tp1??'—'}</span></div><div><label>R:R</label><span>${c.rr??'—'}x</span></div><div><label>risco</label><span>${a.risco_pips??'—'} ${a.risco_unidade||'pips'} · ${c.risco_atr??'—'} ATR</span></div></div>
+    <div class="nota">${c.motivo} Janela de aferição: 4 velas M15 (1h). Não abre posição.</div>
+  </div>`;
+}
+
 function renderDecisaoPrincipal(){
   const el=document.getElementById('decisao-principal'); if(!el) return;
   const A=D.ativos||{};
   const ks=Object.keys(A);
-  // Prioridade: entrada_valida > sinal (estudo) > maior prox
+  // Prioridade: entrada válida > TP1 curto em sombra > outros estudos.
   const entrar=ks.filter(k=>A[k].entrada_valida);
+  const curtos=ks.filter(k=>A[k].tp1_curto&&A[k].tp1_curto.qualificada);
   const estudo=ks.filter(k=>A[k].sinal&&!A[k].entrada_valida);
   const candidato=entrar.length
     ? entrar.sort((a,b)=>(A[b].prox||0)-(A[a].prox||0))[0]
+    : curtos.length
+      ? curtos[0]
     : estudo.length
       ? estudo.sort((a,b)=>(A[b].prox||0)-(A[a].prox||0))[0]
       : ks.sort((a,b)=>(A[b].prox||0)-(A[a].prox||0))[0];
   if(!candidato){ el.innerHTML=''; return; }
   const x=A[candidato];
+  if(!dadosMonitorAoVivo){
+    el.innerHTML=`<div class="decisao-hero estudo"><div class="decisao-hero-ativo">DADOS ATRASADOS</div><div class="decisao-hero-motivo">O Monitor está sem atualização recente. Não use preço, alvo ou sinal até voltar a atualizar.</div></div>`;
+    return;
+  }
+  const curto=Boolean(x.tp1_curto&&x.tp1_curto.qualificada&&!x.entrada_valida);
+  const plano=curto?x.tp1_curto:x;
   const isEntrar=x.entrada_valida;
-  const isEstudo=x.sinal&&!x.entrada_valida;
+  const isEstudo=curto||(x.sinal&&!x.entrada_valida);
   const cls=isEntrar?'entrar':isEstudo?'estudo':'';
-  const estadoTexto=x.estado_entrada||'AGUARDAR';
-  const dir=(x.direcao||'buy')==='sell'?'SELL':'BUY';
-  const v=x.alvos||x.alvos_estudo||{};
+  const estadoTexto=curto?'TP1 CURTO — ESTUDO':(x.estado_entrada||'AGUARDAR');
+  const dir=(plano.direcao||'buy')==='sell'?'SELL':'BUY';
+  const v=plano.alvos||x.alvos_estudo||{};
   const alvosHtml=v.entrada!=null?`<div class="decisao-hero-alvos">
     <div class="decisao-hero-chip"><label>Entrada</label><div class="val entrada">${v.entrada}</div></div>
     <div class="decisao-hero-chip"><label>Invalidação SL</label><div class="val sl">${v.sl}</div></div>
@@ -2749,7 +3546,7 @@ function renderDecisaoPrincipal(){
       </div>
       <span class="estado ${isEntrar?'go':isEstudo?'study':'wait'}" style="font-size:.8rem;white-space:nowrap">${estadoTexto}</span>
     </div>
-    <div class="decisao-hero-motivo">${x.motivo_entrada||''}</div>
+    <div class="decisao-hero-motivo">${plano.motivo||x.motivo_entrada||''}</div>
     ${alvosHtml}
   </div>`;
 }
@@ -2758,8 +3555,10 @@ function render(){
   const A=D.ativos||{};
   const ks=Object.keys(A).sort();
   const sig=ks.filter(k=>A[k].sinal);
+  const curtos=ks.filter(k=>A[k].tp1_curto&&A[k].tp1_curto.qualificada);
   document.getElementById('sinais').innerHTML = sig.length
-    ? sig.map(k=>cardSinal(k,A[k])).join('')
+    ? sig.map(k=>cardSinal(k,A[k])).join('')+curtos.map(k=>cardTp1Curto(k,A[k])).join('')
+    : curtos.length ? curtos.map(k=>cardTp1Curto(k,A[k])).join('')
     : '<span style="color:#475569;font-style:italic;font-size:.8rem">nenhum sinal agora</span>';
   // ordena por proximidade do sinal: o que esta perto de disparar sobe
   const ord=[...ks].sort((x,y)=>(A[y].prox||0)-(A[x].prox||0));
@@ -2804,17 +3603,22 @@ function render(){
   }
   [...t.children].forEach(b=>b.className='tab'+(b.dataset.a===sel?' on':''));
   renderDecisaoPrincipal();
+  renderIaGrafico();
   renderFluxo();
   renderOrb();
   renderLiquidez();
   renderBof();
+  renderFvg();
+  renderConfluencia();
+  renderOuroMovimento();
   renderFibo();
+  renderTp1Curto();
 }
 
-async function pick(a){ sel=a; _primeiroDesenho=true; render(); await grafico();
+async function pick(a){ sel=a; candlesGroq=[]; _primeiroDesenho=true; render(); await grafico();
   if(window.Marcacoes) Marcacoes.carregar(); }
 
-let chartM=null, sCandles=null, sSup=null, sInf=null;
+let chartM=null, sCandles=null, sSup=null, sInf=null, sEma9=null, sEma21=null, sEma50=null;
 let linhasNivelM=[], seriesZonaM=[];
 let _primeiroDesenho=true;
 let _observadorLargura=null;
@@ -2833,6 +3637,11 @@ function _marcAtualizar(itens, modo, aguardandoSegundo){
 }
 function marcarFibo(){ Marcacoes.setModo('fibo'); }
 function marcarLinha(){ Marcacoes.setModo('horizontal'); }
+function alternarNiveis(){
+  niveisDetalhados=!niveisDetalhados;
+  localStorage.setItem('monitorNiveisDetalhados',niveisDetalhados?'1':'0');
+  grafico();
+}
 function limparMarcacoes(){
   if(!Marcacoes.itens.length) return;
   if(confirm(`Apagar ${Marcacoes.itens.length} marcação(ões) de ${sel}?`)) Marcacoes.limparTudo();
@@ -2868,6 +3677,9 @@ function _chartMonitor(){
     priceLineVisible:false,crosshairMarkerVisible:false};
   sSup=chartM.addLineSeries(opBanda);
   sInf=chartM.addLineSeries(opBanda);
+  sEma9=chartM.addLineSeries({color:'#22d3ee',lineWidth:1,lastValueVisible:false,priceLineVisible:false,crosshairMarkerVisible:false});
+  sEma21=chartM.addLineSeries({color:'#f59e0b',lineWidth:1,lastValueVisible:false,priceLineVisible:false,crosshairMarkerVisible:false});
+  sEma50=chartM.addLineSeries({color:'#ef4444',lineWidth:1,lastValueVisible:false,priceLineVisible:false,crosshairMarkerVisible:false});
   new ResizeObserver(()=>{
     if(el.clientWidth>0 && el.clientHeight>0){
       chartM.applyOptions({width:el.clientWidth, height:el.clientHeight});
@@ -2878,6 +3690,18 @@ function _chartMonitor(){
                        getAtivo:()=>sel, aoAtualizar:_marcAtualizar});
   }
   return chartM;
+}
+
+function mediaExponencial(vals,periodo){
+  const k=2/(periodo+1); let anterior=null;
+  return vals.map(v=>{ anterior=anterior==null?v:(v*k+anterior*(1-k)); return anterior; });
+}
+function renderHudConfluencia(A){
+  const el=document.getElementById('cv'); let hud=document.getElementById('chart-hud');
+  if(!hud){ hud=document.createElement('div'); hud.id='chart-hud'; el.appendChild(hud); }
+  const q=A.confluencia||{}, e=q.estrutura||{}, dir=q.direcao==='sell'?'SELL':q.direcao==='buy'?'BUY':'—';
+  const classe=q.qualificada?'hud-ok':q.score>=6?'hud-wait':'hud-no';
+  hud.innerHTML=`<b>CONFLUÊNCIA LOCAL</b><div class="hud-linha"><span>Viés</span><span class="${classe}">${dir} · ${q.score??0}/10</span></div><div class="hud-linha"><span>M15 / H1</span><span>${q.m15||'—'} / ${q.h1||'—'}</span></div><div class="hud-linha"><span>Zona</span><span>${q.em_zona?'DENTRO':'AGUARDAR'}</span></div><div class="hud-linha"><span>FVG / OB</span><span>${q.fvg?.disponivel?'FVG':'—'} / ${q.order_block?'OB':'—'}</span></div><div class="hud-linha"><span>BOS / Liq.</span><span>${q.bos?'✓':'—'} / ${q.liquidez?'✓':'—'}</span></div><div class="hud-linha"><span>Range</span><span>${e.equilibrio??'—'}</span></div>`;
 }
 
 async function grafico(){
@@ -2898,6 +3722,7 @@ async function grafico(){
     aviso.textContent=sel+' \u2014 aguardando candles do mercado normal';
     aviso.style.display=''; return;
   }
+  candlesGroq=K;
   aviso.style.display='none';
   if(!_chartMonitor()) return;
 
@@ -2907,7 +3732,11 @@ async function grafico(){
 
   const A=(D.ativos||{})[sel]||{}, F=A.fibo||{}, FA=F.alvos||{}, FL=A.fluxo||{},
         FLA=FL.alvos||{}, O=A.orb||{}, OA=O.alvos||{}, L=A.liquidez||{}, LA=L.alvos||{},
-        B=A.bof||{}, BA=B.alvos||{};
+        B=A.bof||{}, BA=B.alvos||{}, G=A.fvg||{}, C=A.tp1_curto||{}, CA=C.alvos||{},
+        Q=A.confluencia||{}, QA=Q.alvos||{};
+  const btnNiveis=document.getElementById('btn-niveis');
+  if(btnNiveis){ btnNiveis.textContent=niveisDetalhados?'☷ Detalhados':'☷ Essenciais'; btnNiveis.classList.toggle('on',niveisDetalhados); }
+  const OM=A.ouro_movimento||{}, OMA=OM.alvos||{};
   const candleVals=K.flatMap(k=>[Number(k.h),Number(k.l)]).filter(Number.isFinite);
   const candleMax=Math.max(...candleVals), candleMin=Math.min(...candleVals);
   const faixa=Math.max(candleMax-candleMin,Math.abs(candleMax)*1e-6,1e-9);
@@ -2917,6 +3746,25 @@ async function grafico(){
 
   sCandles.setData(K.map(k=>({time:k.t,open:Number(k.o),high:Number(k.h),
                               low:Number(k.l),close:Number(k.c)})));
+  const closes=K.map(k=>Number(k.c));
+  const ema=(n)=>{ const valores=mediaExponencial(closes,n); return K.map((k,i)=>({time:k.t,value:valores[i]})); };
+  sEma9.setData(ema(9)); sEma21.setData(ema(21)); sEma50.setData(ema(50));
+  // Eventos já ocorridos ganham marcador no candle correspondente. Agenda
+  // futura permanece no cartão do ouro, pois ainda não há candle para ancorar.
+  const noticiasGrafico=(A.noticias_dia||[]).filter(n=>Number(n.quando_ts)>=Number(K[0]?.t)
+    &&Number(n.quando_ts)<=Number(K[K.length-1]?.t)).map(n=>({
+      time:Number(n.quando_ts), position:'aboveBar', shape:'circle', color:'#fbbf24',
+      text:`NOTÍCIA ${n.moeda}: ${n.titulo}`,
+    }));
+  const ultimoTempo=Number(K[K.length-1]?.t), estruturaMarcadores=[];
+  if(Q.fvg?.disponivel) estruturaMarcadores.push({time:ultimoTempo,position:Q.direcao==='sell'?'aboveBar':'belowBar',shape:'arrowUp',color:'#a78bfa',text:'FVG'});
+  if(Q.order_block?.vela){
+    const alvo=String(Q.order_block.vela).replace(' ','T').slice(0,16);
+    const achado=K.find(k=>new Date(k.t*1000).toISOString().slice(0,16)===alvo);
+    if(achado) estruturaMarcadores.push({time:achado.t,position:Q.direcao==='sell'?'aboveBar':'belowBar',shape:'circle',color:'#38bdf8',text:'OB'});
+  }
+  if(Q.bos) estruturaMarcadores.push({time:ultimoTempo,position:Q.direcao==='sell'?'aboveBar':'belowBar',shape:'arrowDown',color:'#14b8a6',text:'BOS'});
+  if(typeof sCandles.setMarkers==='function') sCandles.setMarkers([...noticiasGrafico,...estruturaMarcadores]);
   const serieBanda=arr=>(arr||[]).map((v,i)=>{
     const n=Number(v);
     return (v==null||!K[i]||!perto(n))?null:{time:K[i].t,value:n};
@@ -2925,6 +3773,7 @@ async function grafico(){
   sInf.setData(serieBanda(d.inf));
 
   function nivel(valor,cor,rotulo){
+    if(!niveisDetalhados && !String(rotulo).startsWith('Confluência') && rotulo!=='EQUILÍBRIO') return;
     if(!perto(valor)) return;
     linhasNivelM.push(sCandles.createPriceLine({
       price:valor, color:cor, lineWidth:1,
@@ -2933,6 +3782,8 @@ async function grafico(){
     }));
   }
   function zona(v1,v2,cor,rotulo){
+    const zonasEssenciais=new Set(['Confluência local: zona','PREMIUM','DESCONTO','SUPPLY','DEMAND']);
+    if(!niveisDetalhados && !zonasEssenciais.has(rotulo)) return;
     const a=Number(v1), b=Number(v2);
     if(!perto(a)||!perto(b)) return;
     const lo=Math.min(a,b), hi=Math.max(a,b);
@@ -2997,6 +3848,39 @@ async function grafico(){
     nivel(Number(FA.tp1),'#22c55e','Fibo TP1');
     nivel(Number(FA.tp2),'#86efac','Fibo TP2 127.2%');
   }
+  if(G.disponivel){
+    const cor=G.direcao==='sell'?'#ef44441d':'#14b8a61d';
+    zona(G.zona_inf,G.zona_sup,cor,'FVG M15 '+String(G.direcao||'').toUpperCase());
+  }
+  if(Q.disponivel && Q.zona_inf!=null){
+    zona(Q.zona_inf,Q.zona_sup,Q.direcao==='sell'?'#ef444421':'#a78bfa21','Confluência local: zona');
+    nivel(Number(QA.entrada),'#a78bfa','Confluência: entrada');
+    nivel(Number(QA.sl),'#ef4444','Confluência: SL');
+    nivel(Number(QA.tp1),'#22c55e','Confluência: TP1');
+    nivel(Number(QA.tp2),'#86efac','Confluência: TP2');
+  }
+  const QS=Q.estrutura||{};
+  if(QS.equilibrio!=null){
+    zona(QS.equilibrio,QS.maximo,'#f59e0b14','PREMIUM');
+    zona(QS.minimo,QS.equilibrio,'#06b6d414','DESCONTO');
+    nivel(Number(QS.equilibrio),'#94a3b8','EQUILÍBRIO');
+    zona(QS.supply_inf,QS.supply_sup,'#ef44441a','SUPPLY');
+    zona(QS.demand_inf,QS.demand_sup,'#14b8a61a','DEMAND');
+  }
+  if(A.classe==='ouro' && OM.disponivel && OM.zona_inf!=null){
+    zona(OM.zona_inf,OM.zona_sup,OM.direcao==='sell'?'#ef444424':'#fbbf2424','OURO: zona FVG');
+    if(OM.sinal_estudo && OMA){
+      nivel(Number(OMA.entrada),'#fbbf24','Ouro entrada estudo');
+      nivel(Number(OMA.sl),'#ef4444','Ouro SL técnico');
+      nivel(Number(OMA.tp1),'#22c55e','Ouro TP1 1.5R');
+    }
+  }
+  if(C.qualificada && CA){
+    zona(C.zona_inf,C.zona_sup,'#f973161f','TP1 curto: zona');
+    nivel(Number(CA.entrada),'#38bdf8','TP1 curto entrada');
+    nivel(Number(CA.sl),'#ef4444','TP1 curto SL tático');
+    nivel(Number(CA.tp1),'#22c55e','TP1 curto saída');
+  }
   if(A.entrada_valida && A.alvos){
     nivel(Number(A.alvos.entrada),'#22c55e','entrada BUY');
     nivel(Number(A.alvos.sl),'#ef4444','SL');
@@ -3004,6 +3888,7 @@ async function grafico(){
     nivel(Number(A.alvos.tp2),'#86efac','TP2');
   }
   titulo.textContent=`${sel} \u00b7 ${RN[A.regime]||'\u2014'} \u00b7 R2 ${A.r2??'\u2014'}`;
+  renderHudConfluencia(A);
   // So depois de todas as series: enquadrar antes deixava a grade errada.
   if(_primeiroDesenho){ chartM.timeScale().fitContent(); _primeiroDesenho=false; }
 }
@@ -3012,7 +3897,12 @@ async function tick(){
   try{
     D=await (await fetch('mercado.json?t='+Date.now())).json();
     const atualizado=new Date(Number(D.ts||0)*1000);
-    document.getElementById('status').textContent='Atualizado: '+FMT_HORA_BRT.format(atualizado)+' BRT';
+    const idade=Math.max(0,Date.now()-atualizado.getTime());
+    dadosMonitorAoVivo=idade<=90000;
+    document.getElementById('status').textContent=dadosMonitorAoVivo
+      ? 'Atualizado: '+FMT_HORA_BRT.format(atualizado)+' BRT'
+      : 'DADOS ATRASADOS — NÃO OPERAR';
+    document.getElementById('status').style.color=dadosMonitorAoVivo?'':'#f87171';
     render(); await grafico();
   }catch(e){ document.getElementById('status').textContent='Erro: '+e; }
 }
@@ -3054,8 +3944,10 @@ def main() -> int:
     calendario = CalendarioEconomico(base.pasta_dados)
     calendario.atualizar()
     print(f"\nCarregando {len(ATIVOS)} ativos...")
+    analista_groq = AnalistaGraficoGroq()
+    print("IA do gráfico: Groq=" + ("ATIVO" if os.getenv("GROQ_API_KEY", "").strip() else "OFF"))
     try:
-        loop(api, cfg, estado, calendario)
+        loop(api, cfg, estado, calendario, analista_groq)
     except KeyboardInterrupt:
         print("\nParado.")
     return 0

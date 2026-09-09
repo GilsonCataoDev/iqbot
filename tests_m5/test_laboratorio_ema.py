@@ -237,9 +237,12 @@ def test_perfil_ema_m5_real_isola_risco_e_setups_experimentais():
     assert config.conta == "REAL"
     assert config.ativos == ("EURUSD", "AUDCAD")
     assert config.valor_por_ordem == 2.50
-    assert config.meta_diaria == 10.0
-    assert config.stop_diario == -5.0
-    assert config.max_operacoes_dia == 5
+    assert config.meta_diaria == 15.0
+    assert config.stop_diario == 0.0
+    assert config.max_operacoes_dia == 0
+    assert not config.parar_por_perdas
+    assert not config.parar_por_prejuizo
+    assert config.circuit_breaker_max_perdas == 0
     assert config.ema920_pullback_ativo
     assert config.expiracao_por_setup == {"ema920_pullback": 15}
     assert not config.ema921_rsi_pullback_ativo

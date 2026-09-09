@@ -45,6 +45,26 @@ def _handle_opiniao_groq(handler) -> None:
         handler.send_error(500, str(e))
 
 
+def _handle_opiniao_groq_grafico(handler) -> None:
+    """Consulta manual da leitura do gráfico, sem qualquer execução de ordem."""
+    try:
+        from . import ia as _ia
+        tamanho = int(handler.headers.get("Content-Length", 0))
+        contexto = json.loads(handler.rfile.read(tamanho)) if tamanho else {}
+        resultado = _ia.segunda_opiniao_grafico(contexto)
+        if resultado is None:
+            resultado = {"status": "INDISPONÍVEL", "veredicto": "AGUARDAR",
+                         "motivo": "Groq não respondeu.", "fonte": "GROQ"}
+        corpo = json.dumps(resultado, ensure_ascii=False).encode("utf-8")
+        handler.send_response(200)
+        handler.send_header("Content-Type", "application/json")
+        handler.send_header("Access-Control-Allow-Origin", "*")
+        handler.end_headers()
+        handler.wfile.write(corpo)
+    except Exception as e:
+        handler.send_error(500, str(e))
+
+
 def _handle_exportar(handler) -> None:
     """GET /exportar?data=YYYY-MM-DD — CSV das entradas do dia."""
     from urllib.parse import urlparse, parse_qs
@@ -195,6 +215,8 @@ class _HandlerSilencioso(http.server.SimpleHTTPRequestHandler):
                 self.wfile.write(b'{"ok":true}')
             except Exception:
                 self.send_error(500)
+        elif self.path.startswith("/opiniao_groq_grafico"):
+            _handle_opiniao_groq_grafico(self)
         elif self.path.startswith("/opiniao_groq"):
             _handle_opiniao_groq(self)
         elif self.path.startswith("/marcacoes/remover"):

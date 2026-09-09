@@ -49,11 +49,14 @@ class TestPainelHtml(unittest.TestCase):
 
         self.assertIn("min-width: 290px", html)
         self.assertIn('id="camada-bloqueados"', html)
+        self.assertIn('id="camada-todos-sinais"', html)
         # A camada "Auxiliares" foi removida: so escondia pullbacks/confluencias,
         # que os setups atuais nunca produzem, entao o controle nao fazia nada.
         self.assertNotIn('id="camada-auxiliares"', html)
         self.assertNotIn("chkAuxiliares", html)
         self.assertIn("compactarMarcadores", html)
+        self.assertIn("DADOS ATRASADOS — NÃO OPERAR", html)
+        self.assertIn("feed sem atualização recente", html)
         self.assertIn("modoLab", html)
 
     def test_fibo_e_desenhada_a_partir_das_ancoras_do_impulso(self):
