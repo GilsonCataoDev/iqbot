@@ -12,7 +12,8 @@ import monitor_mercado
 from iqoption_m5.ia import segunda_opiniao_grafico
 from monitor_mercado import (
     ATIVOS, CLASSE, Estado, adquirir_trava_monitor, decisao_entrada, janela_validada_para,
-    detectar_fvg_m15, leitura_fluxo_sessao, noticias_do_dia, plano_fibo, plano_ouro_movimento,
+    detectar_fvg_m15, detectar_zonas_fvg_m15, leitura_fluxo_sessao, noticias_do_dia,
+    plano_fibo, plano_ouro_movimento,
     plano_tp1_curto_forex, plano_orb_sessao,
     plano_bof_m30_m5, plano_varredura_liquidez, plano_confluencia_local, unidade_movimento, wilson_ci,
     candle_atual_para_grafico, sanitizar_candles_m15,
@@ -1178,6 +1179,85 @@ def test_plano_ouro_asia_exige_corpo_minimo_30pct_atr():
         resultado = plano_ouro_movimento(df, atr, "XAUUSD")
     assert not resultado["sinal_tecnico"], "corpo 0.24 ATR deve falhar na ásia (mínimo 0.30)"
     assert resultado["perfil_horario"]["sessao"] == "ásia"
+
+
+def _df_duas_zonas_fvg(preco: float = 4430.0, n: int = 100) -> pd.DataFrame:
+    """DataFrame com FVG buy (suporte abaixo) e FVG sell (resistência acima) válidos.
+
+    FVG buy: high[-20] bem baixo, low[-18] acima dele → zona de suporte abaixo do preço.
+    FVG sell: low[-40] bem alto, high[-38] abaixo dele → zona de resistência acima do preço.
+    Gaps de 1.0 pt (> mínimo de 0.75 = 0.15 × ATR 5.0). Candles posteriores não preenchem.
+    """
+    ts = pd.date_range("2026-09-10 10:00", periods=n, freq="15min", tz="UTC")
+    closes = [preco] * n
+    opens  = [preco - 0.05] * n
+    highs  = [preco + 0.30] * n
+    lows   = [preco - 0.30] * n
+    # FVG sell: resistência acima do preço atual (high[-38] < low[-40])
+    lows[-40]   = preco + 2.0   # low do primeiro alto
+    highs[-38]  = preco + 1.0   # high do terceiro (< low do primeiro) → FVG sell
+    closes[-38] = preco + 0.9
+    opens[-38]  = preco + 1.5
+    # FVG buy: suporte abaixo do preço atual (low[-18] > high[-20])
+    highs[-20]  = preco - 2.0   # high do primeiro baixo
+    lows[-18]   = preco - 1.0   # low do terceiro (> high do primeiro) → FVG buy
+    closes[-18] = preco - 0.9
+    opens[-18]  = preco - 1.5
+    return pd.DataFrame({
+        "Open": opens, "High": highs, "Low": lows, "Close": closes, "Volume": [1000] * n,
+    }, index=ts)
+
+
+def test_detectar_zonas_fvg_retorna_buy_e_sell_independentes():
+    """Deve encontrar FVG buy e FVG sell separados no mesmo DataFrame."""
+    df = _df_duas_zonas_fvg()
+    atr = pd.Series(5.0, index=df.index)
+    zonas = detectar_zonas_fvg_m15(df, atr)
+    assert "buy_zone" in zonas
+    assert "sell_zone" in zonas
+    assert zonas["buy_zone"]["disponivel"], "deve encontrar FVG buy"
+    assert zonas["sell_zone"]["disponivel"], "deve encontrar FVG sell"
+    assert zonas["buy_zone"]["direcao"] == "buy"
+    assert zonas["sell_zone"]["direcao"] == "sell"
+
+
+def test_detectar_zonas_fvg_rejeicao_confirmada_buy():
+    """rejeicao_confirmada=True quando última vela testa buy_zone e fecha acima."""
+    preco = 4430.0
+    df = _df_duas_zonas_fvg(preco=preco)
+    # buy_zone: zona_sup = preco - 1.0 (low[-18])
+    zona_sup = preco - 1.0
+    # Última vela: Low penetra a zona, fecha acima da zona_sup (rejeição bull)
+    df.iloc[-1, df.columns.get_loc("Low")]   = zona_sup - 0.05
+    df.iloc[-1, df.columns.get_loc("Close")] = zona_sup + 0.10
+    df.iloc[-1, df.columns.get_loc("Open")]  = zona_sup - 0.10
+    atr = pd.Series(5.0, index=df.index)
+    zonas = detectar_zonas_fvg_m15(df, atr)
+    assert zonas["buy_zone"]["disponivel"], "buy_zone deve estar disponível"
+    assert zonas["buy_zone"]["rejeicao_confirmada"], \
+        "última vela rejeitou buy_zone — rejeicao_confirmada deve ser True"
+
+
+def test_detectar_zonas_fvg_retorna_disponiveis_false_sem_dados():
+    df = pd.DataFrame({"Open": [1.0], "High": [1.1], "Low": [0.9], "Close": [1.0]},
+                      index=[pd.Timestamp("2026-09-10 10:00", tz="UTC")])
+    atr = pd.Series([0.1], index=df.index)
+    zonas = detectar_zonas_fvg_m15(df, atr)
+    assert not zonas["buy_zone"]["disponivel"]
+    assert not zonas["sell_zone"]["disponivel"]
+
+
+def test_plano_ouro_resultado_inclui_buy_e_sell_zone():
+    """plano_ouro_movimento deve retornar buy_zone e sell_zone no dict."""
+    df = _df_xauusd(hora_utc=10, n=120)
+    atr = _atr_xauusd(df, 5.0)
+    resultado = plano_ouro_movimento(df, atr, "XAUUSD")
+    assert "buy_zone" in resultado
+    assert "sell_zone" in resultado
+    assert "disponivel" in resultado["buy_zone"]
+    assert "disponivel" in resultado["sell_zone"]
+    assert "rejeicao_confirmada" in resultado["buy_zone"]
+    assert "rejeicao_confirmada" in resultado["sell_zone"]
 
 
 def test_plano_ouro_fvg_sobretestado_bloqueia_sinal():

@@ -351,6 +351,93 @@ def detectar_fvg_m15(df: pd.DataFrame, atr: pd.Series) -> dict:
     return vazio
 
 
+def detectar_zonas_fvg_m15(df: pd.DataFrame, atr: pd.Series) -> dict:
+    """Detecta o FVG buy mais recente E o FVG sell mais recente separadamente.
+
+    Cada zona inclui `rejeicao_confirmada`: True quando a última vela testou
+    a zona e fechou para fora na direção esperada.
+
+    Retorna:
+        {"buy_zone": {...}, "sell_zone": {...}}
+        cada sub-dict tem os mesmos campos de detectar_fvg_m15 + rejeicao_confirmada.
+    """
+    _vz = {"disponivel": False, "estado": "SEM FVG", "rejeicao_confirmada": False,
+            "motivo": "Nenhum desequilíbrio M15 relevante."}
+    resultado = {"buy_zone": dict(_vz), "sell_zone": dict(_vz)}
+    if len(df) < 3 or atr.empty:
+        return resultado
+    try:
+        dados = df[["Open", "High", "Low", "Close"]].apply(pd.to_numeric, errors="coerce").dropna().tail(64)
+        atr_local = atr.reindex(dados.index).ffill()
+        if len(dados) < 3:
+            return resultado
+        atr_atual = float(atr_local.iloc[-1])
+        if not np.isfinite(atr_atual) or atr_atual <= 0:
+            return resultado
+        ultima = dados.iloc[-1]
+        ult_o, ult_h, ult_l, ult_c = (float(ultima[c]) for c in ("Open", "High", "Low", "Close"))
+        preco = ult_c
+        buy_found = sell_found = False
+        for fim in range(len(dados) - 1, 1, -1):
+            if buy_found and sell_found:
+                break
+            primeiro, terceiro = dados.iloc[fim - 2], dados.iloc[fim]
+            if float(terceiro["Low"]) > float(primeiro["High"]):
+                direcao, zona_inf, zona_sup = "buy", float(primeiro["High"]), float(terceiro["Low"])
+            elif float(terceiro["High"]) < float(primeiro["Low"]):
+                direcao, zona_inf, zona_sup = "sell", float(terceiro["High"]), float(primeiro["Low"])
+            else:
+                continue
+            if (direcao == "buy" and buy_found) or (direcao == "sell" and sell_found):
+                continue
+            tamanho = zona_sup - zona_inf
+            if tamanho < .15 * atr_atual:
+                continue
+            posteriores = dados.iloc[fim + 1:]
+            preenchido = (
+                (not posteriores.empty and float(posteriores["Low"].min()) <= zona_inf)
+                if direcao == "buy" else
+                (not posteriores.empty and float(posteriores["High"].max()) >= zona_sup)
+            )
+            if preenchido:
+                continue
+            em_zona = zona_inf <= preco <= zona_sup
+            distancia = (
+                max(0.0, preco - zona_sup) / atr_atual if direcao == "buy"
+                else max(0.0, zona_inf - preco) / atr_atual
+            )
+            rejeicao = (
+                ult_l <= zona_sup and ult_c > ult_o and ult_c >= zona_sup
+                if direcao == "buy" else
+                ult_h >= zona_inf and ult_c < ult_o and ult_c <= zona_inf
+            )
+            estado = (f"FVG {direcao.upper()} — REJEIÇÃO ✓" if rejeicao
+                      else f"FVG {direcao.upper()} NA ZONA" if em_zona
+                      else f"FVG {direcao.upper()} ATIVO")
+            zona_dict = {
+                "disponivel": True, "direcao": direcao, "estado": estado,
+                "zona_inf": round(zona_inf, 6), "zona_sup": round(zona_sup, 6),
+                "em_zona": em_zona, "tamanho_atr": round(tamanho / atr_atual, 2),
+                "distancia_atr": round(distancia, 2),
+                "rejeicao_confirmada": rejeicao,
+                "inicio": str(dados.index[fim - 2]), "fim": str(dados.index[fim]),
+                "motivo": (
+                    "Rejeição confirmada — candle fechou para fora da zona." if rejeicao else
+                    "Preço dentro do desequilíbrio; aguardar rejeição fechada." if em_zona else
+                    "FVG aberto; zona de interesse, sem confirmação ainda."
+                ),
+            }
+            if direcao == "buy":
+                resultado["buy_zone"] = zona_dict
+                buy_found = True
+            else:
+                resultado["sell_zone"] = zona_dict
+                sell_found = True
+    except (ValueError, TypeError, IndexError, KeyError):
+        pass
+    return resultado
+
+
 def _order_block_m15(df: pd.DataFrame, atr: pd.Series, direcao: str) -> dict | None:
     """Última vela contrária antes de deslocamento, sem usar candles futuros."""
     dados = df[["Open", "High", "Low", "Close"]].dropna().tail(48)
@@ -501,6 +588,7 @@ def plano_ouro_movimento(df: pd.DataFrame, atr: pd.Series, ativo: str,
     try:
         m15, h1 = _tendencia_ema(df["Close"]), _tendencia_h1_a_partir_m15(df)
         fvg = detectar_fvg_m15(df, atr)
+        zonas = detectar_zonas_fvg_m15(df, atr)
         atr_atual = float(atr.reindex(df.index).iloc[-1])
         if not np.isfinite(atr_atual) or atr_atual <= 0:
             return {**vazio, "motivo": "ATR M15 indisponível."}
@@ -664,6 +752,8 @@ def plano_ouro_movimento(df: pd.DataFrame, atr: pd.Series, ativo: str,
             "direcao": direcao,
             "estado": estado, "motivo": motivo,
             "fvg": fvg,
+            "buy_zone": zonas["buy_zone"],
+            "sell_zone": zonas["sell_zone"],
             "noticia_direcao": direcao_noticia,
             "zona_inf": zona_inf, "zona_sup": zona_sup,
             "corpo_atr": round(corpo_atr, 2),
