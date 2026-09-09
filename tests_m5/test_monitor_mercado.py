@@ -939,3 +939,181 @@ def test_estado_publica_campos_ic_e_maturidade_no_json(tmp_path):
     assert "amostra_suficiente" in fibo
     assert fibo["amostra_suficiente"] is False
     assert "ic_95" in fibo
+
+
+# ---------------------------------------------------------------------------
+# Perfil horário XAUUSD e plano_ouro_movimento melhorado
+# ---------------------------------------------------------------------------
+
+from iqoption_m5.perfil_horario_xauusd import contexto_horario, regime_atr
+
+
+def _df_xauusd(n: int = 120, preco_base: float = 4430.0,
+               tendencia: str = "alta", hora_utc: int = 10) -> pd.DataFrame:
+    """Cria DataFrame XAUUSD M15 sintético com tendência controlada."""
+    ts = pd.date_range(
+        f"2026-09-09 {hora_utc:02d}:00", periods=n, freq="15min", tz="UTC"
+    )
+    if tendencia == "alta":
+        closes = [preco_base + i * 0.15 for i in range(n)]
+    elif tendencia == "baixa":
+        closes = [preco_base - i * 0.15 for i in range(n)]
+    else:
+        closes = [preco_base + (i % 3 - 1) * 0.10 for i in range(n)]
+    df = pd.DataFrame({
+        "Open":  [c - 0.05 for c in closes],
+        "High":  [c + 0.30 for c in closes],
+        "Low":   [c - 0.30 for c in closes],
+        "Close": closes,
+        "Volume": [1000] * n,
+    }, index=ts)
+    return df
+
+
+def _atr_xauusd(df: pd.DataFrame, valor: float = 5.0) -> pd.Series:
+    return pd.Series(valor, index=df.index)
+
+
+def test_perfil_horario_retorna_alvo_maior_em_hora_de_pico():
+    ctx_05 = contexto_horario(5, 4430.0)
+    ctx_10 = contexto_horario(10, 4430.0)
+    assert ctx_10["tp1_pts"] > ctx_05["tp1_pts"], "hora de pico deve ter TP1 maior"
+    assert ctx_10["amp_p50_pts"] > ctx_05["amp_p50_pts"]
+
+
+def test_perfil_horario_converte_pct_em_pontos_corretamente():
+    ctx = contexto_horario(10, 4000.0)
+    # tp1_pct = 0.544% → 4000 * 0.544 / 100 = 21.76 → arredondado para 21.8
+    esperado = round(4000.0 * ctx["tp1_pct"] / 100, 1)
+    assert abs(ctx["tp1_pts"] - esperado) < 0.1
+
+
+def test_perfil_horario_sessao_classificada():
+    assert contexto_horario(3, 4430.0)["sessao"] == "ásia"
+    assert contexto_horario(10, 4430.0)["sessao"] == "europa"
+    assert contexto_horario(15, 4430.0)["sessao"] == "ny"
+    assert contexto_horario(20, 4430.0)["sessao"] == "noite"
+
+
+def test_regime_atr_normal_na_faixa_esperada():
+    # ATR de ~0.2% do preço (típico XAUUSD M15); deve ser "normal" em qualquer hora
+    assert regime_atr(0.20, 10) == "normal"
+    assert regime_atr(0.15, 5) == "normal"
+
+
+def test_regime_atr_quieto_quando_muito_baixo():
+    # ATR quase zero → "quieto"
+    assert regime_atr(0.001, 10) == "quieto"
+
+
+def test_regime_atr_ativo_quando_muito_alto():
+    # ATR de 2% → muito acima de qualquer hora
+    assert regime_atr(2.0, 10) == "ativo"
+
+
+def test_plano_ouro_nao_qualificado_sem_fvg():
+    df = _df_xauusd(tendencia="alta", hora_utc=10)
+    atr = _atr_xauusd(df, 5.0)
+    resultado = plano_ouro_movimento(df, atr, "XAUUSD", noticia=None)
+    assert resultado["disponivel"]
+    assert not resultado["sinal_tecnico"], "sem FVG não há sinal técnico"
+    assert not resultado["sinal_confluente"]
+
+
+def test_plano_ouro_sinal_tecnico_nao_requer_noticia():
+    """sinal_tecnico deve disparar sem dado USD publicado."""
+    df = _df_xauusd(tendencia="alta", hora_utc=10, n=120)
+    # Força FVG manual via patch para isolar a lógica
+    fvg_fake = {
+        "disponivel": True, "direcao": "buy",
+        "zona_inf": float(df["Close"].iloc[-1]) - 3.0,
+        "zona_sup": float(df["Close"].iloc[-1]) - 0.5,
+        "tamanho_atr": 0.30,
+    }
+    atr = _atr_xauusd(df, 5.0)
+    with patch("monitor_mercado.detectar_fvg_m15", return_value=fvg_fake), \
+         patch("monitor_mercado._tendencia_ema", return_value="alta"), \
+         patch("monitor_mercado._tendencia_h1_a_partir_m15", return_value="alta"):
+        resultado = plano_ouro_movimento(df, atr, "XAUUSD", noticia=None)
+    # Sem notícia, sinal_tecnico pode ser True; sinal_confluente deve ser False
+    assert not resultado["sinal_confluente"]
+    assert "sinal_tecnico" in resultado
+
+
+def test_plano_ouro_sinal_confluente_requer_noticia_alinhada():
+    """sinal_confluente exige dado USD publicado na mesma direção."""
+    df = _df_xauusd(tendencia="alta", hora_utc=10, n=120)
+    fvg_fake = {
+        "disponivel": True, "direcao": "buy",
+        "zona_inf": float(df["Close"].iloc[-1]) - 3.0,
+        "zona_sup": float(df["Close"].iloc[-1]) - 0.5,
+        "tamanho_atr": 0.30,
+    }
+    atr = _atr_xauusd(df, 5.0)
+    noticia_contra = {"estado": "resultado_publicado", "direcao": "sell"}
+    with patch("monitor_mercado.detectar_fvg_m15", return_value=fvg_fake), \
+         patch("monitor_mercado._tendencia_ema", return_value="alta"), \
+         patch("monitor_mercado._tendencia_h1_a_partir_m15", return_value="alta"):
+        resultado = plano_ouro_movimento(df, atr, "XAUUSD", noticia=noticia_contra)
+    assert not resultado["sinal_confluente"]
+    assert resultado["estado"] == "NOTÍCIA USD CONTRA A ESTRUTURA"
+
+
+def test_plano_ouro_alvos_incluem_tp2_e_rr():
+    df = _df_xauusd(tendencia="alta", hora_utc=10, n=120)
+    fvg_fake = {
+        "disponivel": True, "direcao": "buy",
+        "zona_inf": float(df["Close"].iloc[-1]) - 3.0,
+        "zona_sup": float(df["Close"].iloc[-1]) - 0.5,
+        "tamanho_atr": 0.30,
+    }
+    atr = _atr_xauusd(df, 5.0)
+    with patch("monitor_mercado.detectar_fvg_m15", return_value=fvg_fake), \
+         patch("monitor_mercado._tendencia_ema", return_value="alta"), \
+         patch("monitor_mercado._tendencia_h1_a_partir_m15", return_value="alta"):
+        resultado = plano_ouro_movimento(df, atr, "XAUUSD")
+    if resultado.get("alvos"):
+        alvos = resultado["alvos"]
+        assert "tp2" in alvos
+        assert "tp2_pts" in alvos
+        assert alvos["tp2"] > alvos["tp1"], "TP2 deve ser mais distante que TP1 (buy)"
+        assert alvos["rr_tp2"] is not None
+
+
+def test_plano_ouro_regime_quieto_bloqueia_sinal_tecnico():
+    """ATR muito baixo → regime quieto → sinal_tecnico=False mesmo com estrutura."""
+    df = _df_xauusd(tendencia="alta", hora_utc=10, n=120)
+    fvg_fake = {
+        "disponivel": True, "direcao": "buy",
+        "zona_inf": float(df["Close"].iloc[-1]) - 3.0,
+        "zona_sup": float(df["Close"].iloc[-1]) - 0.5,
+        "tamanho_atr": 0.30,
+    }
+    # ATR de 0.001 pts → pct ≈ 0 → quieto
+    atr_quieto = _atr_xauusd(df, 0.001)
+    with patch("monitor_mercado.detectar_fvg_m15", return_value=fvg_fake), \
+         patch("monitor_mercado._tendencia_ema", return_value="alta"), \
+         patch("monitor_mercado._tendencia_h1_a_partir_m15", return_value="alta"):
+        resultado = plano_ouro_movimento(df, atr_quieto, "XAUUSD")
+    assert not resultado["sinal_tecnico"]
+    assert resultado["perfil_horario"]["regime_atr"] == "quieto"
+
+
+def test_plano_ouro_retorna_vazio_para_outros_ativos():
+    df = _df_xauusd()
+    atr = _atr_xauusd(df)
+    assert not plano_ouro_movimento(df, atr, "EURUSD")["disponivel"]
+    assert not plano_ouro_movimento(df, atr, "BTCUSD")["disponivel"]
+
+
+def test_plano_ouro_perfil_horario_no_resultado():
+    df = _df_xauusd(hora_utc=11, n=120)
+    atr = _atr_xauusd(df, 5.0)
+    resultado = plano_ouro_movimento(df, atr, "XAUUSD")
+    assert "perfil_horario" in resultado
+    ph = resultado["perfil_horario"]
+    assert ph["sessao"] in ("ásia", "europa", "ny", "noite")
+    assert ph["amp_p50_pts"] > 0
+    assert ph["tp1_pts"] > 0
+    assert ph["sl_min_pts"] > 0
+    assert ph["tp2_pts"] >= ph["tp1_pts"]

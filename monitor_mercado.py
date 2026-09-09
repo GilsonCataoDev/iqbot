@@ -43,6 +43,7 @@ from iqoption_m5 import backtest
 from iqoption_m5.config import configuracao_scalping_m15
 from iqoption_m5.grafico import GraficoM5
 from iqoption_m5.mercado_iq import MercadoIQ
+from iqoption_m5.perfil_horario_xauusd import contexto_horario as _ctx_xauusd, regime_atr as _regime_atr_xauusd
 from iqoption_m5.monitor_store import MonitorEventStore, SCHEMA_VERSAO
 from iqoption_m5.noticias import CalendarioEconomico
 from iqoption_m5.ia import segunda_opiniao_grafico
@@ -480,12 +481,19 @@ def plano_confluencia_local(df: pd.DataFrame, atr: pd.Series, ativo: str,
 
 def plano_ouro_movimento(df: pd.DataFrame, atr: pd.Series, ativo: str,
                          noticia: dict | None = None) -> dict:
-    """Scanner M15 de continuação do ouro: tendência, FVG e rejeição fechada.
+    """Scanner M15 de continuação do ouro: tendência, FVG, rejeição e perfil horário.
 
-    É deliberadamente um estudo em sombra. O objetivo é avisar uma estrutura
-    repetível para aferição, nunca prometer que o ouro seguirá a direção.
+    Dois níveis de sinal — nenhum dispara ordem automaticamente:
+      sinal_tecnico    – H1/M15 alinhados + FVG + rejeição fechada (sem notícia)
+      sinal_confluente – sinal_tecnico + dado USD publicado e alinhado
+
+    Alvos calibrados pelo perfil histórico de 25.976 velas XAUUSD M15:
+      TP1 = deslocamento p50 da hora UTC atual (~50% das velas chegam)
+      TP2 = deslocamento p75 da hora UTC atual (~25% das velas chegam)
+      SL  = máx(sl técnico, excursão contra p50 da hora)
     """
-    vazio = {"disponivel": False, "sinal_estudo": False,
+    vazio = {"disponivel": False, "sinal_tecnico": False, "sinal_confluente": False,
+             "sinal_estudo": False,  # mantido por compatibilidade
              "estado": "OURO — AGUARDANDO ESTRUTURA",
              "motivo": "Exclusivo para XAUUSD M15."}
     if ativo != "XAUUSD" or len(df) < 96 or atr.empty:
@@ -496,10 +504,17 @@ def plano_ouro_movimento(df: pd.DataFrame, atr: pd.Series, ativo: str,
         atr_atual = float(atr.reindex(df.index).iloc[-1])
         if not np.isfinite(atr_atual) or atr_atual <= 0:
             return {**vazio, "motivo": "ATR M15 indisponível."}
+
         vela = df.iloc[-1]
         abertura, maxima, minima, fechamento = (float(vela[c]) for c in ("Open", "High", "Low", "Close"))
+        hora_utc = pd.Timestamp(df.index[-1]).tz_localize("UTC").hour if pd.Timestamp(df.index[-1]).tzinfo is None else pd.Timestamp(df.index[-1]).hour
+
+        # — perfil horário —
+        ctx = _ctx_xauusd(hora_utc, fechamento)
+        atr_pct = atr_atual / fechamento * 100 if fechamento > 0 else 0.0
+        regime = _regime_atr_xauusd(atr_pct, hora_utc)
+
         direcao = "buy" if m15 == "alta" and h1 == "alta" else "sell" if m15 == "baixa" and h1 == "baixa" else "neutro"
-        esperada = "alta" if direcao == "buy" else "baixa"
         fvg_ok = bool(fvg.get("disponivel") and fvg.get("direcao") == direcao)
         zona_inf, zona_sup = fvg.get("zona_inf"), fvg.get("zona_sup")
         if fvg_ok:
@@ -512,55 +527,121 @@ def plano_ouro_movimento(df: pd.DataFrame, atr: pd.Series, ativo: str,
             rejeicao = False
         corpo_atr = abs(fechamento - abertura) / atr_atual
         impulso_ok = float(fvg.get("tamanho_atr") or 0) >= .15
+
         noticia_estado = (noticia or {}).get("estado")
         noticia_bruta = str((noticia or {}).get("direcao", "")).lower()
         direcao_noticia = {"call": "buy", "buy": "buy", "put": "sell", "sell": "sell"}.get(noticia_bruta)
         dado_publicado = noticia_estado == "resultado_publicado" and direcao_noticia in ("buy", "sell")
         noticia_alinhada = not dado_publicado or direcao_noticia == direcao
+
+        regime_ok = regime == "normal"
+
+        sinal_tecnico = bool(
+            direcao != "neutro" and fvg_ok and impulso_ok
+            and rejeicao and corpo_atr >= .20 and regime_ok
+        )
+        sinal_confluente = bool(sinal_tecnico and dado_publicado and noticia_alinhada)
+
         checklist = [
             {"nome": "Tendência H1 e M15 alinhadas", "ok": direcao != "neutro"},
             {"nome": "FVG M15 na direção da tendência", "ok": fvg_ok},
             {"nome": "Candle fechou rejeitando a zona", "ok": rejeicao},
             {"nome": "Candle de confirmação ≥ 0,20 ATR", "ok": corpo_atr >= .20},
-            {"nome": "Dado USD confirma a direção", "ok": noticia_alinhada if dado_publicado else False},
+            {"nome": f"ATR normal para {hora_utc:02d}h UTC ({ctx['sessao']})", "ok": regime_ok},
+            {"nome": "Dado USD publicado e alinhado", "ok": sinal_confluente},
         ]
-        qualificada = bool(direcao != "neutro" and fvg_ok and impulso_ok and rejeicao
-                           and corpo_atr >= .20 and dado_publicado and noticia_alinhada)
+
+        # — alvos calibrados pelo perfil histórico —
         alvos = None
-        rr = None
+        rr_tp1 = rr_tp2 = None
         if direcao in ("buy", "sell"):
+            sinal_dir = 1.0 if direcao == "buy" else -1.0
             buffer = .15 * atr_atual
-            sl = minima - buffer if direcao == "buy" else maxima + buffer
-            risco = abs(fechamento - sl)
-            sinal = 1.0 if direcao == "buy" else -1.0
-            tp1 = fechamento + sinal * 1.5 * risco
+            sl_tecnico = minima - buffer if direcao == "buy" else maxima + buffer
+            # SL: usa o maior entre o técnico e o mínimo histórico da hora
+            sl_min_hist = ctx["sl_min_pts"]
+            sl_dist = max(abs(fechamento - sl_tecnico), sl_min_hist)
+            sl = fechamento - sinal_dir * sl_dist
+            tp1 = fechamento + sinal_dir * ctx["tp1_pts"]
+            tp2 = fechamento + sinal_dir * ctx["tp2_pts"]
+            rr_tp1 = round(ctx["tp1_pts"] / sl_dist, 2) if sl_dist > 0 else None
+            rr_tp2 = round(ctx["tp2_pts"] / sl_dist, 2) if sl_dist > 0 else None
             passo, unidade = unidade_movimento(ativo)
-            alvos = {"entrada": round(fechamento, 3), "sl": round(sl, 3),
-                      "tp1": round(tp1, 3), "risco_pips": round(risco / passo, 1),
-                      "risco_unidade": unidade}
-            rr = 1.5
+            alvos = {
+                "entrada": round(fechamento, 2),
+                "sl": round(sl, 2),
+                "tp1": round(tp1, 2),
+                "tp2": round(tp2, 2),
+                "sl_pts": round(sl_dist, 1),
+                "tp1_pts": ctx["tp1_pts"],
+                "tp2_pts": ctx["tp2_pts"],
+                "rr_tp1": rr_tp1,
+                "rr_tp2": rr_tp2,
+                "risco_unidade": unidade,
+            }
+
+        # — estado descritivo —
         if noticia_estado == "janela_risco":
-            estado, motivo = "NOTÍCIA USD — AGUARDAR DADO", "O número ainda não saiu; sem actual versus forecast não existe direção objetiva para operar a favor."
+            estado = "NOTÍCIA USD — AGUARDAR DADO"
+            motivo = "O número ainda não saiu; sem actual vs forecast não há direção objetiva."
         elif dado_publicado and not noticia_alinhada:
-            estado, motivo = "NOTÍCIA USD CONTRA A ESTRUTURA", "O resultado publicado aponta para o lado oposto ao setup técnico; não há confluência."
-        elif not dado_publicado:
-            estado, motivo = "OURO — SEM DIREÇÃO DE NOTÍCIA", "O scanner técnico está visível; para sinal de notícia, espere actual versus forecast publicado."
+            estado = "NOTÍCIA USD CONTRA A ESTRUTURA"
+            motivo = "Dado USD aponta lado oposto ao setup técnico; sem confluência."
+        elif regime == "quieto":
+            estado = "OURO — MERCADO PARADO"
+            motivo = (f"ATR abaixo do mínimo esperado para {hora_utc:02d}h UTC "
+                      f"({ctx['sessao']}). Amplitude mediana da hora: {ctx['amp_p50_pts']:.0f} pts.")
+        elif regime == "ativo":
+            estado = "OURO — VOLATILIDADE ANORMAL"
+            motivo = (f"ATR muito acima do normal para {hora_utc:02d}h UTC. "
+                      "Provável evento de notícia; aguardar acomodação.")
         elif direcao == "neutro":
-            estado, motivo = "OURO — SEM TENDÊNCIA H1/M15", "Aguardar as duas leituras apontarem para o mesmo lado."
+            estado = "OURO — SEM TENDÊNCIA H1/M15"
+            motivo = "Aguardar as duas leituras apontarem para o mesmo lado."
         elif not fvg_ok:
-            estado, motivo = "OURO — AGUARDAR FVG", "Aguardar um FVG M15 alinhado com a tendência; não perseguir impulso."
+            estado = "OURO — AGUARDAR FVG"
+            motivo = "Aguardar um FVG M15 alinhado com a tendência; não perseguir impulso."
         elif not rejeicao:
-            estado, motivo = "OURO — FVG ATIVO", "Preço precisa testar a zona e fechar com rejeição na direção da tendência."
+            estado = "OURO — FVG ATIVO"
+            motivo = "Preço precisa testar a zona e fechar com rejeição na direção."
         elif corpo_atr < .20:
-            estado, motivo = "OURO — REJEIÇÃO FRACA", "Candle tocou a zona, mas o corpo ainda é pequeno para confirmar movimento."
+            estado = "OURO — REJEIÇÃO FRACA"
+            motivo = "Candle tocou a zona, mas corpo pequeno; aguardar confirmação."
+        elif sinal_confluente:
+            estado = "OURO MOVIMENTO — CONFLUENTE"
+            motivo = (f"Estrutura + dado USD alinhados. "
+                      f"TP1={ctx['tp1_pts']:.0f} pts (p50 {hora_utc:02d}h), "
+                      f"TP2={ctx['tp2_pts']:.0f} pts (p75 {hora_utc:02d}h). "
+                      f"RR TP1={rr_tp1}.")
+        elif sinal_tecnico:
+            estado = "OURO MOVIMENTO — TÉCNICO"
+            motivo = (f"Estrutura técnica completa. Aguardar dado USD para confluência. "
+                      f"TP1={ctx['tp1_pts']:.0f} pts, TP2={ctx['tp2_pts']:.0f} pts ({hora_utc:02d}h UTC).")
         else:
-            estado, motivo = "OURO MOVIMENTO — ESTUDO", "Tendência, FVG e rejeição M15 alinhados; registrar e observar o desfecho."
+            estado = "OURO MOVIMENTO — ESTUDO"
+            motivo = "Condições parciais; registrar para aferição."
+
         return {
-            "disponivel": True, "sinal_estudo": qualificada, "direcao": direcao,
-            "estado": estado, "motivo": motivo, "fvg": fvg,
+            "disponivel": True,
+            "sinal_tecnico": sinal_tecnico,
+            "sinal_confluente": sinal_confluente,
+            "sinal_estudo": sinal_tecnico,  # compatibilidade com código existente
+            "direcao": direcao,
+            "estado": estado, "motivo": motivo,
+            "fvg": fvg,
             "noticia_direcao": direcao_noticia,
             "zona_inf": zona_inf, "zona_sup": zona_sup,
-            "corpo_atr": round(corpo_atr, 2), "rr": rr, "alvos": alvos,
+            "corpo_atr": round(corpo_atr, 2),
+            "rr": rr_tp1, "alvos": alvos,
+            "perfil_horario": {
+                "hora_utc": hora_utc,
+                "sessao": ctx["sessao"],
+                "regime_atr": regime,
+                "amp_p50_pts": ctx["amp_p50_pts"],
+                "tp1_pts": ctx["tp1_pts"],
+                "tp2_pts": ctx["tp2_pts"],
+                "sl_min_pts": ctx["sl_min_pts"],
+            },
             "checklist": checklist,
         }
     except (ValueError, TypeError, IndexError, KeyError):
