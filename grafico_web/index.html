@@ -1111,6 +1111,7 @@ ro.observe(document.getElementById('charts-area'));
 
 let primeiraCarga = true;
 let linhasNiveis = [], linhasFib = [], linhaEntrada = null, linhasGatilho = [];
+let seriesFvgBuy = [], seriesFvgSell = [];
 let linhaSL = null, linhaTP = null;
 let linhaAlvoProvavel = null;
 let _cacheNiveis = [], _cacheFib = [], _cacheFibContexto = null, _cacheCandles = [];
@@ -1230,6 +1231,41 @@ function _toggleFib() {
     serie.setData([{time: inicio, value: Number(f.preco)}, {time: fimGrafico, value: Number(f.preco)}]);
     linhasFib.push(serie);
   });
+}
+function _desenhaZonasOuro(dados) {
+  seriesFvgBuy.forEach(s => chartPreco.removeSeries(s));
+  seriesFvgBuy = [];
+  seriesFvgSell.forEach(s => chartPreco.removeSeries(s));
+  seriesFvgSell = [];
+  if (!_cacheCandles.length) return;
+  const fimGrafico = Number(_cacheCandles[_cacheCandles.length - 1].time);
+  const om = dados?.ouro_movimento;
+  if (!om) return;
+
+  function _desenhaBanda(zona, cor, lista) {
+    if (!zona?.disponivel) return;
+    const tsInicio = Math.floor(new Date(zona.inicio).getTime() / 1000);
+    const inf = Number(zona.zona_inf);
+    const sup = Number(zona.zona_sup);
+    if (!Number.isFinite(tsInicio) || !Number.isFinite(inf) || !Number.isFinite(sup)) return;
+    const opac = zona.rejeicao_confirmada ? '55' : '28';
+    const faixa = chartPreco.addBaselineSeries({
+      baseValue: { type: 'price', price: inf },
+      topFillColor1: cor + opac, topFillColor2: cor + opac,
+      topLineColor: cor + '88',
+      bottomFillColor1: 'transparent', bottomFillColor2: 'transparent',
+      bottomLineColor: 'transparent',
+      lastValueVisible: false, priceLineVisible: false, crosshairMarkerVisible: false,
+    });
+    faixa.setData([
+      { time: tsInicio, value: sup },
+      { time: fimGrafico, value: sup },
+    ]);
+    lista.push(faixa);
+  }
+
+  _desenhaBanda(om.buy_zone,  '#26a69a', seriesFvgBuy);
+  _desenhaBanda(om.sell_zone, '#ef5350', seriesFvgSell);
 }
 [chkBandas, chkEma, chkNiveis, chkFib].forEach(chk => chk.addEventListener('change', () => {
   serieBandaSup.applyOptions({ visible: chkBandas.checked });
@@ -1442,6 +1478,7 @@ async function atualizar() {
     }
     _toggleNiveis();
     _toggleFib();
+    _desenhaZonasOuro(dados);
 
     // Linha de entrada ativa
     if (linhaEntrada) { serieCandle.removePriceLine(linhaEntrada); linhaEntrada = null; }
