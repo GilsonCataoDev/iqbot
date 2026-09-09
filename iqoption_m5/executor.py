@@ -76,6 +76,7 @@ class ExecutorSeguro:
             decisao, motivo,
             timeframe=self.config.timeframe_segundos,
             expiracao_minutos=self.config.expiracao_minutos,
+            config=self.config,
         )
 
     @staticmethod
@@ -233,6 +234,7 @@ class ExecutorSeguro:
                 decisao, f"excecao_buy:{e}", valor=valor,
                 timeframe=self.config.timeframe_segundos,
                 expiracao_minutos=expiracao,
+                config=self.config,
             )
             logger.exception(
                 "falha_envio ativo=%s signal_id=%s",
@@ -254,6 +256,7 @@ class ExecutorSeguro:
                 decisao, f"buy_recusado:{id_ordem}", valor=valor,
                 timeframe=self.config.timeframe_segundos,
                 expiracao_minutos=expiracao,
+                config=self.config,
             )
             return
 
@@ -261,6 +264,7 @@ class ExecutorSeguro:
             id_ordem, decisao, valor, payout, enviada_em,
             timeframe=self.config.timeframe_segundos,
             expiracao_minutos=expiracao,
+            config=self.config,
         )
         # Slippage: candle aberto no momento da execução vs preço do sinal
         try:

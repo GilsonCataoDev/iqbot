@@ -52,6 +52,8 @@ class RegistroSQLite:
         self.campanha_id = uuid.uuid4().hex
         self.caminho.parent.mkdir(parents=True, exist_ok=True)
         self._lock = threading.Lock()
+        self._lock_campanhas = threading.Lock()
+        self._campanhas: dict[str, str] = {}
         self._criar_schema()
         self._registrar_campanha()
 
@@ -348,6 +350,10 @@ class RegistroSQLite:
     def _registrar_campanha(self) -> None:
         if self.config is None:
             return
+        self._campanhas[self.config.config_hash] = self.campanha_id
+        self._inserir_campanha(self.campanha_id, self.config)
+
+    def _inserir_campanha(self, campanha_id: str, config: Configuracao) -> None:
         with self._lock, self._sessao() as db:
             db.execute(
                 """
@@ -357,19 +363,39 @@ class RegistroSQLite:
                 ) VALUES (?, ?, ?, ?, ?, ?)
                 """,
                 (
-                    self.campanha_id,
+                    campanha_id,
                     datetime.now().isoformat(),
-                    self.config.config_hash,
-                    self.config.timeframe_segundos,
-                    self.config.entrada_max_segundos_no_candle,
+                    config.config_hash,
+                    config.timeframe_segundos,
+                    config.entrada_max_segundos_no_candle,
                     json.dumps(
-                        self.config.configuracao_auditavel(),
+                        config.configuracao_auditavel(),
                         ensure_ascii=False,
                         sort_keys=True,
                         default=str,
                     ),
                 ),
             )
+
+    def campanha_para(self, config: Configuracao | None = None) -> str | None:
+        """Campanha da config que realmente originou a ordem.
+
+        O laboratório roda vários rastros — um setup por config — sobre um
+        único registro. Sem isso toda ordem herdaria a campanha da config
+        base, e a auditoria apontaria para um setup que não gerou a ordem.
+        """
+        if self.config is None:
+            return None
+        if config is None:
+            return self.campanha_id
+        with self._lock_campanhas:
+            existente = self._campanhas.get(config.config_hash)
+            if existente is not None:
+                return existente
+            novo = uuid.uuid4().hex
+            self._campanhas[config.config_hash] = novo
+            self._inserir_campanha(novo, config)
+            return novo
 
     def registrar_latencia(self, lat, id_ordem: str | None = None) -> None:
         """Persiste um LatenciaSinal no banco. Seguro chamar múltiplas vezes
@@ -522,7 +548,9 @@ class RegistroSQLite:
         enviada_em: datetime,
         timeframe: int | None = None,
         expiracao_minutos: int | None = None,
+        config: Configuracao | None = None,
     ) -> None:
+        campanha = self.campanha_para(config)
         hora_sinal = decisao.candle_hora.isoformat()
         atraso_envio_ms = max(
             0,
@@ -543,7 +571,7 @@ class RegistroSQLite:
                     str(id_ordem), decisao.ativo, decisao.direcao, enviada_em.isoformat(),
                     valor, payout, decisao.detalhes.get("setup", "desconhecido"), decisao.preco,
                     hora_sinal, atraso_envio_ms,
-                    self.campanha_id if self.config is not None else None,
+                    campanha,
                     int(timeframe if timeframe is not None else (self.config.timeframe_segundos if self.config else 0)),
                     int(expiracao_minutos or 0),
                 ),
@@ -593,7 +621,9 @@ class RegistroSQLite:
         valor: float = 0.0,
         timeframe: int | None = None,
         expiracao_minutos: int | None = None,
+        config: Configuracao | None = None,
     ) -> None:
+        campanha = self.campanha_para(config)
         with self._lock, self._sessao() as db:
             db.execute(
                 """
@@ -610,7 +640,7 @@ class RegistroSQLite:
                     valor,
                     decisao.detalhes.get("setup", "desconhecido"),
                     motivo,
-                    self.campanha_id if self.config is not None else None,
+                    campanha,
                     int(timeframe if timeframe is not None else (
                         self.config.timeframe_segundos if self.config else 0
                     )),
