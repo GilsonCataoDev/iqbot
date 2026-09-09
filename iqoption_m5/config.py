@@ -920,17 +920,18 @@ def configuracao_ema_m5_real(base: Configuracao | None = None) -> Configuracao:
         anti_martingale_ativo=False,
         alavancagem_pyramid=False,
         alavancagem_maximo=2.50,
-        # Cinco wins a payout de 85% rendem ~R$10,63. Duas perdas encerram
-        # a sessão antes de a sequência comprometer a banca de R$100.
-        stop_diario=-5.0,
-        meta_diaria=10.0,
-        max_operacoes_dia=5,
-        max_perdas_consecutivas=2,
-        parar_por_perdas=True,
-        parar_por_prejuizo=True,
+        # Gestão diária escolhida: stake fixo de R$2,50 e encerra somente ao
+        # realizar +R$15 no dia. Não há stop ou limite diário de operações.
+        # O piso permanente de banca e o drawdown continuam ativos abaixo.
+        stop_diario=0.0,
+        meta_diaria=15.0,
+        max_operacoes_dia=0,
+        max_perdas_consecutivas=0,
+        parar_por_perdas=False,
+        parar_por_prejuizo=False,
         drawdown_maximo_percentual=0.30,
-        circuit_breaker_max_perdas=2,
-        circuit_breaker_cooldown_minutos=120,
+        circuit_breaker_max_perdas=0,
+        circuit_breaker_cooldown_minutos=0,
         max_ordens_paralelas=1,
         cooldown_pos_ordem_por_ativo_candles=3,
         payout_minimo=0.82,
