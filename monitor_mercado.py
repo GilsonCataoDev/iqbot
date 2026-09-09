@@ -527,6 +527,22 @@ def plano_ouro_movimento(df: pd.DataFrame, atr: pd.Series, ativo: str,
             rejeicao = False
         corpo_atr = abs(fechamento - abertura) / atr_atual
         impulso_ok = float(fvg.get("tamanho_atr") or 0) >= .15
+        corpo_min = 0.30 if ctx["sessao"] == "ásia" else 0.20
+
+        # — visitas ao FVG: zona testada > 1x antes da vela atual perde força —
+        fvg_fresco = True
+        if fvg.get("disponivel") and fvg.get("fim") and zona_inf is not None and zona_sup is not None:
+            try:
+                fvg_fim_ts = pd.Timestamp(fvg["fim"])
+                mask = (df.index > fvg_fim_ts) & (df.index < df.index[-1])
+                anteriores = df.loc[mask]
+                if fvg.get("direcao") == "buy":
+                    visitas_previas = int((anteriores["Low"] <= zona_sup).sum())
+                else:
+                    visitas_previas = int((anteriores["High"] >= zona_inf).sum())
+                fvg_fresco = visitas_previas <= 1
+            except Exception:
+                fvg_fresco = True
 
         noticia_estado = (noticia or {}).get("estado")
         noticia_bruta = str((noticia or {}).get("direcao", "")).lower()
@@ -536,18 +552,33 @@ def plano_ouro_movimento(df: pd.DataFrame, atr: pd.Series, ativo: str,
 
         regime_ok = regime == "normal"
 
+        # — RR preliminar: SL técnico vs TP1 histórico da hora —
+        rr_ok = True
+        rr_prelim = None
+        _sl_dist_prelim = 0.0
+        if direcao != "neutro":
+            _buf = .15 * atr_atual
+            _sl_tec = minima - _buf if direcao == "buy" else maxima + _buf
+            _sl_dist_prelim = max(abs(fechamento - _sl_tec), ctx["sl_min_pts"])
+            rr_prelim = ctx["tp1_pts"] / _sl_dist_prelim if _sl_dist_prelim > 0 else 0.0
+            rr_ok = rr_prelim >= 1.0
+
         sinal_tecnico = bool(
-            direcao != "neutro" and fvg_ok and impulso_ok
-            and rejeicao and corpo_atr >= .20 and regime_ok
+            direcao != "neutro" and fvg_ok and impulso_ok and fvg_fresco
+            and rejeicao and corpo_atr >= corpo_min and regime_ok
+            and rr_ok and noticia_estado != "janela_risco"
         )
         sinal_confluente = bool(sinal_tecnico and dado_publicado and noticia_alinhada)
 
         checklist = [
             {"nome": "Tendência H1 e M15 alinhadas", "ok": direcao != "neutro"},
             {"nome": "FVG M15 na direção da tendência", "ok": fvg_ok},
+            {"nome": "FVG não sobretestado (≤ 1 visita prévia)", "ok": fvg_fresco},
             {"nome": "Candle fechou rejeitando a zona", "ok": rejeicao},
-            {"nome": "Candle de confirmação ≥ 0,20 ATR", "ok": corpo_atr >= .20},
+            {"nome": f"Candle de confirmação ≥ {int(corpo_min * 100)}% ATR ({ctx['sessao']})", "ok": corpo_atr >= corpo_min},
             {"nome": f"ATR normal para {hora_utc:02d}h UTC ({ctx['sessao']})", "ok": regime_ok},
+            {"nome": "RR TP1 ≥ 1,0", "ok": rr_ok},
+            {"nome": "Sem notícia USD pendente (janela_risco)", "ok": noticia_estado != "janela_risco"},
             {"nome": "Dado USD publicado e alinhado", "ok": sinal_confluente},
         ]
 
@@ -556,11 +587,7 @@ def plano_ouro_movimento(df: pd.DataFrame, atr: pd.Series, ativo: str,
         rr_tp1 = rr_tp2 = None
         if direcao in ("buy", "sell"):
             sinal_dir = 1.0 if direcao == "buy" else -1.0
-            buffer = .15 * atr_atual
-            sl_tecnico = minima - buffer if direcao == "buy" else maxima + buffer
-            # SL: usa o maior entre o técnico e o mínimo histórico da hora
-            sl_min_hist = ctx["sl_min_pts"]
-            sl_dist = max(abs(fechamento - sl_tecnico), sl_min_hist)
+            sl_dist = _sl_dist_prelim
             sl = fechamento - sinal_dir * sl_dist
             tp1 = fechamento + sinal_dir * ctx["tp1_pts"]
             tp2 = fechamento + sinal_dir * ctx["tp2_pts"]
@@ -601,12 +628,20 @@ def plano_ouro_movimento(df: pd.DataFrame, atr: pd.Series, ativo: str,
         elif not fvg_ok:
             estado = "OURO — AGUARDAR FVG"
             motivo = "Aguardar um FVG M15 alinhado com a tendência; não perseguir impulso."
+        elif not fvg_fresco:
+            estado = "OURO — FVG SOBRETESTADO"
+            motivo = "A zona FVG foi testada mais de uma vez antes desta vela; magnetismo reduzido."
         elif not rejeicao:
             estado = "OURO — FVG ATIVO"
             motivo = "Preço precisa testar a zona e fechar com rejeição na direção."
-        elif corpo_atr < .20:
+        elif corpo_atr < corpo_min:
             estado = "OURO — REJEIÇÃO FRACA"
-            motivo = "Candle tocou a zona, mas corpo pequeno; aguardar confirmação."
+            motivo = (f"Corpo do candle ({corpo_atr:.0%} ATR) abaixo do mínimo "
+                      f"para {ctx['sessao']} ({corpo_min:.0%} ATR); aguardar confirmação.")
+        elif not rr_ok:
+            estado = "OURO — RR INSUFICIENTE"
+            motivo = (f"RR TP1 {rr_prelim:.2f} < 1,0; SL técnico ({_sl_dist_prelim:.0f} pts) "
+                      f"largo demais para o TP1 histórico da hora ({ctx['tp1_pts']:.0f} pts).")
         elif sinal_confluente:
             estado = "OURO MOVIMENTO — CONFLUENTE"
             motivo = (f"Estrutura + dado USD alinhados. "

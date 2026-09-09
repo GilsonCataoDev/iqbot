@@ -1117,3 +1117,87 @@ def test_plano_ouro_perfil_horario_no_resultado():
     assert ph["tp1_pts"] > 0
     assert ph["sl_min_pts"] > 0
     assert ph["tp2_pts"] >= ph["tp1_pts"]
+
+
+def test_plano_ouro_janela_risco_bloqueia_sinal_tecnico():
+    """noticia em janela_risco deve forçar sinal_tecnico=False mesmo com estrutura completa."""
+    df = _df_xauusd(tendencia="alta", hora_utc=10, n=120)
+    fvg_fake = {
+        "disponivel": True, "direcao": "buy",
+        "zona_inf": float(df["Close"].iloc[-1]) - 3.0,
+        "zona_sup": float(df["Close"].iloc[-1]) - 0.1,
+        "tamanho_atr": 0.30,
+    }
+    atr = _atr_xauusd(df, 5.0)
+    with patch("monitor_mercado.detectar_fvg_m15", return_value=fvg_fake), \
+         patch("monitor_mercado._tendencia_ema", return_value="alta"), \
+         patch("monitor_mercado._tendencia_h1_a_partir_m15", return_value="alta"):
+        resultado = plano_ouro_movimento(df, atr, "XAUUSD",
+                                         noticia={"estado": "janela_risco"})
+    assert not resultado["sinal_tecnico"], "janela_risco deve bloquear sinal_tecnico"
+    assert resultado["estado"] == "NOTÍCIA USD — AGUARDAR DADO"
+
+
+def test_plano_ouro_rr_insuficiente_bloqueia_sinal_tecnico():
+    """SL técnico muito largo (Low distante) → RR < 1.0 → sinal_tecnico=False."""
+    df = _df_xauusd(tendencia="alta", hora_utc=10, n=120)
+    preco = float(df["Close"].iloc[-1])
+    # Low 30 pts abaixo → SL técnico > TP1 histórico da hora
+    df.loc[df.index[-1], "Low"] = preco - 30.0
+    fvg_fake = {
+        "disponivel": True, "direcao": "buy",
+        "zona_inf": preco - 3.0,
+        "zona_sup": preco - 0.1,
+        "tamanho_atr": 0.30,
+    }
+    atr = _atr_xauusd(df, 5.0)
+    with patch("monitor_mercado.detectar_fvg_m15", return_value=fvg_fake), \
+         patch("monitor_mercado._tendencia_ema", return_value="alta"), \
+         patch("monitor_mercado._tendencia_h1_a_partir_m15", return_value="alta"):
+        resultado = plano_ouro_movimento(df, atr, "XAUUSD")
+    assert not resultado["sinal_tecnico"], "RR < 1.0 deve bloquear sinal_tecnico"
+
+
+def test_plano_ouro_asia_exige_corpo_minimo_30pct_atr():
+    """Na sessão ásia, corpo de 0.24 ATR (≥0.20 mas <0.30) não gera sinal_tecnico."""
+    # n=96 (mínimo aceito): 03:00 + 95×15min = 02:45 próximo dia → hora_utc=2 (ásia)
+    df = _df_xauusd(tendencia="alta", hora_utc=3, n=96)  # última vela às 02:45 UTC = ásia
+    preco = float(df["Close"].iloc[-1])
+    # corpo = 1.2 pts, atr = 5.0 → corpo_atr = 0.24 (entre 0.20 e 0.30)
+    df.loc[df.index[-1], "Open"] = preco - 1.2
+    fvg_fake = {
+        "disponivel": True, "direcao": "buy",
+        "zona_inf": preco - 3.0,
+        "zona_sup": preco - 0.1,
+        "tamanho_atr": 0.30,
+    }
+    atr = _atr_xauusd(df, 5.0)
+    with patch("monitor_mercado.detectar_fvg_m15", return_value=fvg_fake), \
+         patch("monitor_mercado._tendencia_ema", return_value="alta"), \
+         patch("monitor_mercado._tendencia_h1_a_partir_m15", return_value="alta"):
+        resultado = plano_ouro_movimento(df, atr, "XAUUSD")
+    assert not resultado["sinal_tecnico"], "corpo 0.24 ATR deve falhar na ásia (mínimo 0.30)"
+    assert resultado["perfil_horario"]["sessao"] == "ásia"
+
+
+def test_plano_ouro_fvg_sobretestado_bloqueia_sinal():
+    """FVG com 2+ visitas prévias → fvg_fresco=False → sinal_tecnico=False."""
+    df = _df_xauusd(tendencia="alta", hora_utc=10, n=120)
+    preco = float(df["Close"].iloc[-1])
+    zona_sup = preco - 0.1
+    # Força 3 velas anteriores a tocarem a zona (Low <= zona_sup)
+    for offset in [-5, -4, -3]:
+        df.iloc[offset, df.columns.get_loc("Low")] = zona_sup - 0.05
+    fvg_fake = {
+        "disponivel": True, "direcao": "buy",
+        "zona_inf": preco - 3.0,
+        "zona_sup": zona_sup,
+        "tamanho_atr": 0.30,
+        "fim": str(df.index[-7]),  # FVG formado 7 velas atrás
+    }
+    atr = _atr_xauusd(df, 5.0)
+    with patch("monitor_mercado.detectar_fvg_m15", return_value=fvg_fake), \
+         patch("monitor_mercado._tendencia_ema", return_value="alta"), \
+         patch("monitor_mercado._tendencia_h1_a_partir_m15", return_value="alta"):
+        resultado = plano_ouro_movimento(df, atr, "XAUUSD")
+    assert not resultado["sinal_tecnico"], "FVG visitado 3+ vezes deve bloquear sinal_tecnico"
