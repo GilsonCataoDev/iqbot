@@ -211,6 +211,20 @@ def _rastros(base: Configuracao) -> list[RastroEma]:
             somente_sombra=True,
         )
     )
+    # Comparação: ema920_pullback M5 com filtro H1 ativo. O rastro principal
+    # opera sem filtro H1; este acumula amostra paralela para decidir se o
+    # filtro melhora o acerto antes de qualquer mudança no real.
+    saida.append(
+        RastroEma(
+            nome="M5 | EMA9/20 + H1 (sombra comparação)",
+            config=replace(
+                _config_rastro(base, 300, "ema920_pullback"),
+                filtro_h1_ativo=True,
+            ),
+            intravela=False,
+            somente_sombra=True,
+        )
+    )
     return saida
 
 
@@ -665,7 +679,7 @@ def executar_laboratorio_ema() -> None:
                     except RuntimeError as erro:
                         print(f"[{rastro.nome}] configuração ignorada ({erro})")
                         continue
-                    if rastro.config.timeframe_segundos == 900:
+                    if rastro.config.filtro_h1_ativo:
                         ultimo_h1 = ultima_tendencia_h1.get(ativo, 0.0)
                         if inicio - ultimo_h1 >= rastro.config.h1_atualizar_segundos:
                             try:
@@ -753,6 +767,8 @@ def executar_laboratorio_ema() -> None:
                                     "nzd_v1_noticia_high"
                                     if noticia_high else "nzd_v1_validacao"
                                 )
+                            elif setup == "ema920_pullback":
+                                motivo_sombra = "m5_h1_validacao"
                             else:
                                 motivo_sombra = "m15_h1_validacao"
                         elif ativo == "NZDUSD" and noticia_high:

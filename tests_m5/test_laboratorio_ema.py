@@ -21,7 +21,7 @@ def test_laboratorio_tem_rastros_m5_e_m15_e_nzd_em_sombra():
     config = configuracao_ema_laboratorio_practice()
     rastros = _rastros(config)
 
-    assert len(rastros) == 10
+    assert len(rastros) == 11
     assert config.ativos == (
         "EURUSD", "AUDCAD", "NZDUSD", "GBPUSD", "USDJPY", "AUDUSD", "USDCAD", "EURJPY",
     )
@@ -39,6 +39,14 @@ def test_laboratorio_tem_rastros_m5_e_m15_e_nzd_em_sombra():
     assert nzd.config.timeframe_segundos == 300
     rastros_m15 = [r for r in rastros if r.config.timeframe_segundos == 900]
     assert all(r.config.filtro_h1_ativo for r in rastros_m15)
+    h1_shadow = next(
+        r for r in rastros
+        if r.config.ema920_pullback_ativo
+        and r.config.timeframe_segundos == 300
+        and r.config.filtro_h1_ativo
+        and r.somente_sombra
+    )
+    assert h1_shadow is not None
     assert any(not r.somente_sombra and r.config.ema920_pullback_ativo for r in rastros_m15)
     rastros_executaveis = [r for r in rastros if not r.somente_sombra]
     assert len(rastros_executaveis) == 2
