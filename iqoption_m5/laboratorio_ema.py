@@ -203,6 +203,35 @@ def _rastros(base: Configuracao) -> list[RastroEma]:
     return saida
 
 
+def _motivo_sombra(
+    base: Configuracao,
+    rastro: RastroEma,
+    setup: str,
+    ativo: str,
+    noticia_high: bool,
+) -> str | None:
+    """Por que este sinal observa em vez de mandar ordem. None = manda.
+
+    A janela de notícia vale para qualquer par porque ``eventos_do_ativo``
+    já resolve as moedas do símbolo — EURUSD recebe evento do BCE e do PPI
+    americano. A versão anterior só olhava NZDUSD, que nunca chegava aqui
+    por já estar em ``ativos_somente_sombra``: nenhum par tinha guarda.
+    """
+    if ativo in base.ativos_somente_sombra:
+        return "ativo_candidato_sombra"
+    if rastro.somente_sombra:
+        if setup == "fibo_sr_retracao":
+            return "fibo_sr_validacao"
+        if setup == "nzd_trend_pullback_v1":
+            return "nzd_v1_noticia_high" if noticia_high else "nzd_v1_validacao"
+        if setup == "ema920_pullback":
+            return "m5_h1_validacao"
+        return "m15_h1_validacao"
+    if noticia_high:
+        return "noticia_high"
+    return None
+
+
 def _setup_do_rastro(config: Configuracao) -> str:
     """Identifica o único setup ligado no rastro do laboratório.
 
@@ -731,23 +760,9 @@ def executar_laboratorio_ema() -> None:
                                 ativo, agora_utc, antes=30, depois=30
                             )
                         )
-                        motivo_sombra = None
-                        if ativo in base.ativos_somente_sombra:
-                            motivo_sombra = "ativo_candidato_sombra"
-                        elif rastro.somente_sombra:
-                            if setup == "fibo_sr_retracao":
-                                motivo_sombra = "fibo_sr_validacao"
-                            elif setup == "nzd_trend_pullback_v1":
-                                motivo_sombra = (
-                                    "nzd_v1_noticia_high"
-                                    if noticia_high else "nzd_v1_validacao"
-                                )
-                            elif setup == "ema920_pullback":
-                                motivo_sombra = "m5_h1_validacao"
-                            else:
-                                motivo_sombra = "m15_h1_validacao"
-                        elif ativo == "NZDUSD" and noticia_high:
-                            motivo_sombra = "nzd_noticia_high"
+                        motivo_sombra = _motivo_sombra(
+                            base, rastro, setup, ativo, noticia_high
+                        )
                         autorizacao = (
                             Autorizacao(False, motivo_sombra)
                             if motivo_sombra is not None

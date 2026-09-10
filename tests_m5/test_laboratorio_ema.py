@@ -10,7 +10,7 @@ from iqoption_m5.estrategia import EstrategiaReversaoM5
 from iqoption_m5.laboratorio_ema import (
     _alvo_sombra, _rastros, _recuperar_pendencias_periodicas, _setup_do_rastro,
     _patch_candle_ao_vivo, ProgressoLaboratorio, _reconectar_laboratorio_estagnado,
-    _armar_watchdog_apos_inicializacao, _alerta_ema920_m5,
+    _armar_watchdog_apos_inicializacao, _alerta_ema920_m5, _motivo_sombra,
 )
 from iqoption_m5.mercado_iq import iniciar_com_timeout
 from iqoption_m5.modelos import Autorizacao, Decisao, ResultadoOrdem, SnapshotMercado
@@ -467,3 +467,40 @@ def test_leitura_m5_qualifica_sem_alterar_a_direcao_ou_a_ordem():
     assert qualificada.preco == 1.1
     assert qualificada.detalhes["leitura_m5"]["qualificada"] is True
     assert qualificada.detalhes["leitura_m5"]["modo"] == "sombra"
+
+
+def _rastro_que_opera(rastros):
+    return next(
+        r for r in rastros
+        if not r.somente_sombra and r.config.timeframe_segundos == 300
+    )
+
+
+def test_noticia_high_manda_qualquer_par_para_sombra():
+    """Antes só NZDUSD era checado — e ele nunca chegava neste ponto."""
+    base = configuracao_ema_laboratorio_practice()
+    rastro = _rastro_que_opera(_rastros(base))
+
+    assert _motivo_sombra(
+        base, rastro, "ema920_pullback", "EURUSD", noticia_high=True
+    ) == "noticia_high"
+
+
+def test_sem_noticia_o_par_que_opera_segue_mandando_ordem():
+    base = configuracao_ema_laboratorio_practice()
+    rastro = _rastro_que_opera(_rastros(base))
+
+    assert _motivo_sombra(
+        base, rastro, "ema920_pullback", "EURUSD", noticia_high=False
+    ) is None
+
+
+def test_ativo_ja_em_sombra_mantem_o_motivo_original_mesmo_com_noticia():
+    """O rótulo do candidato não pode ser sobrescrito: a amostra dele
+    é comparada por motivo e misturar as duas causas a invalida."""
+    base = configuracao_ema_laboratorio_practice()
+    rastro = _rastro_que_opera(_rastros(base))
+
+    assert _motivo_sombra(
+        base, rastro, "ema920_pullback", "NZDUSD", noticia_high=True
+    ) == "ativo_candidato_sombra"
