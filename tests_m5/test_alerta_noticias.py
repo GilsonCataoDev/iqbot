@@ -1,6 +1,8 @@
 import json
 import tempfile
+import time
 import unittest
+from unittest.mock import patch
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -141,6 +143,50 @@ class TestCalendarioEconomico(unittest.TestCase):
     def _evento(self, minutos, moeda="USD", impacto="High", titulo="Non-Farm Payrolls"):
         quando = self.agora + timedelta(minutes=minutos)
         return {"title": titulo, "country": moeda, "date": quando.isoformat(), "impact": impacto}
+
+    def _evento_relativo_a_agora(self, minutos, impacto="High"):
+        quando = datetime.now(timezone.utc) + timedelta(minutes=minutos)
+        return {"title": "Non-Farm Payrolls", "country": "USD",
+                "date": quando.isoformat(), "impact": impacto}
+
+    def test_reconhece_janela_em_que_o_actual_pode_sair(self):
+        calendario = self._calendario([self._evento(-5)])
+
+        self.assertTrue(calendario.perto_de_evento_alto(self.agora))
+
+    def test_longe_do_evento_nao_esta_na_janela(self):
+        calendario = self._calendario([self._evento(-180)])
+
+        self.assertFalse(calendario.perto_de_evento_alto(self.agora))
+
+    def test_evento_de_impacto_menor_nao_encurta_o_cache(self):
+        calendario = self._calendario([self._evento(-5, impacto="Medium")])
+
+        self.assertFalse(calendario.perto_de_evento_alto(self.agora))
+
+    def test_janela_de_noticia_rebaixa_o_cache_para_pegar_o_actual(self):
+        """Com TTL de 1h o monitor so via o numero ate 59min depois.
+
+        Nao atrasa apenas o aviso: a afericao de direcao grava o preco do
+        instante em que acorda, entao cache vencido a faz medir a reacao a
+        partir do lugar errado.
+        """
+        calendario = self._calendario([self._evento_relativo_a_agora(-5)])
+        calendario._baixado_em = time.time() - 120  # 2min: fresco para o TTL de 1h
+
+        with patch.object(calendario, "_baixar", return_value=[]) as baixar:
+            calendario.atualizar()
+
+        baixar.assert_called_once()
+
+    def test_fora_da_janela_o_cache_de_uma_hora_continua_valendo(self):
+        calendario = self._calendario([self._evento_relativo_a_agora(-180)])
+        calendario._baixado_em = time.time() - 120
+
+        with patch.object(calendario, "_baixar", return_value=[]) as baixar:
+            calendario.atualizar()
+
+        baixar.assert_not_called()
 
     def test_evento_proximo_entra_na_janela_de_risco(self):
         calendario = self._calendario([self._evento(10)])

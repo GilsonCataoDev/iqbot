@@ -21,6 +21,11 @@ from pathlib import Path
 
 URL_CALENDARIO = "https://nfs.faireconomy.media/ff_calendar_thisweek.json"
 IMPACTOS_RELEVANTES = ("High", "Medium")
+# Janela em que o `actual` de um evento HIGH pode sair. O feed publica o
+# numero alguns minutos depois da hora agendada; antes dela so precisamos
+# saber o que esta agendado.
+JANELA_ANTES_EVENTO_MIN = 2.0
+JANELA_APOS_EVENTO_MIN = 20.0
 MOEDAS_CONHECIDAS = ("EUR", "USD", "GBP", "JPY", "AUD", "NZD", "CAD", "CHF")
 
 
@@ -241,10 +246,12 @@ class CalendarioEconomico:
     """Baixa uma vez por hora e responde consultas a partir da memória."""
 
     def __init__(self, pasta_dados: Path, ttl_segundos: float = 3600,
-                 url: str = URL_CALENDARIO, usar_ia: bool = True):
+                 url: str = URL_CALENDARIO, usar_ia: bool = True,
+                 ttl_perto_de_evento_segundos: float = 60):
         self.arquivo = Path(pasta_dados) / "calendario_economico.json"
         self.arquivo_historico = Path(pasta_dados) / "historico_noticias.json"
         self.ttl_segundos = ttl_segundos
+        self.ttl_perto_de_evento_segundos = ttl_perto_de_evento_segundos
         self.url = url
         self._eventos: list[Evento] = []
         self._baixado_em = 0.0
@@ -351,9 +358,27 @@ class CalendarioEconomico:
             )
         return sorted(eventos, key=lambda evento: evento.quando)
 
+    def perto_de_evento_alto(self, agora: datetime | None = None) -> bool:
+        """Estamos na janela em que o `actual` de um evento HIGH pode sair?"""
+        agora = agora or datetime.now(timezone.utc)
+        return any(
+            -JANELA_APOS_EVENTO_MIN <= evento.minutos_ate(agora) <= JANELA_ANTES_EVENTO_MIN
+            for evento in self._eventos
+            if evento.impacto == "High"
+        )
+
+    def _ttl_atual(self) -> float:
+        """Uma hora basta para saber o que esta agendado; nao para saber que
+        o numero saiu. Descobrir tarde nao atrasa so o aviso: a afericao de
+        direcao grava o preco do instante em que acorda, entao um cache
+        vencido faz ela medir a partir do lugar errado."""
+        if self.perto_de_evento_alto():
+            return min(self.ttl_perto_de_evento_segundos, self.ttl_segundos)
+        return self.ttl_segundos
+
     def atualizar(self, forcar: bool = False) -> bool:
         """Devolve True se há calendário disponível (baixado agora ou em cache)."""
-        if not forcar and self._eventos and time.time() - self._baixado_em < self.ttl_segundos:
+        if not forcar and self._eventos and time.time() - self._baixado_em < self._ttl_atual():
             return True
         try:
             bruto = self._baixar()
