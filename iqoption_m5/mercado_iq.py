@@ -55,6 +55,10 @@ class MercadoIQ:
         # viva. O intervalo evita uma rajada de chamadas para todos os pares.
         self._ultimo_fallback_stream: dict[tuple[str, int], float] = {}
         self._lock_api = threading.RLock()
+        # Contrato real de cada ordem, colhido quando a IQ devolve o desfecho
+        # e consumido logo em seguida por quem registra.
+        self._contratos: dict[str, dict] = {}
+        self._lock_contratos = threading.Lock()
         # Lock separado do _lock_api: a reconexão PRECISA rodar mesmo quando
         # uma thread está pendurada segurando _lock_api numa chamada morta.
         self._lock_reconexao = threading.Lock()
@@ -896,7 +900,55 @@ class MercadoIQ:
         ordem = self._localizar_ordem_historico(
             api_baixo_nivel.get_options_v2_data, str(id_ordem)
         )
-        return None if ordem is None else self._extrair_lucro_historico(ordem)
+        if ordem is None:
+            return None
+        contrato = self._extrair_contrato(ordem)
+        if contrato is not None:
+            with self._lock_contratos:
+                # O dicionário guarda só o que ainda não foi lido. Sem o teto
+                # um processo longo acumularia um contrato por ordem para
+                # sempre, e quem consome faz pop logo em seguida.
+                if len(self._contratos) >= 256:
+                    self._contratos.clear()
+                self._contratos[str(id_ordem)] = contrato
+        return self._extrair_lucro_historico(ordem)
+
+    @staticmethod
+    def _extrair_contrato(ordem: dict) -> dict | None:
+        """Strike e vencimento reais da opção, como a corretora os registrou.
+
+        Sem isso o backtest precisa supor que a entrada saiu na abertura da
+        vela e que o vencimento cai no fechamento de outra — duas suposições
+        falsas. A opção abre ao preço do instante da compra e expira num marco
+        de relógio da IQ, e num horizonte de 15 minutos qualquer desvio nas
+        pontas inverte o desfecho.
+        """
+        def _numero(*chaves):
+            for chave in chaves:
+                valor = ordem.get(chave)
+                if valor in (None, ""):
+                    continue
+                try:
+                    return float(valor)
+                except (TypeError, ValueError):
+                    continue
+            return None
+
+        strike = _numero("open_quote", "value", "strike", "open_price")
+        expira_em = _numero("exp_time", "expiration_time", "expired_at", "close_time")
+        preco_expiracao = _numero("close_quote", "close_price")
+        if strike is None and expira_em is None and preco_expiracao is None:
+            return None
+        return {
+            "strike": strike,
+            "expira_em": expira_em,
+            "preco_expiracao": preco_expiracao,
+        }
+
+    def detalhes_contrato(self, id_ordem: object) -> dict | None:
+        """Consome o contrato achado na última consulta desta ordem."""
+        with self._lock_contratos:
+            return self._contratos.pop(str(id_ordem), None)
 
     def fechar(self) -> None:
         with self._lock_api:

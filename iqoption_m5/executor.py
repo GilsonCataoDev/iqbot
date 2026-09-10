@@ -60,6 +60,30 @@ class ExecutorSeguro:
             return False, "entrada_atrasada_pre_envio", segundo
         return True, "ok", segundo
 
+    def _registrar_contrato(self, id_ordem: object) -> None:
+        """Persiste strike e vencimento reais; nunca atrapalha a ordem.
+
+        É observação para o backtest futuro, então uma falha aqui não pode
+        impedir o resultado financeiro de ser gravado logo abaixo.
+        """
+        # Enriquecimento opcional: o Protocol MercadoExecutor não exige o
+        # método, então um mercado que não o oferece simplesmente não grava.
+        obter = getattr(self.mercado, "detalhes_contrato", None)
+        if not callable(obter):
+            return
+        try:
+            detalhes = obter(id_ordem)
+            if detalhes is None:
+                return
+            self.registro.registrar_contrato(
+                str(id_ordem),
+                detalhes.get("strike"),
+                detalhes.get("expira_em"),
+                detalhes.get("preco_expiracao"),
+            )
+        except Exception:
+            logger.debug("contrato_nao_registrado id_ordem=%s", id_ordem, exc_info=True)
+
     def _registrar_bloqueio(self, decisao: Decisao, motivo: str) -> None:
         """Deixa no banco a razão de uma decisão autorizada não virar ordem.
 
@@ -352,6 +376,7 @@ class ExecutorSeguro:
             )
             bruto = f"resultado_desconhecido:{bruto}"
 
+        self._registrar_contrato(id_ordem)
         resultado = ResultadoOrdem(
             id_ordem=str(id_ordem),
             ativo=decisao.ativo,

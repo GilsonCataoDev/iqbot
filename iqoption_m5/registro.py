@@ -144,6 +144,14 @@ class RegistroSQLite:
                     UNIQUE(ativo, candle_hora, direcao, timeframe, setup)
                 );
 
+                CREATE TABLE IF NOT EXISTS contratos (
+                    id_ordem TEXT PRIMARY KEY,
+                    registrado_em TEXT NOT NULL,
+                    strike REAL,
+                    expira_em TEXT,
+                    preco_expiracao REAL
+                );
+
                 CREATE TABLE IF NOT EXISTS slippage (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     registrado_em TEXT NOT NULL,
@@ -1114,6 +1122,38 @@ class RegistroSQLite:
             else:
                 bloqueios[motivo] = bloqueios.get(motivo, 0) + 1
         return {"confirmados": confirmados, "executados": executados, "bloqueios": bloqueios}
+
+    def registrar_contrato(
+        self,
+        id_ordem: str,
+        strike: float | None,
+        expira_em: float | None,
+        preco_expiracao: float | None,
+    ) -> None:
+        """Guarda o contrato como a corretora o registrou.
+
+        É o que falta para um backtest valer alguma coisa: hoje ele supõe
+        entrada na abertura da vela e saída no fechamento de outra, e essas
+        duas suposições erram um terço dos desfechos medidos contra ordens
+        reais. Com strike e vencimento efetivos dá para medir a opção que
+        existiu, não uma que se parece com ela.
+        """
+        expira_iso = (
+            datetime.fromtimestamp(expira_em).isoformat()
+            if expira_em is not None else None
+        )
+        with self._lock, self._sessao() as db:
+            db.execute(
+                """
+                INSERT OR REPLACE INTO contratos (
+                    id_ordem, registrado_em, strike, expira_em, preco_expiracao
+                ) VALUES (?, ?, ?, ?, ?)
+                """,
+                (
+                    str(id_ordem), datetime.now().isoformat(),
+                    strike, expira_iso, preco_expiracao,
+                ),
+            )
 
     def registrar_slippage(
         self, ativo: str, id_ordem: str, preco_sinal: float, preco_execucao: float
