@@ -109,7 +109,30 @@ def contexto_fibo(marcacoes: list[dict], preco: float) -> dict | None:
     }
 
 
-def avaliar_combos(ind: pd.DataFrame, vela: dict, fibo: dict | None) -> list[dict]:
+def _prazo_binaria(timeframe_segundos: int) -> dict:
+    """Prazo explícito para o alerta manual; não é instrução de execução."""
+    if timeframe_segundos == 300:
+        return {
+            "janela_entrada": "até 30s após fechar a vela M5",
+            "expiracao_min": 15,
+            "rotulo": "M5 → expiração 15 min",
+        }
+    if timeframe_segundos == 900:
+        return {
+            "janela_entrada": "até 60s após fechar a vela M15",
+            "expiracao_min": 30,
+            "rotulo": "M15 → expiração 30 min",
+        }
+    return {
+        "janela_entrada": "use H1 apenas como contexto; confirme no M5",
+        "expiracao_min": None,
+        "rotulo": "H1 não gera entrada binária direta",
+    }
+
+
+def avaliar_combos(
+    ind: pd.DataFrame, vela: dict, fibo: dict | None, timeframe_segundos: int = 300
+) -> list[dict]:
     """Devolve alertas explicáveis. Nenhum item representa recomendação de ordem."""
     u = ind.iloc[-2]
     tendencia = "CALL" if u.ema9 > u.ema21 else "PUT" if u.ema9 < u.ema21 else "NEUTRA"
@@ -118,6 +141,7 @@ def avaliar_combos(ind: pd.DataFrame, vela: dict, fibo: dict | None) -> list[dic
     perto_sr = min(abs(preco - sr_min), abs(preco - sr_max)) <= max(float(u.atr) * .3, 1e-12)
     confirmada = vela["direcao"] == tendencia and vela["forca"] >= 2
     fib_zona = bool(fibo and fibo["zona50_618"]["dentro"])
+    prazo = _prazo_binaria(timeframe_segundos)
     retorno = [
         {"id": "fibo_correcao", "nome": "Fibo: correção a favor", "ativo": fib_zona and confirmada,
          "direcao": tendencia, "motivo": "50–61,8% + EMA9/21 + vela de confirmação" if fib_zona and confirmada else "Precisa zona 50–61,8%, tendência e rejeição/engolfo."},
@@ -128,10 +152,12 @@ def avaliar_combos(ind: pd.DataFrame, vela: dict, fibo: dict | None) -> list[dic
         {"id": "sweep_retomada", "nome": "Varredura: retomada", "ativo": perto_sr and vela["forca"] >= 2,
          "direcao": vela["direcao"], "motivo": "Nível recente + rejeição/engolfo" if perto_sr and vela["forca"] >= 2 else "Precisa tocar/varrer S/R e rejeitar com força."},
     ]
-    return retorno
+    return [{**item, **prazo} for item in retorno]
 
 
-def montar_leitura(snapshot, marcacoes: list[dict]) -> dict:
+def montar_leitura(
+    snapshot, marcacoes: list[dict], timeframe_segundos: int = 300
+) -> dict:
     ind = indicadores_auxiliares(snapshot.candles)
     u = ind.iloc[-2]
     vela = detectar_vela(snapshot.candles)
@@ -145,7 +171,8 @@ def montar_leitura(snapshot, marcacoes: list[dict]) -> dict:
         "ema9": [{"time": int(pd.Timestamp(i).tz_localize("UTC").timestamp()) if pd.Timestamp(i).tzinfo is None else int(pd.Timestamp(i).timestamp()), "value": float(v)} for i, v in ind.ema9.items()],
         "ema21": [{"time": int(pd.Timestamp(i).tz_localize("UTC").timestamp()) if pd.Timestamp(i).tzinfo is None else int(pd.Timestamp(i).timestamp()), "value": float(v)} for i, v in ind.ema21.items()],
         "rsi": float(u.rsi), "atr": float(u.atr), "preco": float(u.Close), "vela": vela,
-        "fibo": fibo, "combos": avaliar_combos(ind, vela, fibo),
+        "fibo": fibo,
+        "combos": avaliar_combos(ind, vela, fibo, timeframe_segundos),
         "sr": {"suporte": float(ind.Low.tail(25).min()), "resistencia": float(ind.High.tail(25).max())},
     }
 
@@ -156,7 +183,7 @@ def atualizar_ativo_auxiliar(mercado, ativo: str, marcacoes: list[dict]) -> dict
     for tf in TIMEFRAMES:
         try:
             por_tf[str(tf)] = montar_leitura(
-                mercado.snapshot_timeframe(ativo, tf), marcacoes
+                mercado.snapshot_timeframe(ativo, tf), marcacoes, tf
             )
         except Exception as erro:
             por_tf[str(tf)] = {"erro": f"{type(erro).__name__}: {erro}"}

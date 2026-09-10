@@ -73,8 +73,10 @@ class TestMonitorAuxiliar(unittest.TestCase):
         ind = indicadores_auxiliares(df)
         vela = {"direcao": "CALL", "forca": 2}
         fibo = {"zona50_618": {"dentro": True}}
-        combos = {c["id"]: c for c in avaliar_combos(ind, vela, fibo)}
+        combos = {c["id"]: c for c in avaliar_combos(ind, vela, fibo, 300)}
         self.assertTrue(combos["fibo_correcao"]["ativo"])
+        self.assertEqual(combos["fibo_correcao"]["expiracao_min"], 15)
+        self.assertIn("30s", combos["fibo_correcao"]["janela_entrada"])
 
     def test_alta_sem_nenhuma_perda_marca_rsi_100_e_cala_o_pullback(self):
         """RSI 50 na alta esticada passaria no gate 40–65 e acenderia o combo."""
