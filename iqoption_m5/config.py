@@ -108,6 +108,9 @@ class Configuracao:
     macd_crossover_ativo: bool = True
     sr_rejeicao_ativo: bool = True
     fibo_sr_retracao_ativo: bool = True
+    # Hipótese MTF do laboratório: contexto de impulso M15 + confirmação M5.
+    # Não é reutilizada pelas estratégias genéricas; o Lab a avalia isolada.
+    fibo_mtf_confirmado_ativo: bool = False
     reversao_candle_ativo: bool = True     # inclui reversao_confluencia
     reversao_bollinger_rsi_ativo: bool = True  # retorno à banda de Bollinger com RSI extremo
 
@@ -932,8 +935,16 @@ def configuracao_ema_m5_real(base: Configuracao | None = None) -> Configuracao:
         drawdown_maximo_percentual=0.30,
         circuit_breaker_max_perdas=0,
         circuit_breaker_cooldown_minutos=0,
-        max_ordens_paralelas=1,
-        cooldown_pos_ordem_por_ativo_candles=3,
+        # Trava de exposição igual à do Lab, e não apenas mais frouxa. Com
+        # "uma ordem por vez" o real levou 3 dias para juntar 17 sinais contra
+        # 63 do Lab no mesmo setup, e amostra desse tamanho não distingue 37%
+        # de 61%. Aqui a proteção passa a ser a mesma: quantas ordens couberem,
+        # nunca duplicando a direção — o que barra a aposta repetida em pares
+        # correlacionados sem barrar EURUSD PUT junto de AUDCAD CALL.
+        # Com 2 pares, a exposição simultânea máxima vai de R$2,50 a R$5,00.
+        max_ordens_paralelas=0,
+        cooldown_pos_ordem_por_ativo_candles=0,
+        bloquear_direcao_paralela=True,
         payout_minimo=0.82,
         ema920_pullback_ativo=True,
         ema921_rsi_pullback_ativo=False,
