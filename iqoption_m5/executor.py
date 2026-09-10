@@ -60,6 +60,22 @@ class ExecutorSeguro:
             return False, "entrada_atrasada_pre_envio", segundo
         return True, "ok", segundo
 
+    def _registrar_bloqueio(self, decisao: Decisao, motivo: str) -> None:
+        """Deixa no banco a razão de uma decisão autorizada não virar ordem.
+
+        O laboratório grava a decisão como permitida com base em
+        ``risco.avaliar``, que não consulta a reserva global de exposição.
+        Quem recusa de fato é ``risco.reservar``, já aqui dentro. Sem esta
+        linha a auditoria mostra a autorização, não mostra ordem nenhuma e
+        não tem como ligar as duas pontas depois que o console some.
+        """
+        self.registro.registrar_falha(
+            decisao, motivo,
+            timeframe=self.config.timeframe_segundos,
+            expiracao_minutos=self.config.expiracao_minutos,
+            config=self.config,
+        )
+
     def _registrar_bloqueio_tempo(
         self,
         decisao: Decisao,
@@ -72,12 +88,7 @@ class ExecutorSeguro:
             else "relógio atual da IQ indisponível"
         )
         print(f">> {decisao.ativo}: bloqueada ({motivo}: {detalhe})")
-        self.registro.registrar_falha(
-            decisao, motivo,
-            timeframe=self.config.timeframe_segundos,
-            expiracao_minutos=self.config.expiracao_minutos,
-            config=self.config,
-        )
+        self._registrar_bloqueio(decisao, motivo)
 
     @staticmethod
     def lucro_numerico(resultado, valor: float, payout: float) -> float | None:
@@ -106,7 +117,8 @@ class ExecutorSeguro:
         # Cooldown de suspensão: IQ retornou "active is suspended" → aguarda 10 min
         _suspenso_ate = self._suspenso_ate.get(decisao.ativo, 0.0)
         if time.time() < _suspenso_ate:
-            return False  # silencioso — não gera log de falha
+            self._registrar_bloqueio(decisao, "ativo_suspenso_cooldown")
+            return False
 
         no_prazo, motivo_tempo, segundo = self._validar_instante_envio(decisao)
         if not no_prazo:
@@ -116,6 +128,7 @@ class ExecutorSeguro:
         autorizacao = self.risco.reservar(snapshot, decisao)
         if not autorizacao.permitida:
             print(f">> {decisao.ativo}: bloqueada ({autorizacao.motivo})")
+            self._registrar_bloqueio(decisao, f"reserva_recusada:{autorizacao.motivo}")
             return False
 
         thread = threading.Thread(

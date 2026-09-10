@@ -103,6 +103,46 @@ class TestRiscoEExecutor(unittest.TestCase):
             0.0,
         )
 
+    def _motivos_registrados(self, cfg) -> list[str]:
+        with closing(sqlite3.connect(cfg.banco_sqlite)) as db:
+            return [
+                linha[0] for linha in db.execute(
+                    "SELECT resultado_bruto FROM operacoes WHERE status='falha_envio'"
+                ).fetchall()
+            ]
+
+    def test_recusa_da_reserva_fica_no_banco_e_nao_so_no_console(self):
+        """O lab grava permitida=1 via avaliar(), que não vê a reserva global.
+
+        Quem recusa é reservar(), aqui dentro. Sem registro a auditoria mostra
+        a decisão autorizada, nenhuma ordem, e nada que ligue as duas pontas.
+        """
+        cfg = replace(self.config, banca_inicial=100.0)
+        registro = RegistroSQLite(cfg.banco_sqlite, config=cfg)
+        risco = GerenciadorRisco(cfg)
+        executor = ExecutorSeguro(cfg, MercadoFalso(), risco, registro)
+        # Slot já tomado — é o que acontece quando o M5 entra e o M15 chega
+        # logo atrás pedindo o mesmo ativo.
+        self.assertTrue(risco.reservar(self.snapshot, self.decisao).permitida)
+
+        self.assertFalse(executor.executar(self.snapshot, self.decisao))
+
+        motivos = self._motivos_registrados(cfg)
+        self.assertTrue(
+            any(m.startswith("reserva_recusada:") for m in motivos),
+            f"reserva recusada não foi registrada; motivos={motivos}",
+        )
+
+    def test_ativo_em_cooldown_de_suspensao_deixa_rastro(self):
+        cfg = replace(self.config, banca_inicial=100.0)
+        registro = RegistroSQLite(cfg.banco_sqlite, config=cfg)
+        executor = ExecutorSeguro(cfg, MercadoFalso(), GerenciadorRisco(cfg), registro)
+        executor._suspenso_ate[self.decisao.ativo] = 1e12  # suspenso pela IQ
+
+        self.assertFalse(executor.executar(self.snapshot, self.decisao))
+
+        self.assertIn("ativo_suspenso_cooldown", self._motivos_registrados(cfg))
+
     def test_falha_de_envio_preserva_timeframe_e_expiracao(self):
         cfg = replace(self.config, timeframe_segundos=900, expiracao_minutos=30)
         registro = RegistroSQLite(cfg.banco_sqlite, config=cfg)
