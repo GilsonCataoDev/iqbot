@@ -23,7 +23,7 @@ from .auditoria_entrada import (
 from .estrategia import EstrategiaReversaoM5
 from .executor import ExecutorSeguro
 from .grafico import GraficoM5
-from .mercado_iq import MercadoIQ, MercadoIndisponivel
+from .mercado_iq import MercadoIQ, MercadoIndisponivel, iniciar_com_timeout
 from .modelos import Autorizacao, Decisao, SnapshotMercado
 from .noticias import CalendarioEconomico
 from .recuperacao import recuperar_operacoes_pendentes
@@ -93,31 +93,6 @@ def _reconectar_laboratorio_estagnado(
         progresso.marcar(agora)
         print("[WATCHDOG LAB] Reconexão concluída; aguardando velas novas.")
     return ok
-
-
-def _iniciar_laboratorio_com_timeout(mercado: MercadoIQ, *, timeout_s: float = 45.0) -> tuple[bool, str]:
-    """Não deixa a inicialização da IQ prender o processo inteiro.
-
-    A biblioteca pode bloquear dentro de ``get_all_init_v2`` sem levantar
-    exceção. A chamada roda em thread daemon para que o processo possa encerrar
-    limpo e o usuário reinicie, em vez de ficar aparentando estar ativo.
-    """
-    erro: list[BaseException] = []
-
-    def iniciar() -> None:
-        try:
-            mercado.iniciar()
-        except BaseException as exc:  # devolve a falha para a thread principal
-            erro.append(exc)
-
-    thread = threading.Thread(target=iniciar, name="ema-lab-inicializacao-iq", daemon=True)
-    thread.start()
-    thread.join(max(1.0, float(timeout_s)))
-    if thread.is_alive():
-        return False, f"Tempo de conexão esgotado: IQ não respondeu em {timeout_s:g}s."
-    if erro:
-        return False, f"Falha ao iniciar a IQ: {erro[0]!r}"
-    return True, ""
 
 
 def _vigiar_laboratorio(
@@ -555,7 +530,7 @@ def executar_laboratorio_ema() -> None:
     print("=" * 68)
 
     try:
-        iniciou, motivo_inicio = _iniciar_laboratorio_com_timeout(mercado)
+        iniciou, motivo_inicio = iniciar_com_timeout(mercado)
         if not iniciou:
             print(f"[CONEXÃO] {motivo_inicio} Laboratório não iniciado; reinicie quando a IQ normalizar.")
             return

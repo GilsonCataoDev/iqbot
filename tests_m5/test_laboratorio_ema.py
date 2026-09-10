@@ -11,8 +11,8 @@ from iqoption_m5.laboratorio_ema import (
     _alvo_sombra, _rastros, _recuperar_pendencias_periodicas, _setup_do_rastro,
     _patch_candle_ao_vivo, ProgressoLaboratorio, _reconectar_laboratorio_estagnado,
     _armar_watchdog_apos_inicializacao, _alerta_ema920_m5,
-    _iniciar_laboratorio_com_timeout,
 )
+from iqoption_m5.mercado_iq import iniciar_com_timeout
 from iqoption_m5.modelos import Autorizacao, Decisao, ResultadoOrdem, SnapshotMercado
 from iqoption_m5.registro import RegistroSQLite
 
@@ -227,7 +227,7 @@ def test_inicio_do_lab_expira_sem_deixar_o_processo_principal_preso():
         def iniciar(self):
             bloqueio.wait()
 
-    ok, motivo = _iniciar_laboratorio_com_timeout(MercadoTravado(), timeout_s=.01)
+    ok, motivo = iniciar_com_timeout(MercadoTravado(), timeout_s=.01)
 
     assert not ok
     assert "tempo" in motivo.lower()

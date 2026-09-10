@@ -5,6 +5,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 import pandas as pd
+import numpy as np
 
 from iqoption_m5.config import Configuracao
 from iqoption_m5.estrategia import EstrategiaReversaoM5
@@ -118,6 +119,12 @@ class TestGraficoM5(unittest.TestCase):
                 self.assertIn('id="barra-logo">IQ M5', resposta.read().decode("utf-8"))
         finally:
             grafico.fechar()
+
+    def test_publicacao_aceita_bool_do_numpy(self):
+        grafico = GraficoM5(self.config)
+        destino = Path(self.temp.name) / "bool.json"
+        grafico._json_atomico(destino, {"ativo": np.bool_(True)})
+        self.assertIn("true", destino.read_text(encoding="utf-8"))
 
 
 if __name__ == "__main__":

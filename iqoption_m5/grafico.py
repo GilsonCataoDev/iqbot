@@ -287,7 +287,19 @@ class GraficoM5:
     @staticmethod
     def _json_atomico(caminho: Path, dados: dict) -> None:
         caminho.parent.mkdir(parents=True, exist_ok=True)
-        conteudo = json.dumps(dados, ensure_ascii=False, allow_nan=False).encode("utf-8")
+        def converter(valor):
+            # Pandas devolve escalares NumPy (inclusive np.bool_) em
+            # comparações. O browser só entende o tipo nativo equivalente.
+            item = getattr(valor, "item", None)
+            if callable(item):
+                return item()
+            if isinstance(valor, Path):
+                return str(valor)
+            raise TypeError(f"Tipo não serializável: {type(valor).__name__}")
+
+        conteudo = json.dumps(
+            dados, ensure_ascii=False, allow_nan=False, default=converter
+        ).encode("utf-8")
         temporario = caminho.with_name(
             f".{caminho.name}.{os.getpid()}.{threading.get_ident()}.tmp"
         )
@@ -316,7 +328,12 @@ class GraficoM5:
             raise RuntimeError(f"Painel web não encontrado em {self.pasta_web_origem}")
         self.pasta_web.mkdir(parents=True, exist_ok=True)
         (self.pasta_web / "index.html").write_bytes(origem_html.read_bytes())
+        # Templates especializados (como o Auxiliar) reutilizam as marcações
+        # do template-base. Eles não devem precisar manter uma cópia frágil
+        # do mesmo JavaScript.
         origem_js = self.pasta_web_origem / "marcacoes.js"
+        if not origem_js.exists():
+            origem_js = Path(__file__).resolve().parent.parent / "grafico_web" / "marcacoes.js"
         if origem_js.exists():
             (self.pasta_web / "marcacoes.js").write_bytes(origem_js.read_bytes())
         manifesto = {"ativos": [{"id": ativo, "label": ativo} for ativo in self.config.ativos]}
