@@ -14,8 +14,8 @@ from collections import defaultdict
 import pandas as pd
 
 from iqoption_m5 import backtest
-from iqoption_m5.config import configuracao_scalping_m15
-from dataclasses import replace
+from iqoption_m5.config import configuracao_ema_laboratorio_practice
+from iqoption_m5.laboratorio_ema import _config_rastro
 
 PARES_PADRAO = [
     "EURUSD", "AUDCAD", "NZDUSD", "GBPUSD",
@@ -36,19 +36,15 @@ def wilson(acertos: int, n: int, z: float = 1.96) -> tuple[float, float]:
 
 
 def _config_ema920():
-    base = configuracao_scalping_m15()
-    return replace(
-        base,
-        timeframe_segundos=300,
-        expiracao_minutos=15,
-        ema920_pullback_ativo=True,
-        ema920_prime_ativo=False,
-        ema921_rsi_pullback_ativo=False,
-        ema921_rsi_intravela_ativo=False,
-        fibo_sr_retracao_ativo=False,
-        nzd_trend_pullback_ativo=False,
-        filtro_h1_ativo=False,
-    )
+    """A config do rastro que realmente roda, nao uma aproximacao.
+
+    Partir de configuracao_scalping_m15 arrastava a parametrizacao inteira do
+    scalping: ema_micro_periodo=21 num setup que e EMA 9/20, mais
+    filtro_candle_estrutura, filtro_candle_entrada_atr=0.35, entrada
+    intravela e cortes proprios de ATR e slope. O numero medido descrevia
+    outra estrategia — deu 47,7% para um setup que ao vivo da 61%.
+    """
+    return _config_rastro(configuracao_ema_laboratorio_practice(), 300, "ema920_pullback")
 
 
 EXPIRACAO_CANDLES = 3  # 15min / 5min por candle
