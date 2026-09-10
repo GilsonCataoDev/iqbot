@@ -95,6 +95,31 @@ def _reconectar_laboratorio_estagnado(
     return ok
 
 
+def _iniciar_laboratorio_com_timeout(mercado: MercadoIQ, *, timeout_s: float = 45.0) -> tuple[bool, str]:
+    """Não deixa a inicialização da IQ prender o processo inteiro.
+
+    A biblioteca pode bloquear dentro de ``get_all_init_v2`` sem levantar
+    exceção. A chamada roda em thread daemon para que o processo possa encerrar
+    limpo e o usuário reinicie, em vez de ficar aparentando estar ativo.
+    """
+    erro: list[BaseException] = []
+
+    def iniciar() -> None:
+        try:
+            mercado.iniciar()
+        except BaseException as exc:  # devolve a falha para a thread principal
+            erro.append(exc)
+
+    thread = threading.Thread(target=iniciar, name="ema-lab-inicializacao-iq", daemon=True)
+    thread.start()
+    thread.join(max(1.0, float(timeout_s)))
+    if thread.is_alive():
+        return False, f"Tempo de conexão esgotado: IQ não respondeu em {timeout_s:g}s."
+    if erro:
+        return False, f"Falha ao iniciar a IQ: {erro[0]!r}"
+    return True, ""
+
+
 def _vigiar_laboratorio(
     mercado: MercadoIQ, progresso: ProgressoLaboratorio, parar: threading.Event,
     limite_s: float,
@@ -503,6 +528,7 @@ def executar_laboratorio_ema() -> None:
     lock_grafico_ao_vivo = threading.Lock()
     parar_grafico_ao_vivo = threading.Event()
     progresso = ProgressoLaboratorio()
+    iniciado = False
 
     print("=" * 68)
     print("LABORATÓRIO EMA — PRACTICE | uma conexão IQ | M5 + M15")
@@ -515,7 +541,11 @@ def executar_laboratorio_ema() -> None:
     print("=" * 68)
 
     try:
-        mercado.iniciar()
+        iniciou, motivo_inicio = _iniciar_laboratorio_com_timeout(mercado)
+        if not iniciou:
+            print(f"[CONEXÃO] {motivo_inicio} Laboratório não iniciado; reinicie quando a IQ normalizar.")
+            return
+        iniciado = True
         mercado.iniciar_timeframes_extras({900: base.limite_candles, 3600: base.limite_candles})
         calendario.atualizar()
         recuperar_operacoes_pendentes(mercado, registro, config=base)
@@ -761,4 +791,5 @@ def executar_laboratorio_ema() -> None:
             executor.aguardar_ordens()
         if 'grafico' in locals() and grafico is not None:
             grafico.fechar()
-        mercado.fechar()
+        if iniciado:
+            mercado.fechar()

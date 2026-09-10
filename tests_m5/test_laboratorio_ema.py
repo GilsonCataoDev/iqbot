@@ -1,4 +1,5 @@
 from datetime import datetime, timedelta
+import threading
 
 import pandas as pd
 
@@ -10,6 +11,7 @@ from iqoption_m5.laboratorio_ema import (
     _alvo_sombra, _rastros, _recuperar_pendencias_periodicas, _setup_do_rastro,
     _patch_candle_ao_vivo, ProgressoLaboratorio, _reconectar_laboratorio_estagnado,
     _armar_watchdog_apos_inicializacao, _alerta_ema920_m5,
+    _iniciar_laboratorio_com_timeout,
 )
 from iqoption_m5.modelos import Autorizacao, Decisao, ResultadoOrdem, SnapshotMercado
 from iqoption_m5.registro import RegistroSQLite
@@ -208,6 +210,19 @@ def test_watchdog_do_lab_reconecta_quando_nao_ha_progresso():
     assert _reconectar_laboratorio_estagnado(mercado, progresso, agora=131.0, limite_s=30.0)
     assert mercado.chamadas == [True]
     assert progresso.idade(131.0) == 0.0
+
+
+def test_inicio_do_lab_expira_sem_deixar_o_processo_principal_preso():
+    bloqueio = threading.Event()
+
+    class MercadoTravado:
+        def iniciar(self):
+            bloqueio.wait()
+
+    ok, motivo = _iniciar_laboratorio_com_timeout(MercadoTravado(), timeout_s=.01)
+
+    assert not ok
+    assert "tempo" in motivo.lower()
 
 
 def test_watchdog_do_lab_ignora_tempo_gasto_na_inicializacao():
