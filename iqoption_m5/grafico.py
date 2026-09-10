@@ -237,9 +237,14 @@ class _HandlerSilencioso(http.server.SimpleHTTPRequestHandler):
 class GraficoM5:
     """Uma chamada atualiza o painel; HTTP, JSON e navegador ficam internos."""
 
-    def __init__(self, config: Configuracao):
+    def __init__(self, config: Configuracao, pasta_web_origem: Path | None = None):
         self.config = config
-        self.pasta_web_origem = Path(__file__).resolve().parent.parent / "grafico_web"
+        # O servidor e os endpoints de marcação são os mesmos para todos os
+        # painéis. Só a apresentação pode variar (Lab, Monitor, Auxiliar).
+        # Este seam evita duplicar HTTP/SQLite quando surge uma nova tela.
+        self.pasta_web_origem = pasta_web_origem or (
+            Path(__file__).resolve().parent.parent / "grafico_web"
+        )
         raiz_local = Path(os.environ.get("LOCALAPPDATA") or tempfile.gettempdir())
         # Diretório separado por bot para evitar conflito de dados entre M1/M15/M5
         sufixo = config.sufixo_banco or "default"

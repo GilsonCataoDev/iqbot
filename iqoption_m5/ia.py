@@ -302,8 +302,13 @@ def segunda_opiniao_grafico(contexto: dict) -> dict | None:
             f"A direção mecânica permitida é {permitida}. "
             "O único alvo curto permitido é TP1 do plano; escolha TP1 somente se a estrutura ainda o sustentar. "
             "Se houver conflito, notícia, candle sem rejeição ou contexto insuficiente, responda AGUARDAR. "
-            "Não recomende executar uma ordem. Responda SOMENTE JSON: "
-            '{"veredicto":"BUY|SELL|AGUARDAR","alvo":"TP1|AGUARDAR","confianca":"ALTA|MEDIA|BAIXA","motivo":"até 180 caracteres"}.\n'
+            "Não recomende executar uma ordem. Não forneça preços novos: entrada, SL e TP "
+            "são exclusivamente os já presentes no plano. Responda SOMENTE JSON: "
+            '{"veredicto":"BUY|SELL|AGUARDAR","alvo":"TP1|AGUARDAR",'
+            '"confianca":"ALTA|MEDIA|BAIXA","estrutura":"ALTA|BAIXA|LATERAL|INDEFINIDA",'
+            '"zona":"NA_ZONA|AGUARDAR_RETESTE|ESTICADO|SEM_ZONA",'
+            '"confirmacao":"gatilho observável em até 160 caracteres",'
+            '"motivo":"até 180 caracteres"}.\n'
             f"Contexto objetivo: {json.dumps(contexto, ensure_ascii=False, default=str)}"
         )
         base = {
@@ -361,6 +366,13 @@ def segunda_opiniao_grafico(contexto: dict) -> dict | None:
             confianca = str(dados.get("confianca", "BAIXA")).upper()
             if confianca not in {"ALTA", "MEDIA", "BAIXA"}:
                 confianca = "BAIXA"
+            estrutura = str(dados.get("estrutura", "INDEFINIDA")).upper()
+            if estrutura not in {"ALTA", "BAIXA", "LATERAL", "INDEFINIDA"}:
+                estrutura = "INDEFINIDA"
+            zona = str(dados.get("zona", "SEM_ZONA")).upper()
+            if zona not in {"NA_ZONA", "AGUARDAR_RETESTE", "ESTICADO", "SEM_ZONA"}:
+                zona = "SEM_ZONA"
+            confirmacao = str(dados.get("confirmacao", "Sem gatilho adicional informado.")).strip()[:160]
             alvo_codigo = str(dados.get("alvo", "AGUARDAR")).upper()
             if alvo_codigo != "TP1" or veredicto == "AGUARDAR" or tp1 is None:
                 alvo_codigo, alvo_curto = "AGUARDAR", None
@@ -369,6 +381,7 @@ def segunda_opiniao_grafico(contexto: dict) -> dict | None:
             return {
                 "status": "DISPONÍVEL", "veredicto": veredicto,
                 "confianca": confianca, "motivo": str(dados.get("motivo", ""))[:180],
+                "estrutura": estrutura, "zona": zona, "confirmacao": confirmacao,
                 "alvo_codigo": alvo_codigo, "alvo_curto": alvo_curto,
                 "fonte": fonte, "latencia_ms": int((time.time() - inicio) * 1000),
             }

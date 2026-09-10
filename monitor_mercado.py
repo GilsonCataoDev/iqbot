@@ -2991,6 +2991,7 @@ tr:hover{background:#16203450;cursor:pointer}
 .dossie-aviso{color:#fbbf24}.dossie-win{color:#4ade80}.dossie-loss{color:#f87171}
 .fibo-zona{color:#c4b5fd;border-color:#6d28d9;background:#251145}
 .fibo-card{border-left-color:#8b5cf6}.fibo-card.ok{border-left-color:#22c55e}
+.fibo-manual{margin:.45rem 0 .7rem;border-left:3px solid #a78bfa}.fibo-manual .nota{margin-top:.45rem}
 .fvg-card{border-left-color:#14b8a6}.fvg-card.ok{border-left-color:#22c55e}
 .conflu-card{border-left-color:#a78bfa}.conflu-card.ok{border-left-color:#22c55e}
 .ouro-card{border-left-color:#fbbf24}.ouro-card.ok{border-left-color:#22c55e}
@@ -3062,6 +3063,7 @@ Testado em 01/09/2026: operar a favor do canal (51.14%) rende o mesmo que contra
 </div>
 <div id="cv-aviso"></div>
 <div id="cv"></div>
+<div id="fibo-manual"><span class="empty">BINÁRIAS: use ✎ Fibo, clique no início do impulso e depois no extremo. A leitura guiada aparecerá aqui.</span></div>
 </section>
 
 <section class="view" data-view="estudos">
@@ -3096,8 +3098,8 @@ Testado em 01/09/2026: operar a favor do canal (51.14%) rende o mesmo que contra
 
 <div id="decisao-principal"></div>
 
-<div class="sec">IA DO GRÁFICO — GROQ</div>
-<button class="btn-marc" type="button" onclick="lerGroqSelecionado()">🤖 Analisar momento + TP curto</button>
+<div class="sec">IA DO GRÁFICO — LEITURA DO ATIVO</div>
+<button class="btn-marc" type="button" onclick="lerGroqSelecionado()">🤖 Analisar ativo + plano</button>
 <div id="ia-grafico"><span class="empty">Aguardando leitura mecânica.</span></div>
 
 <div class="sec">CONFLUÊNCIA LOCAL — ESTRUTURA, FVG, OB E LIQUIDEZ</div>
@@ -3205,9 +3207,7 @@ function histLinha(h){
   const estado=h.entrada_valida?'<span class="estado go">válida</span>':'<span class="estado study">estudo</span>';
   const tipo=h.tipo==='fibo_m15'?'FIBO':h.tipo==='fluxo_m15'?'FLUXO':h.tipo==='orb_fvg_m15'?'ORB/FVG':h.tipo==='liquidity_sweep_v2'?'LIQUIDEZ V2':h.tipo==='bof_m30_m5'?'BOF M30→M5':h.tipo==='bof_m30_m5_xau'?'BOF M30→M5 (legado)':h.tipo==='bof_m30_m5_candidato'?'BOF candidato':'SINAL';
   const av=h.alvos_estudo||h.alvos||{};
-  const simDesfecho=(h.simulacao||{}).desfecho||'aguardando';
-  const simCor=simDesfecho==='win_tp1'?'up':simDesfecho==='loss_sl'?'dn':'ind';
-  const simTexto=simDesfecho==='win_tp1'?'TP1':simDesfecho==='loss_sl'?'SL':simDesfecho.startsWith('nao_executada_')?'n/exec':simDesfecho.startsWith('expirado_')?simDesfecho.replace('expirado_','exp '):simDesfecho==='nao_elegivel'?'candidato':simDesfecho.startsWith('ambíguo')?'ambíg':'?';
+  const simResumo=resumoSimulacao(h.simulacao,h);
   const alvosTexto=av.entrada!=null
     ?`<span class="hist-alvos">E ${av.entrada} · <span class="dn">SL ${av.sl}</span> · <span class="up">TP ${av.tp1}</span></span>`
     :'<span class="hist-alvos ind">—</span>';
@@ -3218,7 +3218,7 @@ function histLinha(h){
     <td class="${RC[h.regime]||'ind'}">${RN[h.regime]||'—'}</td>
     <td>${h.preco}</td>
     <td>${alvosTexto}</td>
-    <td><span class="${simCor}">${simTexto}</span></td>
+    <td><span class="${simResumo.cor}">${simResumo.texto}</span></td>
     <td>${res}</td></tr>`;
 }
 
@@ -3240,7 +3240,11 @@ function textoSimulacao(s,h={}){
   if(d==='ambíguo_entrada_tp_mesma_vela') return '<span class="dossie-aviso">entrada e TP na mesma vela — sequência desconhecida</span>';
   if(d.startsWith('nao_executada_')) return `<span class="ind">preço de entrada não foi tocado em ${prazo}</span>`;
   if(d.startsWith('expirado_')) return `<span class="dossie-aviso">fechado por tempo após ${prazo}${rr}</span>`;
-  return `<span class="ind">aguardando candles futuros (${(s&&s.velas)||0}/${total})</span>`;
+  const pendente=['limite','stop','market_next_open'].includes((h.alvos_estudo||h.alvos||{}).modo_entrada)
+    || h.tipo==='fibo_m15';
+  if(pendente && (!s || s.preenchida!==true))
+    return `<span class="ind">aguardando preço de entrada (${(s&&s.velas)||0}/${total} velas); TP/SL só contam após o preenchimento</span>`;
+  return `<span class="ind">em operação: aguardando TP/SL (${(s&&s.velas)||0}/${total} velas)</span>`;
 }
 
 function renderDossie(H){
@@ -3428,20 +3432,24 @@ function renderIaGrafico(){
   const el=document.getElementById('ia-grafico');
   const x=(D.ativos||{})[sel]||{}, ia=iaManualGrafico[sel]||x.ia_groq||{};
   const c=x.classe==='forex'?(x.tp1_curto||{}):(x.classe==='ouro'&&x.ouro_movimento?.sinal_estudo?(x.ouro_movimento||{}):(x.fibo||{}));
+  const a=c.alvos||{}, n=x.noticia||{};
   const planoNome=x.classe==='forex'?'TP1 curto':x.classe==='ouro'?'Ouro movimento':'Fibo M15';
   const v=ia.veredicto||'AGUARDAR';
   const texto={BUY:'BUY / CALL',SELL:'SELL / PUT',AGUARDAR:'AGUARDAR'}[v]||'AGUARDAR';
   const cor=v==='BUY'?'up':v==='SELL'?'dn':'morno';
   const status=ia.status||'AGUARDAR';
+  const zona={NA_ZONA:'na zona',AGUARDAR_RETESTE:'aguardar reteste',ESTICADO:'preço esticado',SEM_ZONA:'sem zona'}[ia.zona]||'—';
+  const estrutura={ALTA:'alta',BAIXA:'baixa',LATERAL:'lateral',INDEFINIDA:'indefinida'}[ia.estrutura]||'—';
+  const planoAtivo=Boolean(c.qualificada||c.sinal_estudo);
   const aviso=v==='AGUARDAR' ? 'Não é sugestão de entrada.' : 'Confirme spread e preço na corretora; a IA não executa ordem.';
   el.innerHTML=`<div class="card ${v==='AGUARDAR'?'nojan':'okjan'}"><b class="${cor}">${texto}</b> <span class="estado study">${status}</span>
-    <div class="alvos"><div><label>confiança</label><span>${ia.confianca||'—'}</span></div><div><label>plano técnico</label><span>${(c.qualificada||c.sinal_estudo)?planoNome+' qualificado':'não qualificado'}</span></div><div><label>TP curto aprovado</label><span class="up">${ia.alvo_codigo==='TP1'?ia.alvo_curto:'—'}</span></div><div><label>fonte</label><span>${ia.fonte||'GROQ'}</span></div></div>
-    <div class="nota">${ia.motivo||'Clique em Ler gráfico selecionado para consultar o Groq.'} ${aviso}</div></div>`;
+    <div class="alvos"><div><label>estrutura M15</label><span>${estrutura}</span></div><div><label>zona</label><span>${zona}</span></div><div><label>confiança</label><span>${ia.confianca||'—'}</span></div><div><label>plano técnico</label><span>${planoAtivo?planoNome+' calculado':'não qualificado'}</span></div><div><label>entrada</label><span>${a.entrada??'—'}</span></div><div><label>invalidação / SL</label><span class="dn">${a.sl??'—'}</span></div><div><label>TP1</label><span class="up">${ia.alvo_codigo==='TP1'?ia.alvo_curto:(a.tp1??'—')}</span></div><div><label>notícia</label><span>${n.estado||'sem alerta'}</span></div><div><label>fonte</label><span>${ia.fonte||'GROQ'}</span></div></div>
+    <div class="nota"><b>Confirmação:</b> ${ia.confirmacao||'Aguardando a leitura da IA.'}<br>${ia.motivo||'Clique em Analisar ativo + plano para consultar a IA.'} ${aviso}</div></div>`;
 }
 
 async function lerGroqSelecionado(){
   const x=(D.ativos||{})[sel]||{};
-  iaManualGrafico[sel]={status:'ANALISANDO',veredicto:'AGUARDAR',fonte:'GROQ',motivo:'Lendo tendência, zona, candles fechados e TP curto calculado.'};
+  iaManualGrafico[sel]={status:'ANALISANDO',veredicto:'AGUARDAR',fonte:'GROQ',motivo:'Lendo estrutura, zona, candles fechados, notícia e plano técnico.'};
   renderIaGrafico();
   // Forex usa TP1 curto; ouro prioriza o scanner próprio quando qualificado.
   const p=x.classe==='forex'?(x.tp1_curto||{}):(x.classe==='ouro'&&x.ouro_movimento?.sinal_estudo?(x.ouro_movimento||{}):(x.fibo||{})), a=p.alvos||{};
@@ -3690,6 +3698,62 @@ function renderFibo(){
   </div>`;
 }
 
+function renderFiboManual(){
+  const el=document.getElementById('fibo-manual');
+  if(!el) return;
+  const itens=window.Marcacoes?.itens||[];
+  const m=[...itens].reverse().find(x=>x.tipo==='fibo');
+  if(!m){
+    el.innerHTML='<span class="empty">FIBO GUIADA: use ✎ Fibo, clique no início do impulso M15 e depois no extremo. O monitor não escolhe o swing por você.</span>';
+    return;
+  }
+  const origem=Number(m.preco_a), extremo=Number(m.preco_b);
+  const amp=extremo-origem, modulo=Math.abs(amp);
+  if(!Number.isFinite(amp)||modulo<=0){
+    el.innerHTML='<div class="card fibo-manual"><b>FIBO GUIADA — MARCAÇÃO INVÁLIDA</b><div class="nota">Escolha dois preços diferentes: início e extremo do impulso.</div></div>';
+    return;
+  }
+  // Origem baixa → extremo alto = retração para COMPRA. O inverso é retração
+  // para VENDA. Isto impede que a UI chame de venda uma Fibo de impulso alto.
+  const direcao=amp>0?'buy':'sell', nome=direcao==='buy'?'CALL':'PUT';
+  const f50=extremo-amp*.5, f618=extremo-amp*.618, f786=extremo-amp*.786;
+  const zonaInf=Math.min(f50,f618), zonaSup=Math.max(f50,f618);
+  const x=(D.ativos||{})[sel]||{}, preco=Number(x.preco);
+  const naZona=Number.isFinite(preco)&&preco>=zonaInf&&preco<=zonaSup;
+  const invalida=direcao==='buy'?preco<f786:preco>f786;
+  const k=(candlesGroq||[]).slice(-2), atual=k[k.length-1]||{};
+  const o=Number(atual.o), h=Number(atual.h), l=Number(atual.l), c=Number(atual.c);
+  const corpo=Math.abs(c-o), faixa=Math.max(h-l,1e-9);
+  const pavio=direcao==='buy'?Math.min(o,c)-l:h-Math.max(o,c);
+  const corOk=direcao==='buy'?c>o:c<o;
+  const rejeicao=Number.isFinite(pavio)&&corOk&&pavio>=Math.max(corpo*.5,faixa*.18);
+  const estado=invalida?'SETUP CANCELADO':naZona?(rejeicao?'ZONA ATIVA — CONFIRME NO M5':'NA ZONA — AGUARDE REJEIÇÃO NO M5'):'AGUARDE A ZONA 50%–61,8%';
+  const cor=invalida?'nojan':naZona&&rejeicao?'okjan ok':'nojan';
+  const conf=rejeicao?'M15 apoiou a ideia; falta fechar confirmação no M5':'M15 não confirmou apoio; não antecipar M5';
+  el.innerHTML=`<div class="card fibo-manual ${cor}">
+    <div style="display:flex;justify-content:space-between;align-items:center"><b>BINÁRIAS — FIBO GUIADA M15 — ${nome}</b><span class="estado ${naZona&&rejeicao?'study':'wait'}">${estado}</span></div>
+    <div class="alvos"><div><label>impulso marcado</label><span>${origem.toFixed(3)} → ${extremo.toFixed(3)}</span></div><div><label>zona de retração</label><span class="fibo-zona">${zonaInf.toFixed(3)} — ${zonaSup.toFixed(3)}</span></div><div><label>preço atual</label><span>${Number.isFinite(preco)?preco.toFixed(3):'—'}</span></div><div><label>cancelar se passar 78,6%</label><span class="dn">${f786.toFixed(3)}</span></div><div><label>gatilho de entrada</label><span class="up">fechamento de rejeição no M5</span></div><div><label>expiração de estudo</label><span>15 min (3 velas M5)</span></div><div><label>apoio M15</label><span>${conf}</span></div></div>
+    <div class="nota">${direcao==='buy'?'Impulso de alta: procurar CALL na correção.':'Impulso de baixa: procurar PUT na correção.'} Binárias não têm TP/SL: a operação fecha na expiração. Este cartão é estudo/practice e não envia ordem.</div>
+  </div>`;
+}
+
+function resumoSimulacao(s,h={}){
+  const x=s||{}, d=x.desfecho||'aguardando';
+  if(d==='win_tp1') return {texto:'TP1 ✓',cor:'up'};
+  if(d==='loss_sl') return {texto:'SL ✕',cor:'dn'};
+  if(d.startsWith('nao_executada_')) return {texto:'n/exec',cor:'ind'};
+  if(d.startsWith('expirado_')) return {texto:'expirou',cor:'ind'};
+  if(d==='nao_elegivel') return {texto:'candidato',cor:'ind'};
+  if(d.startsWith('ambíguo')) return {texto:'ambíg',cor:'ind'};
+  const av=h.alvos_estudo||h.alvos||{};
+  const pendente=['limite','stop','market_next_open'].includes(av.modo_entrada)
+    || h.tipo==='fibo_m15';
+  const velas=Number(x.velas||0), total=Number(h.horizonte_velas||24);
+  if(pendente && x.preenchida!==true)
+    return {texto:`aguarda entrada ${velas}/${total}`,cor:'ind'};
+  return {texto:`em operação ${velas}/${total}`,cor:'ind'};
+}
+
 function renderTp1Curto(){
   const el=document.getElementById('tp1-curto');
   const x=(D.ativos||{})[sel]||{}, c=x.tp1_curto||{}, a=c.alvos||{};
@@ -3818,6 +3882,7 @@ function render(){
   renderConfluencia();
   renderOuroMovimento();
   renderFibo();
+  renderFiboManual();
   renderTp1Curto();
 }
 
@@ -3840,6 +3905,7 @@ function _marcAtualizar(itens, modo, aguardandoSegundo){
     ? (aguardandoSegundo?'clique no extremo':'clique na origem')
     : modo==='horizontal' ? 'clique no preço'
     : (itens.length ? `${itens.length} ${itens.length>1?'marcações':'marcação'}` : '');
+  renderFiboManual();
 }
 function marcarFibo(){ Marcacoes.setModo('fibo'); }
 function marcarLinha(){ Marcacoes.setModo('horizontal'); }

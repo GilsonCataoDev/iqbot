@@ -317,6 +317,25 @@ def test_ia_grafico_so_exibe_tp_curto_ja_calculado_no_plano():
     assert parecer["alvo_curto"] == pytest.approx(1.23456)
 
 
+def test_ia_grafico_expoe_estrutura_e_gatilho_sem_inventar_preco():
+    resposta = Mock(status_code=200)
+    resposta.json.return_value = {"choices": [{"message": {"content":
+        '{"veredicto":"BUY","alvo":"TP1","confianca":"ALTA",'
+        '"estrutura":"ALTA","zona":"AGUARDAR_RETESTE",'
+        '"confirmacao":"fechamento comprador na zona",'
+        '"motivo":"Tendência alinhada."}'
+    }}]}
+    contexto = {"plano": {"qualificada": True, "direcao": "BUY", "tp1": 1.23456}, "candles_fechados": []}
+    with patch.dict("os.environ", {"GROQ_API_KEY": "teste"}, clear=False), \
+         patch("iqoption_m5.ia._req.post", return_value=resposta):
+        parecer = segunda_opiniao_grafico(contexto)
+
+    assert parecer["estrutura"] == "ALTA"
+    assert parecer["zona"] == "AGUARDAR_RETESTE"
+    assert parecer["confirmacao"] == "fechamento comprador na zona"
+    assert "entrada" not in parecer
+
+
 def test_simulador_fibo_sell_usa_low_para_tp_e_high_para_stop():
     inicio = pd.Timestamp("2026-09-01 12:00:00")
     h = {
@@ -884,6 +903,11 @@ def test_html_tem_cartao_decisao_principal():
     assert "dadosMonitorAoVivo" in monitor_mercado._HTML
     assert 'id="tp1-curto"' in monitor_mercado._HTML
     assert "renderTp1Curto" in monitor_mercado._HTML
+    assert 'id="fibo-manual"' in monitor_mercado._HTML
+    assert "renderFiboManual" in monitor_mercado._HTML
+    assert "O monitor não escolhe o swing por você" in monitor_mercado._HTML
+    assert "BINÁRIAS — FIBO GUIADA M15" in monitor_mercado._HTML
+    assert "15 min (3 velas M5)" in monitor_mercado._HTML
     assert 'id="fvg"' in monitor_mercado._HTML
     assert "renderFvg" in monitor_mercado._HTML
     assert "FVG M15" in monitor_mercado._HTML
@@ -895,8 +919,10 @@ def test_html_tem_cartao_decisao_principal():
     assert 'id="ia-grafico"' in monitor_mercado._HTML
     assert "renderIaGrafico" in monitor_mercado._HTML
     assert "lerGroqSelecionado" in monitor_mercado._HTML
-    assert "Analisar momento + TP curto" in monitor_mercado._HTML
-    assert "TP curto aprovado" in monitor_mercado._HTML
+    assert "Analisar ativo + plano" in monitor_mercado._HTML
+    assert "estrutura M15" in monitor_mercado._HTML
+    assert "Confirmação:" in monitor_mercado._HTML
+    assert "invalidação / SL" in monitor_mercado._HTML
     assert "/opiniao_groq_grafico" in monitor_mercado._HTML
     assert "ouro prioriza o scanner próprio quando qualificado" in monitor_mercado._HTML
 
@@ -904,6 +930,13 @@ def test_html_tem_cartao_decisao_principal():
 def test_html_tem_entrada_sl_tp_na_tabela_de_historico():
     assert "entrada · SL · TP" in monitor_mercado._HTML
     assert "hist-alvos" in monitor_mercado._HTML
+
+
+def test_html_historico_distingue_ordem_pendente_de_operacao_em_andamento():
+    """A tabela Forex não pode resumir ambos os estados como um ponto de interrogação."""
+    assert "aguarda entrada" in monitor_mercado._HTML
+    assert "em operação" in monitor_mercado._HTML
+    assert "resumoSimulacao" in monitor_mercado._HTML
 
 
 def test_html_mostra_ic_e_maturidade_nos_estudos():
