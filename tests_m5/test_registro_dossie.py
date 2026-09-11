@@ -1,6 +1,6 @@
 """Testes para os campos sequencia e indicadores em entradas_hoje_detalhadas."""
 import json
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import pandas as pd
 import pytest
@@ -93,7 +93,15 @@ def test_sequencia_vencimento_apos_enviada(tmp_path):
     entradas = registro.entradas_hoje_detalhadas()
     seq = entradas[0]["sequencia"]
     if seq["enviada_em"] and seq["vencimento_em"]:
-        assert seq["vencimento_em"] > seq["enviada_em"]
+        # Comparar HH:MM:SS como texto quebra na virada do dia: uma entrada
+        # as 23:59 vence 00:04, e '00:04:03' > '23:59:03' e falso. O que se
+        # quer afirmar e que o vencimento vem pouco depois do envio, entao
+        # mede-se a diferenca dando a volta no relogio.
+        envio = datetime.strptime(seq["enviada_em"], "%H:%M:%S")
+        venc = datetime.strptime(seq["vencimento_em"], "%H:%M:%S")
+        adiante = (venc - envio) % timedelta(days=1)
+
+        assert timedelta(0) < adiante < timedelta(hours=12)
 
 
 def test_sequencia_decisao_presente_quando_ha_decisao(tmp_path):
