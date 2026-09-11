@@ -8,17 +8,17 @@ Aqui a apuracao usa contrato.desfecho_binario: strike no instante da compra,
 saida no vencimento. A compra e simulada no mesmo ponto em que o bot compra:
 poucos segundos depois de fechar a vela de sinal.
 
-CORRECAO DE VIES: a apuracao acerta 83% em M1 e 89% em 1s, nao 100%. Uma
-medicao que erra a taxa `e` observa
+O NUMERO QUE SAI DAQUI E PISO, NAO ESTIMATIVA.
 
-    medido = verdadeiro*(1-e) + (1-verdadeiro)*e
+A apuracao acerta 83% em M1 e 89% em 1s, e o erro nao e simetrico: nas 18
+ordens conferidas contra a liquidacao da IQ, os 2 erros foram win apurado
+como loss, e nenhum no sentido inverso. Ela perde wins e nao inventa
+nenhum, entao o acerto verdadeiro e MAIOR que o medido — quanto maior,
+ainda nao da para dizer. Ver corrigir_vies() para a conta e o porque de
+ela estar desativada.
 
-e puxa qualquer taxa para perto de 50%. O inverso recupera a estimativa:
-
-    verdadeiro = (medido - e) / (1 - 2e)
-
-Sem isso o backtest subestima a vantagem de forma sistematica — o mesmo
-erro de ontem, so que menor.
+Comparar o resultado direto com o breakeven, sem esse ajuste, e concluir
+contra a estrategia usando um numero que sabidamente a subestima.
 
 Uso:
     python analisar_ema920_valido.py
@@ -81,10 +81,23 @@ def momento_compra(candle_hora, timeframe_s: int):
 
 
 def corrigir_vies(medido: float, erro: float) -> float:
-    """Desfaz o achatamento que a taxa de erro da apuracao provoca."""
-    if erro >= 0.5:
-        return medido
-    return (medido - erro) / (1 - 2 * erro)
+    """NAO USAR ainda: a formula supoe erro simetrico, e ele nao e.
+
+    A correcao classica, verdadeiro = (medido - e) / (1 - 2e), vale quando a
+    apuracao erra igual dos dois lados. Nas 18 ordens conferidas os 2 erros
+    foram ambos IQ=win apurado como loss, e nenhum no sentido inverso: de 7
+    wins ela perdeu 2 (a=28,6%), de 12 losses virou 0 (b=0%).
+
+    Com erro assimetrico a conta e outra — medido = verdadeiro*(1-a) — e para
+    47,5% medido daria 66,5% em vez dos 46,2% da formula simetrica. Ou seja,
+    a escolha da suposicao inverte a conclusao sobre a estrategia inteira.
+
+    Nao da para escolher com 2 erros: o IC de 2/7 vai de ~8% a ~64%, o que
+    deixa o corrigido entre 52% e absurdo. Por isso o relatorio mostra so o
+    medido. Quando a tabela `contratos` acumular algumas centenas de ordens
+    com strike e vencimento reais, a e b viram medida e isto volta a servir.
+    """
+    raise NotImplementedError("erro assimetrico: ver docstring")
 
 
 def main() -> None:
@@ -139,32 +152,32 @@ def main() -> None:
 
     barra = "=" * 70
     print(f"\n{barra}\nAPURADO PELO CONTRATO REAL ({a.tf}s, erro medido {erro:.0%})\n{barra}")
-    print(f"{'par':<10}{'n':>8}{'medido':>9}{'corrigido':>11}   IC 95% (medido)")
+    print(f"{'par':<10}{'n':>10}{'acerto':>10}   IC 95%")
     print("-" * 70)
     for par in sorted(por_par):
         n, w = por_par[par]
         lo, hi = wilson(w, n)
-        print(f"{par:<10}{n:>8}{w/n*100:>8.1f}%{corrigir_vies(w/n, erro)*100:>10.1f}%"
-              f"   [{lo*100:.1f}%, {hi*100:.1f}%]")
+        print(f"{par:<10}{n:>10}{w/n*100:>9.1f}%   [{lo*100:.1f}%, {hi*100:.1f}%]")
     lo, hi = wilson(total_w, total_n)
     print("-" * 70)
-    print(f"{'TOTAL':<10}{total_n:>8}{total_w/total_n*100:>8.1f}%"
-          f"{corrigir_vies(total_w/total_n, erro)*100:>10.1f}%   [{lo*100:.1f}%, {hi*100:.1f}%]")
+    print(f"{'TOTAL':<10}{total_n:>10}{total_w/total_n*100:>9.1f}%   [{lo*100:.1f}%, {hi*100:.1f}%]")
 
     if por_mes:
-        print(f"\n{barra}\nPOR MES (corrigido)\n{barra}")
+        print(f"\n{barra}\nPOR MES\n{barra}")
         for mes in sorted(por_mes):
             n, w = por_mes[mes]
-            print(f"  {mes}  n={n:<7} medido {w/n*100:>5.1f}%   "
-                  f"corrigido {corrigir_vies(w/n, erro)*100:>5.1f}%")
+            print(f"  {mes}  n={n:<7} {w/n*100:>5.1f}%")
 
     print(f"\n  breakeven (payout {PAYOUT}): {BREAKEVEN*100:.1f}%")
     print(f"  lab ao vivo, mesma estrategia: 61,3% em 212 ordens")
     if empates or sem_dado:
         print(f"  empates {empates} | sem dado fino {sem_dado} (ambos fora do denominador)")
-    print("\n  A correcao supoe que o erro da apuracao e simetrico entre win e loss.")
-    print("  Ele foi medido em 18 ordens: trate a coluna corrigida como estimativa,")
-    print("  nao como numero exato.")
+    print(f"\n  NAO compare o acerto acima com o breakeven direto. A apuracao erra")
+    print(f"  {erro:.0%}, e o erro e ASSIMETRICO: nas 18 ordens conferidas os 2 erros")
+    print(f"  foram IQ=win apurado como loss, nenhum no sentido inverso. Ela perde")
+    print(f"  wins e nao inventa nenhum, entao este numero e PISO, nao estimativa.")
+    print(f"  Corrigindo pela assimetria observada daria ~66%; pela simetrica, ~46%.")
+    print(f"  Com 2 erros nao da para escolher — ver corrigir_vies().")
 
 
 if __name__ == "__main__":
