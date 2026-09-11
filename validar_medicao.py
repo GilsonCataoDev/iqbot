@@ -6,9 +6,9 @@ erro de um terco empurra qualquer taxa verdadeira para perto de 50%, e foi o
 que fez sete meses de backtest darem todos entre 46% e 51%.
 
 Aqui a pergunta e direta: usando strike no instante da compra e saida no
-marco de vencimento, quantas das mesmas ordens a apuracao acerta? Se nao
-subir bem acima de 68%, a hipotese de vencimento em contrato.py esta errada
-e nao adianta reprocessar nada em cima dela.
+vencimento, quantas das mesmas ordens a apuracao acerta? Se nao subir bem
+acima de 68%, contrato.py esta errado e nao adianta reprocessar nada em
+cima dele. Resultado atual, com candles de 1s: 16/18 = 89%.
 
 Uso:
     python validar_medicao.py
@@ -75,7 +75,7 @@ def main() -> int:
     caches: dict[str, pd.DataFrame | None] = {}
     print(f"{'compra (UTC)':<18}{'par':<8}{'dir':<6}{'IQ':<6}{'apurado':<9}{'dur':>6}  bate?")
     print("-" * 70)
-    ok = dif = sem = 0
+    ok = dif = sem = empates = 0
     for ativo, direcao, hora_sinal, enviada_em, exp_min, lucro, _id in ordens:
         if ativo not in caches:
             caches[ativo] = backtest.carregar_cache(cfg, ativo)
@@ -92,20 +92,31 @@ def main() -> int:
             continue
         real = "win" if lucro > 0 else "loss"
         bate = d["resultado"] == real
-        ok += bate
-        dif += (not bate)
+        # Empate medido nao e erro de direcao: com 5 casas decimais a
+        # igualdade exata quase sempre e arredondamento, nao preco parado.
+        # Conta-lo junto com as divergencias reais inflaria o erro e
+        # esconderia quantas vezes a apuracao aponta para o lado errado.
+        if d["resultado"] == "empate":
+            empates += 1
+        elif bate:
+            ok += 1
+        else:
+            dif += 1
         print(f"{str(compra)[5:19]:<18}{ativo:<8}{direcao:<6}{real:<6}"
               f"{d['resultado']:<9}{d['duracao_s']/60:>5.0f}m  {'sim' if bate else 'NAO'}")
 
     total = ok + dif
     print("-" * 70)
     if total:
-        print(f"  concordam: {ok}/{total} = {ok/total*100:.0f}%")
-        print(f"  divergem:  {dif}/{total} = {dif/total*100:.0f}%")
+        print(f"  direcao correta: {ok}/{total} = {ok/total*100:.0f}%")
+        print(f"  direcao errada:  {dif}/{total} = {dif/total*100:.0f}%")
+        if empates:
+            print(f"  empates medidos: {empates} (fora do denominador — delta zero "
+                  f"em 5 casas e arredondamento, nao preco parado)")
         print(f"\n  metodo antigo (velas M5 fixas): 68%")
-        veredicto = ("hipotese de vencimento CONFIRMADA" if ok / total >= 0.9
-                     else "melhorou, mas ainda ha erro sistematico" if ok / total > 0.68
-                     else "hipotese de vencimento NAO se sustenta")
+        veredicto = ("apuracao CONFIRMADA" if ok / total >= 0.9
+                     else "melhor que o antigo, com residual nao explicado"
+                     if ok / total > 0.68 else "a apuracao NAO se sustenta")
         print(f"  -> {veredicto}")
     if sem:
         print(f"  sem dado suficiente: {sem} ordem(ns) — baixe {a.tf}s cobrindo o periodo")

@@ -1,8 +1,7 @@
 """A apuracao tem de bater com a opcao que existiu, nao com uma parecida."""
 import pandas as pd
-import pytest
 
-from iqoption_m5.contrato import desfecho_binario, marco_vencimento, preco_em
+from iqoption_m5.contrato import desfecho_binario, preco_em, vencimento
 
 
 def _serie(precos, inicio="2026-09-10 14:00:00", freq="1min"):
@@ -21,36 +20,26 @@ def _serie_ohlc(barras, inicio="2026-09-10 14:00:00", freq="1min"):
     )
 
 
-class TestMarcoVencimento:
-    def test_pedido_de_15min_cai_no_quarto_de_hora_mais_proximo(self):
-        # 14:02 + 15min = 14:17; marcos 14:15 (2min antes) e 14:30 (13 depois)
-        assert marco_vencimento(pd.Timestamp("2026-09-10 14:02"), 15) == \
-            pd.Timestamp("2026-09-10 14:15")
+class TestVencimento:
+    def test_expira_nos_minutos_pedidos(self):
+        assert vencimento(pd.Timestamp("2026-09-10 14:02"), 15) == pd.Timestamp("2026-09-10 14:17")
 
-    def test_alvo_mais_perto_do_marco_seguinte_alonga_a_opcao(self):
-        # 14:09 + 15min = 14:24; 14:30 esta a 6min e 14:15 a 9min
-        assert marco_vencimento(pd.Timestamp("2026-09-10 14:09"), 15) == \
-            pd.Timestamp("2026-09-10 14:30")
+    def test_nao_arredonda_para_quarto_de_hora(self):
+        """Hipotese descartada contra ordens reais.
 
-    def test_caso_medido_em_producao_14h09_pedindo_30min(self):
-        """Registrado no executor: 14:09 pedindo 30min expirou 14:45."""
-        assert marco_vencimento(pd.Timestamp("2026-09-10 14:09"), 30) == \
-            pd.Timestamp("2026-09-10 14:45")
+        Arredondar faria uma opcao de 15 minutos durar de 10 a 20, e derrubou
+        a concordancia de 89% para 79%. As 19 ordens registram 15 minutos
+        entre enviada_em e encerrada_em, sem excecao.
+        """
+        assert vencimento(pd.Timestamp("2026-09-10 14:09"), 15) == pd.Timestamp("2026-09-10 14:24")
 
-    def test_duracao_real_varia_embora_o_pedido_seja_sempre_15min(self):
-        """É por isso que medir 3 velas M5 fixas nao reproduz o contrato."""
+    def test_a_duracao_e_sempre_a_pedida_independente_do_minuto(self):
         duracoes = {
-            (marco_vencimento(pd.Timestamp(f"2026-09-10 14:{m:02d}"), 15)
+            (vencimento(pd.Timestamp(f"2026-09-10 14:{m:02d}"), 15)
              - pd.Timestamp(f"2026-09-10 14:{m:02d}")).total_seconds() / 60
             for m in range(0, 15)
         }
-        assert duracoes != {15.0}
-        assert min(duracoes) < 15 < max(duracoes)
-
-    def test_marco_colado_na_compra_pula_para_o_seguinte(self):
-        # 14:14:30 + 15min = 14:29:30 -> marco 14:30 fica a 30s da compra
-        venc = marco_vencimento(pd.Timestamp("2026-09-10 14:14:30"), 15)
-        assert (venc - pd.Timestamp("2026-09-10 14:14:30")).total_seconds() >= 60
+        assert duracoes == {15.0}
 
 
 class TestPrecoEm:
@@ -88,7 +77,7 @@ class TestDesfechoBinario:
 
         assert d["resultado"] == "win"
         assert d["strike"] == 1.10
-        assert d["vencimento"] == pd.Timestamp("2026-09-10 14:15")
+        assert d["vencimento"] == pd.Timestamp("2026-09-10 14:17")
 
     def test_put_ganha_quando_o_preco_cai(self):
         serie = _serie([1.10] * 3 + [1.05] * 30)

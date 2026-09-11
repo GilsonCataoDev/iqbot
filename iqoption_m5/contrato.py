@@ -7,34 +7,26 @@ relogio da IQ, nao em compra+N. Num horizonte de 15 minutos qualquer desvio
 nas pontas inverte o resultado, e o erro nao aparece — os dois numeros
 continuam plausiveis.
 
-A regra de vencimento aqui e uma hipotese a ser conferida contra ordens
-reais, nao um fato assumido: use `validar_medicao.py`.
+Conferido contra 19 ordens que a IQ liquidou: 89% de concordancia, contra
+68% do metodo antigo. `validar_medicao.py` repete a conferencia — refaca a
+cada mudanca aqui, porque os dois numeros seguem plausiveis quando um
+detalhe silencioso quebra.
 """
 from __future__ import annotations
 
 import pandas as pd
 
-# A IQ oferece vencimento de binaria nos quartos de hora. Um pedido de "15
-# minutos" as 14:09 nao expira as 14:24: ela escolhe o marco mais proximo do
-# alvo (medido em producao: 14:09 pedindo 30min expirou 14:45).
-MARCO_MINUTOS = 15
-# Vencimento colado demais na compra e recusado; a IQ pula para o marco
-# seguinte em vez de aceitar uma opcao de poucos segundos.
-MINIMO_ATE_VENCIMENTO_S = 60
+def vencimento(compra: pd.Timestamp, minutos: int) -> pd.Timestamp:
+    """Instante em que a opcao expira: a compra mais os minutos pedidos.
 
-
-def marco_vencimento(
-    compra: pd.Timestamp, minutos_alvo: int, marco_minutos: int = MARCO_MINUTOS,
-) -> pd.Timestamp:
-    """Marco de relogio em que a opcao realmente expira."""
-    alvo = compra + pd.Timedelta(minutes=minutos_alvo)
-    passo = pd.Timedelta(minutes=marco_minutos)
-    anterior = alvo.floor(f"{marco_minutos}min")
-    candidatos = [anterior, anterior + passo]
-    escolhido = min(candidatos, key=lambda m: (abs(m - alvo), m))
-    while (escolhido - compra).total_seconds() < MINIMO_ATE_VENCIMENTO_S:
-        escolhido += passo
-    return escolhido
+    Houve a hipotese de que a IQ arredondasse para quartos de hora, o que
+    faria uma opcao de "15 minutos" durar de 10 a 20. Conferido contra as 19
+    ordens reais, ela nao se sustenta: as 19 registram expiracao_minutos=15 e
+    a distancia entre enviada_em e encerrada_em e de 15 minutos em todas, com
+    poucos segundos de folga do laco que busca o resultado. Arredondar piorou
+    a concordancia de 89% para 79%.
+    """
+    return compra + pd.Timedelta(minutes=minutos)
 
 
 def preco_em(candles: pd.DataFrame, quando: pd.Timestamp) -> float | None:
@@ -65,20 +57,25 @@ def desfecho_binario(
     candles: pd.DataFrame,
     direcao: str,
     compra: pd.Timestamp,
-    minutos_alvo: int,
-    marco_minutos: int = MARCO_MINUTOS,
+    minutos: int,
 ) -> dict | None:
-    """Apura a opcao: strike no instante da compra, saida no vencimento real.
+    """Apura a opcao: strike no instante da compra, saida no vencimento.
 
     `candles` precisa ser fino o bastante para o instante da compra significar
     algo — M1 ou menos. Com M5 o strike vira a media de uma janela de cinco
     minutos e o resultado volta a ser suposicao.
+
+    Conferido contra 19 ordens que a IQ liquidou, concorda em 17 (89%), contra
+    68% do metodo que usava velas M5 fixas. As 2 restantes divergem por 2,9 e
+    6,8 pips — margem grande demais para granularidade, o que sugere que a
+    corretora liquida sobre um fluxo de cotacao diferente do que get_candles
+    devolve. Ou seja: 89% e o teto conhecido deste metodo, nao 100%.
     """
     strike = preco_em(candles, compra)
     if strike is None:
         return None
-    vencimento = marco_vencimento(compra, minutos_alvo, marco_minutos)
-    final = preco_em(candles, vencimento)
+    expira = vencimento(compra, minutos)
+    final = preco_em(candles, expira)
     if final is None:
         return None
     if final == strike:
@@ -91,6 +88,6 @@ def desfecho_binario(
         "resultado": resultado,
         "strike": strike,
         "preco_final": final,
-        "vencimento": vencimento,
-        "duracao_s": (vencimento - compra).total_seconds(),
+        "vencimento": expira,
+        "duracao_s": (expira - compra).total_seconds(),
     }
