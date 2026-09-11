@@ -2375,6 +2375,16 @@ class Estado:
         Não é TP/SL: é uma aposta direcional simples, medida pelo fechamento
         `HORIZONTE_NOTICIA_VELAS` velas adiante. Fica em estrutura própria
         para nunca ser somada às amostras dos estudos.
+
+        NUNCA DISPARA COM A FONTE ATUAL — 0 registros desde que foi escrito,
+        e isso não é bug de escrita nem falta de notícia. O portão abaixo
+        exige `resultado_publicado`, que exige `actual` numérico, e o feed
+        ff_calendar_thisweek.json não traz esse campo. Ver
+        `Evento.resultado_direcao` em iqoption_m5/noticias.py.
+
+        Antes de investigar zero registros aqui, confira se a fonte do
+        calendário passou a entregar `actual`. Enquanto não entregar, a
+        contagem correta é zero.
         """
         if noticia.get("estado") != "resultado_publicado":
             return

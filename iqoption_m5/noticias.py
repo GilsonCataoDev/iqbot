@@ -188,8 +188,26 @@ class Evento:
     def resultado_direcao(self, ativo: str) -> dict | None:
         """Ja saiu o numero real? Compara com o forecast e devolve CALL/PUT.
 
-        So funciona quando o feed ja publicou o 'actual' (minutos depois da
-        hora agendada) e o forecast tambem e numerico.
+        INERTE COM A FONTE ATUAL — sempre devolve None.
+
+        Exige `actual` numerico, e ff_calendar_thisweek.json nao tem esse
+        campo: o schema do feed e apenas title, country, date, impact,
+        forecast, previous. Conferido no feed ao vivo em 2026-09-11, com o
+        CPI americano ja divulgado havia 8 horas e `actual` ausente em 18 de
+        18 eventos do dia. Os endpoints lastweek/nextweek da mesma fonte
+        respondem 404.
+
+        O que isso deixa inerte junto: registrar_direcao_noticia no monitor
+        (0 registros desde que foi escrito), noticia_confirmada_ativo e
+        permitir_noticia_confirmada_a_favor.
+
+        Segue funcionando o que depende so da agenda: janela_de_risco e o
+        guarda noticia_high do laboratorio, que precisam de horario e
+        impacto — ambos presentes no feed.
+
+        Para reativar, basta uma fonte que preencha `actual`; o resto da
+        cadeia ja esta escrito. Toda alternativa conhecida (Finnhub, FMP,
+        Trading Economics) exige chave de API.
         """
         direcao = _direcao_da_noticia(self.titulo, self.moeda, ativo)
         if direcao is None:
@@ -368,10 +386,17 @@ class CalendarioEconomico:
         )
 
     def _ttl_atual(self) -> float:
-        """Uma hora basta para saber o que esta agendado; nao para saber que
-        o numero saiu. Descobrir tarde nao atrasa so o aviso: a afericao de
-        direcao grava o preco do instante em que acorda, entao um cache
-        vencido faz ela medir a partir do lugar errado."""
+        """Cache curto perto de evento HIGH, uma hora no resto do dia.
+
+        A justificativa original disto estava errada: foi escrito para pegar
+        o `actual` mais cedo, e o feed atual nunca publica `actual` — ver
+        resultado_direcao(). Encurtar o cache nao resolvia aquilo.
+
+        O que ele de fato entrega, e por isso fica: horario e impacto podem
+        mudar perto do evento (adiamento, revisao de impacto), e sao esses
+        campos que alimentam janela_de_risco e o guarda noticia_high. Custa
+        poucas requisicoes por dia, so nos minutos que importam.
+        """
         if self.perto_de_evento_alto():
             return min(self.ttl_perto_de_evento_segundos, self.ttl_segundos)
         return self.ttl_segundos
