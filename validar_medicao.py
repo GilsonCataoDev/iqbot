@@ -39,12 +39,16 @@ def _sem_fuso(t: pd.Timestamp) -> pd.Timestamp:
 def _offset_utc(hora_sinal: pd.Timestamp, enviada_em: pd.Timestamp, timeframe_s: int) -> pd.Timedelta:
     """Quanto somar a `enviada_em` para chegar em UTC.
 
-    `hora_sinal` vem do indice do candle, que e UTC; `enviada_em` vem de
-    datetime.now(), que e local. Em vez de fixar o fuso da maquina, deduz o
-    deslocamento: a ordem sai logo depois de o candle de sinal fechar, entao
-    a diferenca arredondada para horas cheias e o offset.
+    `hora_sinal` vem do stream ao vivo, que carimba o FECHAMENTO da vela de
+    confirmacao, e esta em UTC; `enviada_em` vem de datetime.now(), que e
+    local. Em vez de fixar o fuso da maquina, deduz o deslocamento: a ordem
+    sai ~10s depois desse carimbo, entao a diferenca arredondada para horas
+    cheias e o offset.
+
+    O arredondamento para hora cheia e o que torna isto robusto: mesmo que a
+    referencia erre por minutos, o offset de fuso continua correto.
     """
-    esperado = hora_sinal + pd.Timedelta(seconds=timeframe_s)
+    esperado = hora_sinal
     horas = round((esperado - enviada_em).total_seconds() / 3600)
     return pd.Timedelta(hours=horas)
 
