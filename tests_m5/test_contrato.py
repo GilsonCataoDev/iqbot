@@ -12,6 +12,15 @@ def _serie(precos, inicio="2026-09-10 14:00:00", freq="1min"):
     )
 
 
+def _serie_ohlc(barras, inicio="2026-09-10 14:00:00", freq="1min"):
+    """Abertura e fechamento diferentes: distingue preço do início do fim."""
+    idx = pd.date_range(inicio, periods=len(barras), freq=freq)
+    return pd.DataFrame(
+        [{"Open": o, "High": max(o, c), "Low": min(o, c), "Close": c} for o, c in barras],
+        index=idx,
+    )
+
+
 class TestMarcoVencimento:
     def test_pedido_de_15min_cai_no_quarto_de_hora_mais_proximo(self):
         # 14:02 + 15min = 14:17; marcos 14:15 (2min antes) e 14:30 (13 depois)
@@ -55,6 +64,21 @@ class TestPrecoEm:
     def test_depois_do_fim_da_serie_nao_extrapola(self):
         """Extrapolar produziria desfecho inventado, indistinguivel de medido."""
         assert preco_em(_serie([1.10, 1.11]), pd.Timestamp("2026-09-10 15:00")) is None
+
+    def test_usa_abertura_da_barra_e_nao_o_fechamento_futuro(self):
+        """Numa barra M1 o Close vale para o fim dela.
+
+        Ler o Close para uma compra aos 9 segundos devolveria o preço de 50
+        segundos depois — lookahead que inverte desfechos sem deixar rastro.
+        """
+        serie = _serie_ohlc([(1.100, 1.190), (1.200, 1.290)])
+
+        assert preco_em(serie, pd.Timestamp("2026-09-10 14:00:09")) == 1.100
+
+    def test_instante_exato_da_virada_usa_a_barra_que_comeca_ali(self):
+        serie = _serie_ohlc([(1.100, 1.190), (1.200, 1.290)])
+
+        assert preco_em(serie, pd.Timestamp("2026-09-10 14:01:00")) == 1.200
 
 
 class TestDesfechoBinario:

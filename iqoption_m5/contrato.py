@@ -38,7 +38,13 @@ def marco_vencimento(
 
 
 def preco_em(candles: pd.DataFrame, quando: pd.Timestamp) -> float | None:
-    """Ultimo preco negociado ate `quando`, ou None se estiver fora do dado.
+    """Preco no instante `quando`, ou None se estiver fora do dado.
+
+    Usa a ABERTURA da barra que contem o instante, nao o fechamento. Numa
+    barra OHLC o unico ponto com horario conhecido e a abertura: o fechamento
+    vale para o fim da barra. Ler o Close de uma barra M1 para uma compra aos
+    9 segundos devolveria o preco de 50 segundos depois — lookahead que
+    inverte desfechos sem deixar rastro.
 
     Devolve None em vez do preco mais proximo: extrapolar para fora da serie
     produziria um desfecho inventado, e um desfecho inventado nao se distingue
@@ -52,7 +58,7 @@ def preco_em(candles: pd.DataFrame, quando: pd.Timestamp) -> float | None:
     pos = candles.index.searchsorted(quando, side="right") - 1
     if pos < 0:
         return None
-    return float(candles.iloc[pos]["Close"])
+    return float(candles.iloc[pos]["Open"])
 
 
 def desfecho_binario(
