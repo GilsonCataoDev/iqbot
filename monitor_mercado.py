@@ -31,7 +31,7 @@ import time
 import webbrowser
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import numpy as np
@@ -69,7 +69,7 @@ VELAS_GRAFICO = 240
 PORTA = 8777
 INTERVALO_S = 30
 JAN = 10
-SIMULADOR_VERSAO = 3
+SIMULADOR_VERSAO = 4
 # Horizonte oficial da simulacao TP/SL, em velas. 24 x M15 = 6h.
 HORIZONTE_VELAS = 24
 # Horizonte longo medido EM PARALELO, sem substituir o oficial: um trade
@@ -2091,6 +2091,16 @@ class Estado:
                     and simulacao.get("resultado_r") is None
                 )
                 versao_antiga = int(simulacao.get("versao") or 0) < SIMULADOR_VERSAO
+                if versao_antiga:
+                    # Só atualiza o registro antigo se o candle ainda está no
+                    # histórico carregado. Sem isso, uma mudança de versão
+                    # reexamina milhares de eventos que não podem mais ser
+                    # auditados por falta de OHLC.
+                    try:
+                        vela_seguinte = pd.Timestamp(h["vela"]) + pd.Timedelta(seconds=timeframe_s)
+                        versao_antiga = vela_seguinte in df.index
+                    except (KeyError, TypeError, ValueError):
+                        versao_antiga = False
                 # Sinais gravados antes da medicao paralela ainda nao tem a
                 # chave longa; reprocessa uma vez para preenche-la.
                 longa = h.get(CHAVE_SIM_LONGA) or {}
@@ -2116,6 +2126,7 @@ class Estado:
                 simulacao_longa = self._resolver_tp_sl(
                     h, df, horizonte_velas=horizonte_longo
                 )
+                auditoria = self._auditoria_desfecho(h, df, simulacao)
                 with self._lock:
                     h["resultado"] = reacao
                     passo, unidade = unidade_movimento(ativo)
@@ -2123,6 +2134,7 @@ class Estado:
                     h["var_unidade"] = unidade
                     h["simulacao"] = simulacao
                     h[CHAVE_SIM_LONGA] = simulacao_longa
+                    h["auditoria"] = auditoria
                     for visivel in self.historico:
                         if visivel.get("id") == h.get("id") and visivel is not h:
                             visivel.update(h)
@@ -2132,6 +2144,61 @@ class Estado:
                 continue
         if alterou:
             self._salvar_aprendizado()
+
+    @staticmethod
+    def _auditoria_desfecho(h: dict, df: pd.DataFrame, simulacao: dict) -> dict:
+        """Descreve fatos do caminho até TP/SL, sem atribuir causalidade.
+
+        O simulador conhece apenas OHLC por candle; se TP e SL aparecem na
+        mesma vela, a ordem intravela é desconhecida e não é transformada em
+        uma explicação inventada.
+        """
+        desfecho = str(simulacao.get("desfecho") or "aguardando")
+        base = {"estado": desfecho, "evidencias": []}
+        if desfecho not in ("win_tp1", "loss_sl"):
+            return base
+        alvo = h.get("alvos_estudo") or h.get("alvos") or {}
+        try:
+            entrada = float(alvo.get("entrada", h.get("preco")))
+            stop = float(alvo["sl"])
+            inicio = pd.Timestamp(h["vela"])
+            fim = pd.Timestamp(simulacao["vela_desfecho"])
+        except (KeyError, TypeError, ValueError):
+            return base
+        risco = abs(entrada - stop)
+        trecho = df[(df.index > inicio) & (df.index <= fim)]
+        if risco <= 0 or trecho.empty:
+            return base
+
+        compra = h.get("direcao") != "sell"
+        maxima, minima = float(trecho["High"].max()), float(trecho["Low"].min())
+        favoravel = ((maxima - entrada) if compra else (entrada - minima)) / risco
+        adverso = ((entrada - minima) if compra else (maxima - entrada)) / risco
+        favoravel, adverso = max(0.0, favoravel), max(0.0, adverso)
+        evidencias = []
+        velas = int(simulacao.get("velas") or len(trecho))
+        if desfecho == "loss_sl":
+            evidencias.append("SL foi atingido antes do TP1.")
+            if velas == 1:
+                evidencias.append("O stop ocorreu na primeira vela após a entrada.")
+        else:
+            evidencias.append("TP1 foi atingido antes do SL.")
+        dossie = h.get("dossie") or {}
+        movimento = float(dossie.get("movimento_3_atr") or 0.0)
+        contra_movimento = (compra and movimento <= -.75) or (not compra and movimento >= .75)
+        if contra_movimento:
+            evidencias.append("A direção escolhida era contra o movimento das 3 velas anteriores.")
+        tags = set(dossie.get("tags") or [])
+        if "vela_fraca" in tags:
+            evidencias.append("O candle de sinal tinha corpo fraco.")
+        if "volatilidade_alta" in tags:
+            evidencias.append("A volatilidade estava acima do normal para o ativo.")
+        return {
+            **base, "velas": velas,
+            "max_favoravel_r": round(favoravel, 2),
+            "max_adverso_r": round(adverso, 2),
+            "evidencias": evidencias,
+        }
 
     @staticmethod
     def _resolver_tp_sl(h: dict, df: pd.DataFrame,
@@ -2483,7 +2550,12 @@ class Estado:
                 historico_saida.append(item)
             payload = {"ts": int(time.time()), "status": self.status,
                        "schemaVersao": SCHEMA_VERSAO,
-                       "saudeDados": self._store.resumo(),
+                       # A aba Dados é uma leitura das últimas 24h. O banco
+                       # completo continua preservado para auditoria, mas não
+                       # deve fazer uma entrada de hoje parecer milhares.
+                       "saudeDados": self._store.resumo(
+                           desde=datetime.now(timezone.utc) - timedelta(hours=24)
+                       ),
                        "historico": historico_saida,
                        "ativos": dict(self.dados),
                        "amostraEntrada": self._amostra_entrada_validada(),
@@ -2798,11 +2870,11 @@ def loop(api, cfg, estado: Estado, calendario: CalendarioEconomico | None = None
                     estudo_fibo = {
                         **estado.dados[a],
                         "sinal": True, "direcao": fibo["direcao"],
-                        "entrada_valida": False,
+                        "entrada_valida": True,
                         "estado_entrada": "FIBO — ESTUDO",
                         "motivo_entrada": fibo["motivo"],
                         "checklist": fibo["checklist"],
-                        "alvos": None, "alvos_estudo": fibo["alvos"],
+                        "alvos": fibo["alvos"], "alvos_estudo": fibo["alvos"],
                     }
                     if estado.registrar_sinal(a, str(df.index[-1]), estudo_fibo, tipo="fibo_m15"):
                         print(f"[FIBO — ESTUDO] {a} {fibo['direcao'].upper()} @ {df.index[-1]} "
@@ -2842,11 +2914,11 @@ def loop(api, cfg, estado: Estado, calendario: CalendarioEconomico | None = None
                     estudo_fluxo = {
                         **estado.dados[a],
                         "sinal": True, "direcao": fluxo["direcao"],
-                        "entrada_valida": False,
+                        "entrada_valida": True,
                         "estado_entrada": "FLUXO — ESTUDO",
                         "motivo_entrada": fluxo["motivo"],
                         "checklist": fluxo["checklist"],
-                        "alvos": None, "alvos_estudo": fluxo["alvos"],
+                        "alvos": fluxo["alvos"], "alvos_estudo": fluxo["alvos"],
                     }
                     if estado.registrar_sinal(
                         a, str(df.index[-1]), estudo_fluxo, tipo="fluxo_m15"
@@ -2857,11 +2929,11 @@ def loop(api, cfg, estado: Estado, calendario: CalendarioEconomico | None = None
                     estudo_orb = {
                         **estado.dados[a],
                         "sinal": True, "direcao": orb["direcao"],
-                        "entrada_valida": False,
+                        "entrada_valida": True,
                         "estado_entrada": "ORB/FVG — ESTUDO",
                         "motivo_entrada": orb["motivo"],
                         "checklist": orb["checklist"],
-                        "alvos": None, "alvos_estudo": orb["alvos"],
+                        "alvos": orb["alvos"], "alvos_estudo": orb["alvos"],
                     }
                     if estado.registrar_sinal(
                         a, str(df.index[-1]), estudo_orb, tipo="orb_fvg_m15"
@@ -2872,11 +2944,11 @@ def loop(api, cfg, estado: Estado, calendario: CalendarioEconomico | None = None
                     estudo_liquidez = {
                         **estado.dados[a],
                         "sinal": True, "direcao": "buy",
-                        "entrada_valida": False,
+                        "entrada_valida": True,
                         "estado_entrada": "LIQUIDEZ V2 — ESTUDO",
                         "motivo_entrada": liquidez["motivo"],
                         "checklist": liquidez["checklist"],
-                        "alvos": None, "alvos_estudo": liquidez["alvos"],
+                        "alvos": liquidez["alvos"], "alvos_estudo": liquidez["alvos"],
                     }
                     if estado.registrar_sinal(
                         a, str(df.index[-1]), estudo_liquidez,
@@ -2920,11 +2992,11 @@ def loop(api, cfg, estado: Estado, calendario: CalendarioEconomico | None = None
                     estudo_rr = {
                         **estado.dados[a],
                         "sinal": True, "direcao": plano_rr["direcao"],
-                        "entrada_valida": False,
+                        "entrada_valida": True,
                         "estado_entrada": "ROMPIMENTO+RETESTE — ESTUDO",
                         "motivo_entrada": plano_rr["motivo"],
                         "checklist": plano_rr["checklist"],
-                        "alvos": None, "alvos_estudo": plano_rr["alvos"],
+                        "alvos": plano_rr["alvos"], "alvos_estudo": plano_rr["alvos"],
                     }
                     if estado.registrar_sinal(
                         a, str(df.index[-1]), estudo_rr,
@@ -2947,6 +3019,7 @@ _HTML = """<!DOCTYPE html><html lang="pt-BR"><head><meta charset="utf-8">
 *{box-sizing:border-box}
 body{font-family:ui-monospace,monospace;background:#0b1220;color:#e2e8f0;margin:0;padding:.8rem}
 h1{color:#38bdf8;font-size:1.05rem;margin:0 0 .2rem}
+.topo-monitor{position:sticky;top:0;z-index:10;background:#0b1220;padding:.15rem 0 .35rem;border-bottom:1px solid #1e293b}
 .sub{color:#64748b;font-size:.72rem;margin-bottom:.6rem}
 .aviso{background:#3b1d0e;border-left:3px solid #f59e0b;padding:.5rem .7rem;border-radius:.3rem;
   font-size:.72rem;color:#fcd34d;margin:.5rem 0}
@@ -2999,6 +3072,8 @@ tr:hover{background:#16203450;cursor:pointer}
 .dossie span{font-size:.76rem;font-weight:700}
 .dossie-nota{font-size:.68rem;line-height:1.45;color:#cbd5e1;margin-top:.5rem;background:#0c2a3e;padding:.4rem .5rem;border-radius:.25rem}
 .dossie-aviso{color:#fbbf24}.dossie-win{color:#4ade80}.dossie-loss{color:#f87171}
+.auditoria{margin-top:.55rem;padding:.5rem .6rem;background:#171424;border-left:3px solid #64748b;border-radius:.25rem;font-size:.7rem;line-height:1.5}
+.auditoria.loss{border-left-color:#ef4444}.auditoria.win{border-left-color:#22c55e}.auditoria ul{margin:.25rem 0 0;padding-left:1.1rem}.auditoria li{margin:.1rem 0}
 .fibo-zona{color:#c4b5fd;border-color:#6d28d9;background:#251145}
 .fibo-card{border-left-color:#8b5cf6}.fibo-card.ok{border-left-color:#22c55e}
 .fibo-manual{margin:.45rem 0 .7rem;border-left:3px solid #a78bfa}.fibo-manual .nota{margin-top:.45rem}
@@ -3011,6 +3086,10 @@ tr:hover{background:#16203450;cursor:pointer}
 .nav{display:flex;gap:.35rem;position:sticky;top:0;z-index:5;background:#0b1220;padding:.35rem 0}
 .nav button,.filtro{background:#17233a;color:#94a3b8;border:1px solid #334155;border-radius:.3rem;padding:.3rem .55rem;font:inherit;font-size:.7rem}
 .nav button.on{color:#fff;border-color:#38bdf8;background:#0f4c75}.view{display:none}.view.on{display:block}
+.painel-grid{display:grid;grid-template-columns:minmax(0,1.05fr) minmax(300px,.95fr);gap:.65rem;align-items:start}
+.bloco{min-width:0}.bloco.full{grid-column:1/-1}.rolagem-x{overflow-x:auto;border:1px solid #1e293b;border-radius:.4rem;background:#0d1526}
+.estudos-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:.55rem}.estudo-bloco{min-width:0;background:#101a2c;border:1px solid #223149;border-radius:.4rem;padding:.1rem .65rem .65rem}
+@media(max-width:900px){body{padding:.55rem}.painel-grid,.estudos-grid{grid-template-columns:1fr}.bloco.full{grid-column:auto}.nav{overflow-x:auto;flex-wrap:nowrap}.nav button{white-space:nowrap}}
 .filtros{display:flex;gap:.4rem;align-items:center;flex-wrap:wrap;margin:.4rem 0}
 .saude-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:.45rem}
 .saude-item{background:#101a2c;border:1px solid #26364e;border-radius:.35rem;padding:.55rem}
@@ -3040,9 +3119,9 @@ tr:hover{background:#16203450;cursor:pointer}
 .maturidade-aprov{color:#22c55e;font-size:.68rem;font-weight:700}
 .hist-alvos{font-size:.64rem;color:#64748b;font-family:ui-monospace,monospace;white-space:nowrap}
 </style></head><body>
+<header class="topo-monitor">
 <h1>Monitor Mercado — Forex + Cripto + Ouro</h1>
 <div class="sub"><span id="status">carregando...</span> &nbsp;·&nbsp; <span id="relogio"></span></div>
-
 <div class="aviso">
 <b>Sinal</b> = falso rompimento LONG, único validado em Forex (55.44%) e Cripto (57.66%). Ouro fica em estudo até ter amostra própria.<br>
 <b>Regime, canal e tendencia do dia</b> = contexto para leitura, <b>nao sao sinal</b>.
@@ -3058,6 +3137,7 @@ Testado em 01/09/2026: operar a favor do canal (51.14%) rende o mesmo que contra
   <button data-view="dados" onclick="mudarVisao('dados')">Dados</button>
   <button id="btn-som-monitor" type="button" onclick="alternarSomMonitor()" title="Ativa som para novas oportunidades">🔕 Som</button>
 </div>
+</header>
 
 <section class="view" data-view="grafico">
 
@@ -3078,48 +3158,51 @@ Testado em 01/09/2026: operar a favor do canal (51.14%) rende o mesmo que contra
 
 <section class="view" data-view="estudos">
 <div class="amostra" id="amostra">Amostra validada: carregando…</div>
-
+<div class="estudos-grid">
+<div class="estudo-bloco">
 <div class="sec">TP1 CURTO FOREX — ZONA + REJEIÇÃO — ESTUDO SOMBRA</div>
 <div id="tp1-curto"><span class="empty">Selecione um par Forex.</span></div>
-
+</div><div class="estudo-bloco">
 <div class="sec">LEITURA DE FLUXO E SESSÃO — ESTUDO</div>
 <div id="fluxo"><span class="empty">Selecione um ativo.</span></div>
-
+</div><div class="estudo-bloco">
 <div class="sec">ORB LONDRES/NY + FVG M15 — ESTUDO SOMBRA</div>
 <div id="orb"><span class="empty">Selecione um ativo.</span></div>
-
+</div><div class="estudo-bloco">
 <div class="sec">VARREDURA DE LIQUIDEZ V2 — ESTUDO SOMBRA</div>
 <div id="liquidez"><span class="empty">Selecione um ativo.</span></div>
-
+</div><div class="estudo-bloco">
 <div class="sec">BOF M30→M5 FOREX + OURO — ESTUDO SOMBRA</div>
 <div id="bof"><span class="empty">Selecione um par Forex ou XAUUSD.</span></div>
-
+</div><div class="estudo-bloco">
 <div class="sec">FVG M15 — CONFLUÊNCIA</div>
 <div id="fvg"><span class="empty">Selecione um ativo.</span></div>
-
+</div><div class="estudo-bloco">
 <div class="sec">OURO — MOVIMENTO A FAVOR M15</div>
 <div id="ouro-movimento"><span class="empty">Selecione XAUUSD.</span></div>
-
+</div><div class="estudo-bloco">
 <div class="sec">PLANO FIBO M15 — ESTUDO</div>
 <div id="fibo"><span class="empty">Selecione um ativo.</span></div>
+</div></div>
 </section>
 
 <section class="view" data-view="agora">
 
+<div class="painel-grid">
+<div class="bloco">
 <div id="decisao-principal"></div>
-
 <div class="sec">IA DO GRÁFICO — LEITURA DO ATIVO</div>
 <button class="btn-marc" type="button" onclick="lerGroqSelecionado()">🤖 Analisar ativo + plano</button>
 <div id="ia-grafico"><span class="empty">Aguardando leitura mecânica.</span></div>
-
+</div><div class="bloco">
 <div class="sec">CONFLUÊNCIA LOCAL — ESTRUTURA, FVG, OB E LIQUIDEZ</div>
 <div id="confluencia"><span class="empty">Selecione um ativo.</span></div>
-
 <div class="sec">SINAIS ATIVOS</div>
 <div id="sinais"></div>
-
+</div><div class="bloco full">
 <div class="sec">CONTEXTO — ordenado por proximidade do sinal</div>
-<div id="tab"></div>
+<div class="rolagem-x"><div id="tab"></div></div>
+</div></div>
 </section>
 
 <section class="view" data-view="entradas">
@@ -3127,10 +3210,11 @@ Testado em 01/09/2026: operar a favor do canal (51.14%) rende o mesmo que contra
   <select class="filtro" id="filtro-tipo" onchange="render()"><option value="">Todos os tipos</option></select>
   <select class="filtro" id="filtro-resultado" onchange="render()"><option value="">Todos os resultados</option><option value="aguardando">Pendentes</option><option value="win_tp1">TP1</option><option value="loss_sl">Stop</option><option value="ambíguo">Ambíguos</option></select>
   <label><input type="checkbox" id="filtro-ativo" onchange="render()"> só ativo selecionado</label>
+  <label><input type="checkbox" id="filtro-candidatos" onchange="render()"> mostrar candidatos BOF</label>
 </div>
 
 <div class="sec">SINAIS DAS ULTIMAS 24h</div>
-<div id="hist"></div>
+<div class="rolagem-x"><div id="hist"></div></div>
 
 <div class="sec">DOSSIE DO SINAL</div>
 <div id="dossie"><span class="empty">Clique num sinal do histórico quando houver um.</span></div>
@@ -3282,6 +3366,10 @@ function renderDossie(H){
     : '<span class="ind">amostra ainda pequena</span>';
   const reacao=h.resultado==null?'aguardando':`${h.resultado} ${h.var_pips>0?'+':''}${h.var_pips||0} ${h.var_unidade||'pips'}`;
   const estado=h.entrada_valida?'ENTRADA VÁLIDA':'ESTUDO — NÃO OPERAR';
+  const au=h.auditoria||{};
+  const auditoria=(au.estado==='loss_sl'||au.estado==='win_tp1')
+    ?`<div class="auditoria ${au.estado==='loss_sl'?'loss':'win'}"><b>Auditoria pós-sinal — ${au.estado==='loss_sl'?'SL antes do TP1':'TP1 antes do SL'}</b><br>Movimento favorável: ${au.max_favoravel_r??'—'}R · contra: ${au.max_adverso_r??'—'}R · ${au.velas??'—'} vela(s).<ul>${(au.evidencias||[]).map(x=>`<li>${x}</li>`).join('')}</ul><span class="ind">São evidências do candle e do caminho OHLC; não provam uma causa única.</span></div>`
+    :'';
   const direcao=h.direcao==='sell'?'SELL':'BUY';
   const av=h.alvos_estudo||h.alvos||{};
   const alvosHtml=av.entrada!=null?`
@@ -3310,6 +3398,7 @@ function renderDossie(H){
       <div class="item"><label>casos parecidos (${c.amostra||0})</label>${comp}</div>
       <div class="item"><label>notícia no contexto</label><span class="${n.estado==='janela_risco'?'dossie-aviso':''}">${n.texto||'sem calendário'}</span>${resultadoPublicado(n)}</div>
     </div>
+    ${auditoria}
     <div class="dossie-nota">Tags: ${(a.tags||[]).join(' · ')||'sem dados'}. Comparação usa apenas sinais antigos da mesma classe e com contexto parecido. Isto descreve padrões; não prova a causa de win ou loss.</div>
   </div>`;
 }
@@ -3846,7 +3935,12 @@ function render(){
     '<table><tr><th>ativo</th><th>decisão</th><th>classe</th><th>fluxo / sessão</th><th>proximidade</th><th>regime</th><th>R2</th><th>pos. no canal</th><th>dia</th><th>EMA 4h/1d</th><th>ATR</th><th>preço</th></tr>'
     + ord.map(k=>linha(k,A[k])).join('') + '</table>';
 
-  const todos=D.historico||[];
+  const todosBrutos=D.historico||[];
+  // Candidato BOF é uma etapa de observação repetida a cada candle M5, não
+  // uma entrada nem um estudo aferível. Escondê-lo por padrão impede que ele
+  // enterre as entradas e os estudos que de fato possuem TP/SL.
+  const mostrarCandidatos=document.getElementById('filtro-candidatos')?.checked;
+  const todos=todosBrutos.filter(h=>mostrarCandidatos||h.tipo!=='bof_m30_m5_candidato');
   const tipo=document.getElementById('filtro-tipo')?.value||'';
   const resultado=document.getElementById('filtro-resultado')?.value||'';
   const soAtivo=document.getElementById('filtro-ativo')?.checked;
@@ -3872,9 +3966,12 @@ function render(){
   alertarNovoEvento();
   const s=D.saudeDados||{};
   document.getElementById('saude').innerHTML=[
-    ['Armazenamento',s.armazenamento||'—'],['Eventos',s.eventos??0],
-    ['Entradas válidas',s.entradas_validas??0],['Pendentes',s.pendentes??0],
-    ['Ambíguos',s.ambiguos??0],['Schema',D.schemaVersao??'—']
+    ['Período','últimas 24h'],['Entradas válidas',s.entradas_validas??0],
+    ['TP1 atingido',s.tp1??0],['Stops',s.stops??0],
+    ['Entradas pendentes',s.entradas_pendentes??0],['Estudos',s.estudos??0],
+    ['Estudos pendentes',s.estudos_pendentes??0],['Candidatos BOF',s.candidatos_bof??0],
+    ['Ambíguas',s.entradas_ambiguas??0],
+    ['Armazenamento',s.armazenamento||'—']
   ].map(([a,b])=>`<div class="saude-item"><label>${a}</label><b>${b}</b></div>`).join('');
   const t=document.getElementById('tabs');
   if(t.children.length!==ks.length){
