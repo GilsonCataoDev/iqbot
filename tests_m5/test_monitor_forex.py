@@ -24,6 +24,7 @@ from monitor_forex import (
     analisar_leitura_mercado,
     atualizar_preco_sinal,
     detectar_sinal,
+    detectar_sinal_sell,
 )
 
 
@@ -260,6 +261,63 @@ class TestSinalForex(unittest.TestCase):
         self.assertAlmostEqual(sinal.entrada, 1.10015, places=5)
         self.assertEqual(sinal.candle_rompimento, indice[258].to_pydatetime())
         self.assertGreaterEqual(sinal.rr, 2.0)
+
+    def test_detectar_sinal_sell_rompe_acima_da_acumulacao(self):
+        # Mesma geometria do teste buy: acumulacao com centros variados (range largo,
+        # amplitude por candle apertada) para que rhi e rlo criem espaco suficiente para RR>=2.
+        indice = pd.date_range("2026-01-01", periods=260, freq="15min")
+        linhas = []
+        for i in range(260):
+            if i < 239:
+                centro, amp = 1.1000, 0.0010
+            else:
+                centro, amp = 1.1001 + (i % 10) * 0.0002, 0.0001
+            linhas.append({"Open": centro, "High": centro + amp / 2, "Low": centro - amp / 2, "Close": centro})
+        # candle 258: fecha ACIMA do teto da acumulacao (~1.10195) com amplitude pequena
+        linhas[258] = {"Open": 1.10200, "High": 1.10220, "Low": 1.10198, "Close": 1.10218}
+        # candle 259: vela de entrada (Open usado para calcular preco bid)
+        linhas[259] = {"Open": 1.10215, "High": 1.10220, "Low": 1.10210, "Close": 1.10212}
+        df = pd.DataFrame(linhas, index=indice)
+        agora = indice[259].to_pydatetime().replace(tzinfo=timezone.utc) + timedelta(minutes=5)
+
+        sinal = detectar_sinal_sell("EURUSD", df, agora)
+
+        self.assertIsNotNone(sinal)
+        self.assertEqual(sinal.lado, "sell")
+        self.assertEqual(sinal.setup, "falso_rompimento_sell")
+        self.assertEqual(sinal.candle_rompimento, indice[258].to_pydatetime())
+        # entrada = Open[259] - spread (bid)
+        self.assertLess(sinal.entrada, 1.10215)
+        # sl acima do High do candle de rompimento
+        self.assertGreater(sinal.sl, 1.10220)
+        # tp e o meio da faixa (~1.101), abaixo da entrada
+        self.assertLess(sinal.tp, sinal.entrada)
+        self.assertGreaterEqual(sinal.rr, 2.0)
+
+    def test_acao_no_preco_sell_espelha_buy(self):
+        # Para SELL: sl acima da entrada, tp abaixo.
+        # risco = sl - preco_atual; reward = preco_atual - tp
+        # Preco mais alto = melhor para sell (mais reward, menos risco ate sl).
+        agora = datetime(2026, 1, 1, 12, 0, tzinfo=timezone.utc)
+        valido = agora + timedelta(minutes=30)
+        sinal = SinalForex(
+            ativo="EURUSD", lado="sell",
+            entrada=1.1050, sl=1.1080, tp=1.1000,
+            risco=0.003, rr=5.0,
+            gerado_em=agora, candle_rompimento=agora,
+            valido_ate=valido, preco_atual=1.1050, rr_atual=5.0,
+            setup="falso_rompimento_sell",
+        )
+        # preco alto (perto do sl): risco pequeno, reward grande -> ENTRAR_AGORA
+        # risco=1.1080-1.1065=0.0015, reward=1.1065-1.1000=0.0065, rr=4.3 >= 2.0
+        self.assertEqual(atualizar_preco_sinal(sinal, 1.1065, agora).acao, "ENTRAR_AGORA")
+        # preco baixo (longe do sl): risco grande, reward pequeno -> AGUARDAR_PRECO
+        # risco=1.1080-1.1030=0.005, reward=1.1030-1.1000=0.003, rr=0.6 < 2.0
+        self.assertEqual(atualizar_preco_sinal(sinal, 1.1030, agora).acao, "AGUARDAR_PRECO")
+        # preco acima do sl: cancelado
+        self.assertEqual(atualizar_preco_sinal(sinal, 1.1085, agora).acao, "CANCELADO")
+        # preco abaixo do tp: cancelado (oportunidade foi embora)
+        self.assertEqual(atualizar_preco_sinal(sinal, 1.0995, agora).acao, "CANCELADO")
 
 
 class _BaixoFake:

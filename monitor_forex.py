@@ -134,7 +134,7 @@ def avaliar_execucao(ativo: str, agora: datetime | None = None) -> dict:
 @dataclass
 class SinalForex:
     ativo: str
-    lado: str           # sempre "buy" nesta estrategia
+    lado: str           # "buy" ou "sell"
     entrada: float
     sl: float
     tp: float
@@ -542,12 +542,14 @@ def _indice_ultimo_fechado(df: pd.DataFrame, agora: datetime) -> int | None:
 
 
 def _acao_no_preco(sinal: SinalForex, preco: float, agora: datetime) -> tuple[str, float]:
-    risco = preco - sinal.sl
-    reward = sinal.tp - preco
+    venda = sinal.lado == "sell"
+    risco = sinal.sl - preco if venda else preco - sinal.sl
+    reward = preco - sinal.tp if venda else sinal.tp - preco
     rr = reward / risco if risco > 0 else -1.0
     if agora >= sinal.valido_ate:
         return "EXPIRADO", rr
-    if preco <= sinal.sl or preco >= sinal.tp:
+    cancelado = (preco >= sinal.sl or preco <= sinal.tp) if venda else (preco <= sinal.sl or preco >= sinal.tp)
+    if cancelado:
         return "CANCELADO", rr
     if rr < RR_MIN:
         return "AGUARDAR_PRECO", rr
@@ -595,7 +597,7 @@ def detectar_sinal(
     df: pd.DataFrame,
     agora: datetime | None = None,
 ) -> SinalForex | None:
-    """Retorna sinal se o ultimo candle fechado e um falso rompimento BUY valido."""
+    """Retorna sinal BUY se o ultimo candle fechado rompeu abaixo da acumulacao."""
     if len(df) < JAN + 20:
         return None
 
@@ -657,6 +659,77 @@ def detectar_sinal(
         valido_ate=valido_ate,
         preco_atual=preco_atual,
         rr_atual=rr,
+    )
+    return atualizar_preco_sinal(sinal, preco_atual, agora)
+
+
+def detectar_sinal_sell(
+    ativo: str,
+    df: pd.DataFrame,
+    agora: datetime | None = None,
+) -> SinalForex | None:
+    """Retorna sinal SELL se o ultimo candle fechado rompeu acima da acumulacao."""
+    if len(df) < JAN + 20:
+        return None
+
+    agora = agora or datetime.now(timezone.utc)
+    H, L, O, C = df["High"], df["Low"], df["Open"], df["Close"]
+    amp = H - L
+    med_amp = amp.shift(1).rolling(JAN).mean()
+    limiar = med_amp.shift(1).expanding(min_periods=MIN_HIST_REGIME).quantile(0.25)
+
+    rhi = H.shift(1).rolling(JAN).max()
+    rlo = L.shift(1).rolling(JAN).min()
+    meio = (rhi + rlo) / 2
+    atr = _atr14(df)
+
+    i = _indice_ultimo_fechado(df, agora)
+    if i is None or i + 1 >= len(df):
+        return None
+    limiar_i = float(limiar.iloc[i])
+    apertado = np.isfinite(limiar_i) and float(med_amp.iloc[i]) <= limiar_i
+    rompe_alto = apertado and float(C.iloc[i]) > float(rhi.iloc[i])
+    if not rompe_alto:
+        return None
+
+    atr_i = float(atr.iloc[i])
+    if not np.isfinite(atr_i) or atr_i <= 0:
+        return None
+
+    # SELL no bid estimado da vela seguinte (simetrico ao BUY).
+    entrada_ref = float(O.iloc[i + 1]) - _spread(ativo)
+    sl = float(H.iloc[i]) + BUF_SL_ATR * atr_i
+    tp = float(meio.iloc[i])
+    risco = sl - entrada_ref
+    reward = entrada_ref - tp
+
+    if risco <= 0 or reward <= 0:
+        return None
+    rr = reward / risco
+    if rr < RR_MIN:
+        return None
+
+    candle_entrada = pd.Timestamp(df.index[i + 1])
+    if candle_entrada.tzinfo is None:
+        candle_entrada = candle_entrada.tz_localize(timezone.utc)
+    else:
+        candle_entrada = candle_entrada.tz_convert(timezone.utc)
+    valido_ate = (candle_entrada + pd.Timedelta(seconds=TIMEFRAME_S)).to_pydatetime()
+    preco_atual = float(C.iloc[-1]) - _spread(ativo)
+    sinal = SinalForex(
+        ativo=ativo,
+        lado="sell",
+        entrada=entrada_ref,
+        sl=sl,
+        tp=tp,
+        risco=risco,
+        rr=rr,
+        gerado_em=agora,
+        candle_rompimento=df.index[i].to_pydatetime(),
+        valido_ate=valido_ate,
+        preco_atual=preco_atual,
+        rr_atual=rr,
+        setup="falso_rompimento_sell",
     )
     return atualizar_preco_sinal(sinal, preco_atual, agora)
 
@@ -1096,6 +1169,8 @@ def loop_sinais(api, servidor: ServidorDadosForex, diario: DiarioTrades, config,
                         diario.registrar_analise_ia(par, analise, contexto)
                     gemini.solicitar(leitura, salvar_ia, noticias)
                 sinal = detectar_sinal(ativo, df)
+                if sinal is None:
+                    sinal = detectar_sinal_sell(ativo, df)
                 if sinal is None and ativo == "USDCAD":
                     sinal = detectar_observacao_usdcad(df)
 
