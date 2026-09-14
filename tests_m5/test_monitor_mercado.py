@@ -24,11 +24,18 @@ def test_painel_separa_agora_grafico_entradas_estudos_e_dados():
     for visao in ("agora", "grafico", "entradas", "estudos", "dados"):
         assert f'data-view="{visao}"' in monitor_mercado._HTML
     assert 'id="filtro-tipo"' in monitor_mercado._HTML
+    assert 'id="filtro-candidatos"' in monitor_mercado._HTML
     assert 'id="saude"' in monitor_mercado._HTML
     assert 'id="confluencia"' in monitor_mercado._HTML
     assert 'function renderConfluencia()' in monitor_mercado._HTML
     assert 'function alternarNiveis()' in monitor_mercado._HTML
     assert 'niveisDetalhados' in monitor_mercado._HTML
+    assert 'class="painel-grid"' in monitor_mercado._HTML
+    assert 'class="estudos-grid"' in monitor_mercado._HTML
+    assert 'class="rolagem-x"' in monitor_mercado._HTML
+    assert '<header class="topo-monitor">' in monitor_mercado._HTML
+    assert '<div class="aviso">' in monitor_mercado._HTML
+    assert "Estudos pendentes" in monitor_mercado._HTML
 
 
 def test_grafico_descarta_tick_fora_do_bloco_m15_que_achata_eurusd():
@@ -521,6 +528,29 @@ def test_simulador_salva_stop_antes_do_tp1():
     assert resultado["primeiro_toque"] == "stop"
 
 
+def test_auditoria_do_loss_mostra_caminho_e_contexto_contra_tendencia():
+    inicio = pd.Timestamp("2026-09-01 12:00:00")
+    candles = pd.DataFrame(
+        {"Open": [1.0], "High": [1.002], "Low": [.985], "Close": [.99]},
+        index=[inicio + pd.Timedelta(minutes=15)],
+    )
+    h = {
+        "vela": str(inicio), "direcao": "buy", "preco": 1.0,
+        "alvos_estudo": {"entrada": 1.0, "sl": .99, "tp1": 1.02},
+        "dossie": {"movimento_3_atr": -1.2,
+                    "tags": ["vela_fraca", "volatilidade_alta"]},
+    }
+    simulacao = {"desfecho": "loss_sl", "velas": 1,
+                 "vela_desfecho": str(candles.index[0])}
+
+    auditoria = Estado._auditoria_desfecho(h, candles, simulacao)
+
+    assert auditoria["max_adverso_r"] == 1.5
+    assert auditoria["max_favoravel_r"] == .2
+    assert any("primeira vela" in e for e in auditoria["evidencias"])
+    assert any("contra o movimento" in e for e in auditoria["evidencias"])
+
+
 def test_simulador_nao_inventa_ordem_quando_tp1_e_stop_ocorrem_na_mesma_vela():
     inicio = pd.Timestamp("2026-09-01 12:00:00")
     h = {
@@ -949,6 +979,7 @@ def test_html_dossie_exibe_plano_completo():
     assert "PLANO (estudo" in monitor_mercado._HTML
     assert "Invalidação / SL" in monitor_mercado._HTML or "Invalidação" in monitor_mercado._HTML
     assert "textoSimulacao(h.simulacao,h)" in monitor_mercado._HTML
+    assert "Auditoria pós-sinal" in monitor_mercado._HTML
 
 
 def test_estado_publica_campos_ic_e_maturidade_no_json(tmp_path):

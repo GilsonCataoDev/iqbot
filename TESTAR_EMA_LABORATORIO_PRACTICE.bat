@@ -1,14 +1,15 @@
 @echo off
-chcp 65001 >nul
 cd /d "%~dp0"
 if exist ".env.bat" call ".env.bat"
-title IQ Option - Laboratorio EMA M5 e M15 [PRACTICE]
+title IQ Option - Laboratorio EMA M5, M15 e H1 [PRACTICE]
 echo ============================================================
-echo  LABORATORIO EMA - M5 e M15 - CONTA PRACTICE
-echo  Uma conexao IQ. Execucao: EMA9/20 fechado em EURUSD e AUDCAD.
-echo  M5 e M15 enviam; M15 exige alinhamento H1.
-echo  Outros setups e 6 ativos ficam em sombra para comparacao.
-echo  Ativos monitorados: EURUSD, AUDCAD, NZDUSD, GBPUSD, USDJPY, AUDUSD, USDCAD e EURJPY.
+echo  LABORATORIO EMA - M5, M15 e H1 - CONTA PRACTICE
+echo  Re-teste M5: uma estrategia por ativo, sem conflito de ordens.
+echo  EMA9/20 AUDCAD. EMA9/21 USDCAD e AUDUSD. Fibo EURJPY. NZD NZDUSD.
+echo  Fibo M15 para M5: EURUSD, GBPUSD e USDJPY. Expiracao 15min.
+echo  M15 permanece em sombra para comparacao.
+echo  H1 PRACTICE: EURCHF, rompimento + reteste EMA9/21, expiracao 60min.
+echo  Ativos monitorados: EURUSD, AUDCAD, NZDUSD, GBPUSD, USDJPY, AUDUSD, USDCAD, EURJPY e EURCHF.
 echo  Stake fixa: R$5 ^| banco unico: ema_laboratorio_practice
 echo ============================================================
 echo.

@@ -109,6 +109,37 @@ def contexto_fibo(marcacoes: list[dict], preco: float) -> dict | None:
     }
 
 
+def contexto_fibo_m15_m5(candles_m5: pd.DataFrame, candles_m15: pd.DataFrame) -> dict | None:
+    """Contexto automático do mesmo setup do Lab, sem depender da Fibo manual."""
+    if len(candles_m5) < 3 or len(candles_m15) < 30:
+        return None
+    sinal = candles_m5.iloc[-2]
+    contexto = candles_m15.loc[candles_m15.index < candles_m5.index[-2]].copy()
+    if len(contexto) < 30:
+        return None
+    contexto["ema9"] = contexto.Close.ewm(span=9, adjust=False).mean()
+    contexto["ema21"] = contexto.Close.ewm(span=21, adjust=False).mean()
+    janela = contexto.iloc[-5:]
+    media = (contexto.High - contexto.Low).rolling(14).mean().iloc[-1]
+    topo, fundo = float(janela.High.max()), float(janela.Low.min())
+    amplitude = topo - fundo
+    if not pd.notna(media) or media <= 0 or amplitude < 1.5 * float(media):
+        return None
+    ultimo = janela.iloc[-1]
+    if ultimo.ema9 > ultimo.ema21 and ultimo.Close > janela.Close.iloc[0]:
+        direcao, n50, n618 = "CALL", topo - .50 * amplitude, topo - .618 * amplitude
+    elif ultimo.ema9 < ultimo.ema21 and ultimo.Close < janela.Close.iloc[0]:
+        direcao, n50, n618 = "PUT", fundo + .50 * amplitude, fundo + .618 * amplitude
+    else:
+        return None
+    minimo, maximo = min(n50, n618), max(n50, n618)
+    return {
+        "direcao": direcao, "topo": topo, "fundo": fundo,
+        "niveis": {"0.5": n50, "0.618": n618},
+        "zona": {"min": minimo, "max": maximo, "dentro": minimo <= float(sinal.Close) <= maximo},
+    }
+
+
 def _prazo_binaria(timeframe_segundos: int) -> dict:
     """Prazo explícito para o alerta manual; não é instrução de execução."""
     if timeframe_segundos == 300:
@@ -131,7 +162,8 @@ def _prazo_binaria(timeframe_segundos: int) -> dict:
 
 
 def avaliar_combos(
-    ind: pd.DataFrame, vela: dict, fibo: dict | None, timeframe_segundos: int = 300
+    ind: pd.DataFrame, vela: dict, fibo: dict | None, timeframe_segundos: int = 300,
+    fibo_mtf: dict | None = None,
 ) -> list[dict]:
     """Devolve alertas explicáveis. Nenhum item representa recomendação de ordem."""
     u = ind.iloc[-2]
@@ -141,8 +173,15 @@ def avaliar_combos(
     perto_sr = min(abs(preco - sr_min), abs(preco - sr_max)) <= max(float(u.atr) * .3, 1e-12)
     confirmada = vela["direcao"] == tendencia and vela["forca"] >= 2
     fib_zona = bool(fibo and fibo["zona50_618"]["dentro"])
+    mtf_confirmado = bool(
+        timeframe_segundos == 300 and fibo_mtf and fibo_mtf["zona"]["dentro"]
+        and vela["direcao"] == fibo_mtf["direcao"] and vela["forca"] >= 2
+    )
     prazo = _prazo_binaria(timeframe_segundos)
     retorno = [
+        {"id": "fibo_m15_m5", "nome": "Fibo M15 + confirmação M5", "ativo": mtf_confirmado,
+         "direcao": fibo_mtf["direcao"] if fibo_mtf else "NEUTRA",
+         "motivo": "Impulso M15 + zona 50–61,8% + rejeição/engolfo M5" if mtf_confirmado else "Use no M5: aguarda impulso M15, zona 50–61,8% e confirmação M5."},
         {"id": "fibo_correcao", "nome": "Fibo: correção a favor", "ativo": fib_zona and confirmada,
          "direcao": tendencia, "motivo": "50–61,8% + EMA9/21 + vela de confirmação" if fib_zona and confirmada else "Precisa zona 50–61,8%, tendência e rejeição/engolfo."},
         {"id": "fibo_reversao", "nome": "Fibo: reversão no nível", "ativo": fib_zona and perto_sr and vela["forca"] >= 2,
@@ -156,12 +195,17 @@ def avaliar_combos(
 
 
 def montar_leitura(
-    snapshot, marcacoes: list[dict], timeframe_segundos: int = 300
+    snapshot, marcacoes: list[dict], timeframe_segundos: int = 300,
+    candles_m15: pd.DataFrame | None = None,
 ) -> dict:
     ind = indicadores_auxiliares(snapshot.candles)
     u = ind.iloc[-2]
     vela = detectar_vela(snapshot.candles)
     fibo = contexto_fibo(marcacoes, float(u.Close))
+    fibo_mtf = (
+        contexto_fibo_m15_m5(snapshot.candles, candles_m15)
+        if timeframe_segundos == 300 and candles_m15 is not None else None
+    )
     return {
         "candles": [
             {"time": int(pd.Timestamp(i).tz_localize("UTC").timestamp()) if pd.Timestamp(i).tzinfo is None else int(pd.Timestamp(i).timestamp()),
@@ -172,18 +216,29 @@ def montar_leitura(
         "ema21": [{"time": int(pd.Timestamp(i).tz_localize("UTC").timestamp()) if pd.Timestamp(i).tzinfo is None else int(pd.Timestamp(i).timestamp()), "value": float(v)} for i, v in ind.ema21.items()],
         "rsi": float(u.rsi), "atr": float(u.atr), "preco": float(u.Close), "vela": vela,
         "fibo": fibo,
-        "combos": avaliar_combos(ind, vela, fibo, timeframe_segundos),
+        "fibo_mtf": fibo_mtf,
+        "combos": avaliar_combos(ind, vela, fibo, timeframe_segundos, fibo_mtf),
         "sr": {"suporte": float(ind.Low.tail(25).min()), "resistencia": float(ind.High.tail(25).max())},
     }
 
 
 def atualizar_ativo_auxiliar(mercado, ativo: str, marcacoes: list[dict]) -> dict:
     """Isola falhas por timeframe para a tela nunca morrer por um stream ruim."""
-    por_tf: dict[str, dict] = {}
+    snapshots: dict[int, object] = {}
     for tf in TIMEFRAMES:
         try:
+            snapshots[tf] = mercado.snapshot_timeframe(ativo, tf)
+        except Exception as erro:
+            snapshots[tf] = erro
+    por_tf: dict[str, dict] = {}
+    for tf, snapshot in snapshots.items():
+        if isinstance(snapshot, Exception):
+            por_tf[str(tf)] = {"erro": f"{type(snapshot).__name__}: {snapshot}"}
+            continue
+        try:
             por_tf[str(tf)] = montar_leitura(
-                mercado.snapshot_timeframe(ativo, tf), marcacoes, tf
+                snapshot, marcacoes, tf,
+                snapshots[900].candles if tf == 300 and not isinstance(snapshots[900], Exception) else None,
             )
         except Exception as erro:
             por_tf[str(tf)] = {"erro": f"{type(erro).__name__}: {erro}"}

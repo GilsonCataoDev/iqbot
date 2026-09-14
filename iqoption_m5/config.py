@@ -967,7 +967,7 @@ def configuracao_ema_m5_real(base: Configuracao | None = None) -> Configuracao:
 
 
 def configuracao_ema_laboratorio_practice(base: Configuracao | None = None) -> Configuracao:
-    """Base do laboratório EMA: uma conexão IQ, M5 e M15, banco compartilhado."""
+    """Base do laboratório EMA: uma conexão IQ, M5, M15 e H1, banco compartilhado."""
     return replace(
         configuracao_ema921_rsi_intravela_m5_practice(base),
         # Amostra normal ampla para comparar ativos no mesmo operacional.
@@ -976,20 +976,14 @@ def configuracao_ema_laboratorio_practice(base: Configuracao | None = None) -> C
         # comparação estatística apontar os dois melhores.
         ativos=(
             "EURUSD", "AUDCAD", "NZDUSD",
-            "GBPUSD", "USDJPY", "AUDUSD", "USDCAD", "EURJPY",
+            "GBPUSD", "USDJPY", "AUDUSD", "USDCAD", "EURJPY", "EURCHF",
         ),
         # O laboratório tem banco próprio e mede todas as estratégias. Não pode
         # herdar o piso R$30 do antigo teste M1, que pararia uma campanha nova.
         piso_banca=0.0,
-        # NZDUSD segue em sombra: 18 ordens, 44,4% e -15,2u — já tem amostra,
-        # e ela é negativa.
-        #
-        # Os outros cinco saíram da sombra em 08/09. O motivo é que a sombra
-        # não estava produzindo o dado que ela promete: eles acumularam ZERO
-        # ordens, então não havia como compará-los com EURUSD e AUDCAD, que
-        # tinham 75 e 52. Uma "escolha justa no fim da campanha" precisa de
-        # amostra dos dois lados. Em PRACTICE, o custo de gerá-la é nenhum.
-        ativos_somente_sombra=("NZDUSD",),
+        # A campanha de re-teste separa os setups por ativo. Assim, inclusive
+        # NZD recebe uma nova amostra sem uma estratégia bloquear a outra.
+        ativos_somente_sombra=(),
         # O M5 e M15 compartilham a mesma conta. Reserva global impede duas
         # ordens do mesmo ativo (ou duas na mesma direção) em timeframes
         # diferentes ao mesmo tempo.

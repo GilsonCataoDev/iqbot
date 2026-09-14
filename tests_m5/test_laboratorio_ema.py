@@ -1,4 +1,5 @@
 from datetime import datetime, timedelta
+from dataclasses import replace
 import threading
 
 import pandas as pd
@@ -21,21 +22,19 @@ def test_laboratorio_tem_rastros_m5_e_m15_e_nzd_em_sombra():
     config = configuracao_ema_laboratorio_practice()
     rastros = _rastros(config)
 
-    assert len(rastros) == 11
+    assert len(rastros) == 13
     assert config.ativos == (
-        "EURUSD", "AUDCAD", "NZDUSD", "GBPUSD", "USDJPY", "AUDUSD", "USDCAD", "EURJPY",
+        "EURUSD", "AUDCAD", "NZDUSD", "GBPUSD", "USDJPY", "AUDUSD", "USDCAD", "EURJPY", "EURCHF",
     )
-    # Só o NZDUSD segue em sombra: ele já tem amostra e ela é negativa
-    # (18 ordens, 44,4%, -15,2u). Os outros cinco acumulavam ZERO ordens,
-    # entao a sombra nao produzia o dado que justificaria compará-los.
-    assert config.ativos_somente_sombra == ("NZDUSD",)
-    assert {r.config.timeframe_segundos for r in rastros} == {300, 900}
+    assert config.ativos_somente_sombra == ()
+    assert {r.config.timeframe_segundos for r in rastros} == {300, 900, 3600}
     assert sum(r.intravela for r in rastros) == 4
     fibos = [r for r in rastros if r.config.fibo_sr_retracao_ativo]
     assert {r.config.timeframe_segundos for r in fibos} == {300, 900}
-    assert all(r.somente_sombra and r.intravela for r in fibos)
+    assert all(r.intravela for r in fibos)
+    assert any(not r.somente_sombra and r.config.timeframe_segundos == 300 for r in fibos)
     nzd = next(r for r in rastros if r.config.nzd_trend_pullback_ativo)
-    assert nzd.somente_sombra
+    assert not nzd.somente_sombra
     assert nzd.config.timeframe_segundos == 300
     rastros_m15 = [r for r in rastros if r.config.timeframe_segundos == 900]
     assert all(r.config.filtro_h1_ativo for r in rastros_m15)
@@ -47,17 +46,25 @@ def test_laboratorio_tem_rastros_m5_e_m15_e_nzd_em_sombra():
         and r.somente_sombra
     )
     assert h1_shadow is not None
-    assert any(not r.somente_sombra and r.config.ema920_pullback_ativo for r in rastros_m15)
+    assert all(r.somente_sombra for r in rastros_m15)
     rastros_executaveis = [r for r in rastros if not r.somente_sombra]
-    assert len(rastros_executaveis) == 2
-    assert {r.config.timeframe_segundos for r in rastros_executaveis} == {300, 900}
-    assert all(r.config.ema920_pullback_ativo for r in rastros_executaveis)
+    assert len(rastros_executaveis) == 7
+    assert {r.config.timeframe_segundos for r in rastros_executaveis} == {300, 3600}
+    assert sum(r.config.ema920_pullback_ativo for r in rastros_executaveis) == 1
+    fibo_mtf = next(r for r in rastros if r.config.fibo_mtf_confirmado_ativo)
+    assert fibo_mtf.config.ativos == ("EURUSD", "GBPUSD", "USDJPY")
+    assert fibo_mtf.config.expiracao_por_setup == {"fibo_mtf_confirmado": 15}
     assert config.bloquear_direcao_paralela
     assert config.pullback_fib_min == 0.382
     assert config.pullback_fib_max == 0.618
     prime = next(r for r in rastros if r.config.ema920_prime_ativo)
     assert prime.somente_sombra
     assert prime.config.timeframe_segundos == 300
+    h1 = next(r for r in rastros if r.config.breakout_reteste_ativo)
+    assert not h1.somente_sombra
+    assert h1.config.ativos == ("EURCHF",)
+    assert h1.config.timeframe_segundos == 3600
+    assert h1.config.expiracao_por_setup == {"breakout_reteste": 60}
 
 
 def test_todo_rastro_identifica_o_proprio_setup_sem_stopiteration():
@@ -68,6 +75,7 @@ def test_todo_rastro_identifica_o_proprio_setup_sem_stopiteration():
 
     assert "ema920_prime" in setups
     assert setups.count("fibo_sr_retracao") == 2
+    assert setups.count("fibo_mtf_confirmado") == 1
     assert len(setups) == len(rastros)
 
 
@@ -498,7 +506,7 @@ def test_sem_noticia_o_par_que_opera_segue_mandando_ordem():
 def test_ativo_ja_em_sombra_mantem_o_motivo_original_mesmo_com_noticia():
     """O rótulo do candidato não pode ser sobrescrito: a amostra dele
     é comparada por motivo e misturar as duas causas a invalida."""
-    base = configuracao_ema_laboratorio_practice()
+    base = replace(configuracao_ema_laboratorio_practice(), ativos_somente_sombra=("NZDUSD",))
     rastro = _rastro_que_opera(_rastros(base))
 
     assert _motivo_sombra(

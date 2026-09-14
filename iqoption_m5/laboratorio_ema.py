@@ -114,22 +114,30 @@ def _vigiar_laboratorio(
 def _config_rastro(base: Configuracao, timeframe: int, setup: str) -> Configuracao:
     """Configura apenas um setup por rastro; evita que sinais se confundam."""
     is_m15 = timeframe == 900
-    expiracao = 30 if is_m15 else 15
-    janela_intravela = 720 if is_m15 else 240
+    is_h1 = timeframe == 3600
+    expiracao = 60 if is_h1 else 30 if is_m15 else 15
+    janela_intravela = 2400 if is_h1 else 720 if is_m15 else 240
     return replace(
         base,
         timeframe_segundos=timeframe,
         expiracao_minutos=expiracao,
-        entrada_max_segundos_no_candle=60 if is_m15 else 45,
+        entrada_max_segundos_no_candle=300 if is_h1 else 60 if is_m15 else 45,
         ema920_pullback_ativo=setup == "ema920_pullback",
         ema920_prime_ativo=setup == "ema920_prime",
         ema921_rsi_pullback_ativo=setup == "ema921_rsi_pullback",
         ema921_rsi_intravela_ativo=setup == "ema921_rsi_intravela",
         fibo_sr_retracao_ativo=setup == "fibo_sr_retracao",
+        fibo_mtf_confirmado_ativo=setup == "fibo_mtf_confirmado",
         nzd_trend_pullback_ativo=setup == "nzd_trend_pullback_v1",
+        breakout_reteste_ativo=setup == "breakout_reteste",
         # M15 só segue a favor do contexto H1. O filtro é medido em sombra
         # antes de qualquer nova ordem real nesse timeframe.
         filtro_h1_ativo=is_m15,
+        # O Lab ainda não busca H4 para seus rastros. Não fingir um filtro
+        # macro inexistente; a seletividade H1 vem do rompimento + reteste.
+        filtro_h4_ativo=False,
+        ema_micro_periodo=9 if is_h1 else base.ema_micro_periodo,
+        ema_macro_periodo=21 if is_h1 else base.ema_macro_periodo,
         entrada_intracandle_por_toque_ativo=setup in (
             "ema921_rsi_intravela", "fibo_sr_retracao",
         ),
@@ -146,6 +154,16 @@ def _config_rastro(base: Configuracao, timeframe: int, setup: str) -> Configurac
 
 def _rastros(base: Configuracao) -> list[RastroEma]:
     saida: list[RastroEma] = []
+    # Uma estratégia por ativo no re-teste PRACTICE. Isso impede que sinais
+    # correlacionados sejam recusados pela reserva global e deixem o estudo
+    # sem amostra, como ocorreu com a primeira campanha Fibo.
+    ativos_reteste_m5 = {
+        "ema920_pullback": ("AUDCAD",),
+        "ema921_rsi_pullback": ("USDCAD",),
+        "ema921_rsi_intravela": ("AUDUSD",),
+        "fibo_sr_retracao": ("EURJPY",),
+        "nzd_trend_pullback_v1": ("NZDUSD",),
+    }
     for timeframe, rotulo in ((300, "M5"), (900, "M15")):
         setups = [
             ("ema920_pullback", "EMA9/20 fechado"),
@@ -156,6 +174,7 @@ def _rastros(base: Configuracao) -> list[RastroEma]:
         if timeframe == 300:
             setups.append(("ema920_prime", "EMA9/20 Prime"))
         for setup, nome in setups:
+            executavel_reteste = timeframe == 300 and setup in ativos_reteste_m5
             saida.append(
                 RastroEma(
                     nome=(
@@ -168,22 +187,27 @@ def _rastros(base: Configuracao) -> list[RastroEma]:
                             else ""
                         )
                     ),
-                    config=_config_rastro(base, timeframe, setup),
+                    config=replace(
+                        _config_rastro(base, timeframe, setup),
+                        ativos=ativos_reteste_m5.get(setup, base.ativos),
+                    ),
                     intravela=setup in ("ema921_rsi_intravela", "fibo_sr_retracao"),
-                    # EMA9/20 fechado é o único setup que pode abrir ordem em
-                    # M5 e M15. M15 exige H1 alinhado; EMA9/21 e intravela
-                    # seguem em sombra, sem disputar uma posição principal.
-                    somente_sombra=setup != "ema920_pullback",
+                    # M15 passa a ser só observação: a amostra anterior foi
+                    # negativa. No M5, os rastros do re-teste têm ativos
+                    # exclusivos e portanto geram dados comparáveis.
+                    somente_sombra=not executavel_reteste,
                 )
             )
-    # Candidato separado: nunca envia ordem enquanto não completar uma amostra
-    # nova. M5 entra apenas depois de o M15 confirmar a mesma direção.
+    # NZD tem seu próprio ativo e pode agora formar nova amostra independente.
     saida.append(
         RastroEma(
-            nome="M5 | NZD tendência + M15 + ADX (sombra)",
-            config=_config_rastro(base, 300, "nzd_trend_pullback_v1"),
+            nome="M5 | NZD tendência + M15 + ADX (PRACTICE reteste)",
+            config=replace(
+                _config_rastro(base, 300, "nzd_trend_pullback_v1"),
+                ativos=ativos_reteste_m5["nzd_trend_pullback_v1"],
+            ),
             intravela=False,
-            somente_sombra=True,
+            somente_sombra=False,
         )
     )
     # Comparação: ema920_pullback M5 com filtro H1 ativo. O rastro principal
@@ -198,6 +222,36 @@ def _rastros(base: Configuracao) -> list[RastroEma]:
             ),
             intravela=False,
             somente_sombra=True,
+        )
+    )
+    # Campanha independente da EMA: é a regra que o backtest acabou de medir.
+    # Apenas os três pares mais fortes entram em PRACTICE.
+    saida.append(
+        RastroEma(
+            nome="M5 | Fibo M15 50-61,8 + confirmação (PRACTICE)",
+            config=replace(
+                _config_rastro(base, 300, "fibo_mtf_confirmado"),
+                ativos=("EURUSD", "GBPUSD", "USDJPY"),
+                entrada_max_segundos_no_candle=45,
+                expiracao_minutos=15,
+                expiracao_por_setup={"fibo_mtf_confirmado": 15},
+            ),
+            intravela=False,
+            somente_sombra=False,
+        )
+    )
+    # H1 tem campanha própria, ativo exclusivo e uma única regra. A ordem só
+    # existe depois de rompimento, reteste do nível e vela de confirmação.
+    saida.append(
+        RastroEma(
+            nome="H1 | Rompimento + reteste EMA9/21 (PRACTICE)",
+            config=replace(
+                _config_rastro(base, 3600, "breakout_reteste"),
+                ativos=("EURCHF",),
+                expiracao_por_setup={"breakout_reteste": 60},
+            ),
+            intravela=False,
+            somente_sombra=False,
         )
     )
     return saida
@@ -227,6 +281,10 @@ def _motivo_sombra(
         if setup == "ema920_pullback":
             return "m5_h1_validacao"
         return "m15_h1_validacao"
+    # A campanha MTF mede a mesma regra do backtest; notícia vira contexto,
+    # mas não remove silenciosamente observações do teste em PRACTICE.
+    if setup == "fibo_mtf_confirmado":
+        return None
     if noticia_high:
         return "noticia_high"
     return None
@@ -245,12 +303,79 @@ def _setup_do_rastro(config: Configuracao) -> str:
             ("ema921_rsi_pullback", config.ema921_rsi_pullback_ativo),
             ("ema921_rsi_intravela", config.ema921_rsi_intravela_ativo),
             ("fibo_sr_retracao", config.fibo_sr_retracao_ativo),
+            ("fibo_mtf_confirmado", config.fibo_mtf_confirmado_ativo),
             ("nzd_trend_pullback_v1", config.nzd_trend_pullback_ativo),
+            ("breakout_reteste", config.breakout_reteste_ativo),
         ) if ligado
     ]
     if len(ativos) != 1:
         raise RuntimeError(f"Rastro EMA inválido: esperava um setup ativo, encontrei {ativos!r}.")
     return ativos[0]
+
+
+def _confirmacao_fibo_m5(vela: pd.Series, anterior: pd.Series, direcao: str) -> bool:
+    """Rejeição por pavio ou engolfo, avaliada somente após fechar a M5."""
+    corpo = max(abs(float(vela.Close) - float(vela.Open)), 1e-12)
+    if direcao == "call":
+        rejeicao = (
+            min(float(vela.Open), float(vela.Close)) - float(vela.Low) >= 1.5 * corpo
+            and vela.Close > vela.Open
+        )
+        engolfo = vela.Close > vela.Open and vela.Open <= anterior.Close and vela.Close >= anterior.Open
+    else:
+        rejeicao = (
+            float(vela.High) - max(float(vela.Open), float(vela.Close)) >= 1.5 * corpo
+            and vela.Close < vela.Open
+        )
+        engolfo = vela.Close < vela.Open and vela.Open >= anterior.Close and vela.Close <= anterior.Open
+    return bool(rejeicao or engolfo)
+
+
+def _avaliar_fibo_m15_confirmado(
+    ativo: str, candles_m5: pd.DataFrame, candles_m15: pd.DataFrame
+) -> Decisao | None:
+    """Regra do backtest: impulso M15, zona 50--61,8%, confirmação M5."""
+    if len(candles_m5) < 3 or len(candles_m15) < 30:
+        return None
+    sinal_m5 = candles_m5.iloc[-2]
+    # Índices são inícios das velas. Excluir a M15 ainda em curso evita olhar
+    # o futuro ao tomar a decisão no fechamento da M5.
+    contexto = candles_m15.loc[candles_m15.index < candles_m5.index[-2]].copy()
+    if len(contexto) < 30:
+        return None
+    contexto["ema9"] = contexto.Close.ewm(span=9, adjust=False).mean()
+    contexto["ema21"] = contexto.Close.ewm(span=21, adjust=False).mean()
+    janela = contexto.iloc[-5:]
+    faixa_media = (contexto.High - contexto.Low).rolling(14).mean().iloc[-1]
+    topo, fundo = float(janela.High.max()), float(janela.Low.min())
+    amplitude = topo - fundo
+    if not pd.notna(faixa_media) or faixa_media <= 0 or amplitude < 1.5 * float(faixa_media):
+        return None
+    ultimo = janela.iloc[-1]
+    if ultimo.ema9 > ultimo.ema21 and ultimo.Close > janela.Close.iloc[0]:
+        direcao, fib50, fib618 = "call", topo - .50 * amplitude, topo - .618 * amplitude
+        na_zona = fib618 <= float(sinal_m5.Close) <= fib50
+    elif ultimo.ema9 < ultimo.ema21 and ultimo.Close < janela.Close.iloc[0]:
+        direcao, fib50, fib618 = "put", fundo + .50 * amplitude, fundo + .618 * amplitude
+        na_zona = fib50 <= float(sinal_m5.Close) <= fib618
+    else:
+        return None
+    if not na_zona or not _confirmacao_fibo_m5(sinal_m5, candles_m5.iloc[-3], direcao):
+        return None
+    return Decisao(
+        ativo=ativo, direcao=direcao, preco=float(sinal_m5.Close),
+        candle_hora=pd.Timestamp(candles_m5.index[-2]), motivo="fibo_mtf_confirmado",
+        detalhes={
+            "setup": "fibo_mtf_confirmado", "fibo_50": round(fib50, 6),
+            "fibo_618": round(fib618, 6), "m15_topo": round(topo, 6),
+            "m15_fundo": round(fundo, 6), "razao": [
+                "Impulso M15 alinhado com EMA 9/21",
+                "Retração na zona Fibo 50–61,8%",
+                f"Confirmação M5 por rejeição/engolfo → {direcao.upper()}",
+                "Entrada na próxima M5; expiração de 15 minutos",
+            ],
+        },
+    )
 
 
 def _motivos(decisao) -> str:
@@ -409,6 +534,7 @@ def _atualizar_grafico_laboratorio(
         operacoes=registro.operacoes_grafico(snapshot.ativo),
         desempenho=registro.resumo_desempenho(snapshot.ativo),
         desempenho_por_setup=registro.desempenho_por_setup(),
+        desempenho_por_campanha=registro.desempenho_por_campanha(),
         desempenho_simulado_por_setup=registro.desempenho_simulado_por_setup(),
         movimentos_unicos=registro.resumo_movimentos_unicos(),
         stats_globais=registro.stats_globais(),
@@ -536,6 +662,9 @@ def executar_laboratorio_ema() -> None:
     intravela_disparado: dict[tuple[str, str], object] = {}
     # O candidato NZD não repete a mesma direção em pullbacks muito próximos.
     ultimo_nzd_por_direcao: dict[str, dict[str, pd.Timestamp]] = {}
+    # A hipótese Fibo entra na M5 seguinte e vence após 15min. Este intervalo
+    # evita sinais sobrepostos e mantém a execução comparável ao backtest.
+    ultimo_fibo_mtf: dict[str, pd.Timestamp] = {}
     ultima_atualizacao_noticias = 0.0
     ultima_recuperacao_pendencias = 0.0
     tendencias_h1: dict[str, str] = {}
@@ -551,7 +680,9 @@ def executar_laboratorio_ema() -> None:
     print("=" * 68)
     print("LABORATÓRIO EMA — PRACTICE | uma conexão IQ | M5 + M15")
     ativos_ordem = tuple(ativo for ativo in base.ativos if ativo not in base.ativos_somente_sombra)
-    print(f"Ordens M5/M15: {', '.join(ativos_ordem)} (EMA9/20 fechado).")
+    print("Re-teste PRACTICE M5: EMA9/20=AUDCAD | EMA9/21=USDCAD/AUDUSD | Fibo=EURJPY | NZD=NZDUSD.")
+    print("M15: somente sombra; a amostra anterior não passou no teste.")
+    print("Fibo M15→M5 em PRACTICE: EURUSD, GBPUSD e USDJPY | expiração 15 min.")
     print(f"Em sombra para comparação: {', '.join(base.ativos_somente_sombra)}.")
     print("M15: EMA9/20 ativo com filtro H1; demais setups, NZD e candidatos ficam em sombra.")
     print("Rastros: EMA9/20, EMA9/21+RSI, Fibo+S/R em sombra e NZD M5/M15+ADX.")
@@ -713,7 +844,29 @@ def executar_laboratorio_ema() -> None:
                         if ultimo_fechado.get(chave) == candle_fechado:
                             continue
                         ultimo_fechado[chave] = candle_fechado
-                        if setup == "nzd_trend_pullback_v1":
+                        if setup == "fibo_mtf_confirmado":
+                            contexto = snapshots.get((ativo, 900))
+                            if contexto is None:
+                                try:
+                                    contexto = mercado.snapshot_timeframe(ativo, 900)
+                                    snapshots[(ativo, 900)] = contexto
+                                except MercadoIndisponivel as erro:
+                                    print(f"[{rastro.nome}] {ativo}: contexto M15 indisponível ({erro})")
+                                    continue
+                            candidato = _avaliar_fibo_m15_confirmado(
+                                ativo, snapshot.candles, contexto.candles
+                            )
+                            if candidato is not None:
+                                ultimo = ultimo_fibo_mtf.get(ativo)
+                                if (
+                                    ultimo is not None
+                                    and candidato.candle_hora - ultimo < pd.Timedelta(minutes=20)
+                                ):
+                                    candidato = None
+                                else:
+                                    ultimo_fibo_mtf[ativo] = candidato.candle_hora
+                            decisoes = [candidato] if candidato is not None else []
+                        elif setup == "nzd_trend_pullback_v1":
                             contexto = snapshots.get((ativo, 900))
                             if contexto is None:
                                 try:
