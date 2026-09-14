@@ -591,6 +591,7 @@ def main(config: Configuracao | None = None) -> None:
                             "alerta": None, "explicacao": [], "noticias": [],
                             "parecerIA": None, "gatilhos": None, "desempenho": None,
                             "desempenhoPorSetup": None, "desempenhoSimuladoPorSetup": None,
+                            "desempenhoPorCampanha": None,
                             "funil": None, "statsGlobais": None, "entradasDetalhadas": None,
                             "niveisSR": None,
                         }
@@ -1023,6 +1024,7 @@ def main(config: Configuracao | None = None) -> None:
                     gatilhos=niveis_gatilho(indicadores),
                     desempenho=registro.resumo_desempenho(ativo),
                     desempenho_por_setup=registro.desempenho_por_setup(),
+                    desempenho_por_campanha=registro.desempenho_por_campanha(),
                     desempenho_simulado_por_setup=registro.desempenho_simulado_por_setup(),
                     funil={
                         **registro.funil_reversao_hoje(),

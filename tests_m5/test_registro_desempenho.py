@@ -159,6 +159,21 @@ def test_desempenho_por_setup_setups_distintos_separados(tmp_path):
     assert resultado["ema921_rsi"][300]["total"] == 5
 
 
+def test_desempenho_por_campanha_separa_ativo_expiracao_e_campanha(tmp_path):
+    registro = RegistroSQLite(tmp_path / "campanhas.sqlite3")
+    _inserir_operacoes(registro, "ema920_pullback", 300, wins=2, losses=1)
+    with registro._sessao() as db:
+        db.execute("UPDATE operacoes SET expiracao_minutos=15, campanha_id='campanha-a'")
+        db.execute("UPDATE operacoes SET ativo='AUDCAD', campanha_id='campanha-b' WHERE id_ordem LIKE '%-1'")
+
+    resultado = registro.desempenho_por_campanha()
+
+    assert len(resultado) == 2
+    assert {item["ativo"] for item in resultado} == {"EURUSD", "AUDCAD"}
+    assert {item["expiracao"] for item in resultado} == {15}
+    assert {item["campanha"] for item in resultado} == {"campanha"}
+
+
 # ── desempenho_simulado_por_setup ─────────────────────────────────────────────
 
 def test_desempenho_simulado_agrupa_por_timeframe(tmp_path):

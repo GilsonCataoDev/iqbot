@@ -102,9 +102,9 @@
   }
   .cartao p { margin: 0; font-size: 12px; color: var(--muted); }
   .cartao ul { margin: 0; padding-left: 14px; font-size: 11px; line-height: 1.6; }
-  #lab-nav { display:none; position:sticky; top:0; z-index:5; padding:7px; gap:4px; flex-wrap:wrap; background:var(--bg); border-bottom:1px solid var(--border); }
-  #lab-nav button { background:#1e293b; color:var(--muted); border:1px solid var(--border); border-radius:4px; padding:5px 7px; font:inherit; font-size:10px; cursor:pointer; }
-  #lab-nav button.on { color:#fff; border-color:#42a5f5; background:#164e75; }
+  #painel-nav { display:flex; position:sticky; top:0; z-index:5; padding:7px; gap:4px; flex-wrap:wrap; background:var(--bg); border-bottom:1px solid var(--border); }
+  #painel-nav button { background:#1e293b; color:var(--muted); border:1px solid var(--border); border-radius:4px; padding:5px 7px; font:inherit; font-size:10px; cursor:pointer; }
+  #painel-nav button.on { color:#fff; border-color:#42a5f5; background:#164e75; }
   .lab-hidden { display:none !important; }
   .dados-grid { display:grid; grid-template-columns:1fr 1fr; gap:6px; }
   .dados-chip { background:#1b2437; border:1px solid var(--border); border-radius:5px; padding:7px; }
@@ -227,6 +227,7 @@
   .setup-row-bar { height: 100%; border-radius: 2px; }
   .setup-row-wr { font-size: 10px; font-weight: 700; min-width: 30px; text-align: right; }
   .setup-row-pl { font-size: 10px; min-width: 36px; text-align: right; }
+  #setup-corpo { max-height: 430px; overflow-y: auto; overscroll-behavior: contain; padding-right: 3px; }
 
   /* stats compacto */
   .stats-row {
@@ -460,11 +461,11 @@
   <!-- ── Sidebar ── -->
   <div id="sidebar">
 
-    <div id="lab-nav">
-      <button data-lab-view="agora" onclick="mudarVisaoLab('agora')">Agora</button>
-      <button data-lab-view="entradas" onclick="mudarVisaoLab('entradas')">Entradas</button>
-      <button data-lab-view="estudos" onclick="mudarVisaoLab('estudos')">Estudos</button>
-      <button data-lab-view="dados" onclick="mudarVisaoLab('dados')">Dados</button>
+    <div id="painel-nav">
+      <button data-painel-view="agora" onclick="mudarVisaoPainel('agora')">Agora</button>
+      <button data-painel-view="entradas" onclick="mudarVisaoPainel('entradas')">Entradas</button>
+      <button data-painel-view="estudos" onclick="mudarVisaoPainel('estudos')">Estudos</button>
+      <button data-painel-view="dados" onclick="mudarVisaoPainel('dados')">Dados</button>
     </div>
 
     <!-- P&L hoje -->
@@ -636,31 +637,30 @@ const params = new URLSearchParams(window.location.search);
 // Reatribuída por carregarManifesto se a fonte informada não responder.
 let fonte = params.get('fonte') || (location.port === '8785' ? 'ema_laboratorio_practice' : 'iqoption_m5');
 const modoLab = fonte.includes('ema_laboratorio') || location.port === '8785';
-let visaoLab = localStorage.getItem('emaLabVisao') || 'agora';
-const CARTOES_LAB = {
+const chaveVisaoPainel = modoLab ? 'emaLabVisao' : 'monitorVisao';
+let visaoPainel = localStorage.getItem(chaveVisaoPainel) || 'agora';
+const CARTOES_PAINEL = {
   agora:['cartao-pl','cartao-sinal','cartao-plano-forex','cartao-rapido'],
   entradas:['cartao-pl','cartao-entradas'],
   estudos:['cartao-setup','cartao-extra','cartao-ia-precisao','cartao-hora','cartao-saude-ia','cartao-historico-dias','cartao-setup-hora'],
   dados:['cartao-dados'],
 };
-function mudarVisaoLab(nome) {
-  if (!modoLab) return;
-  visaoLab = CARTOES_LAB[nome] ? nome : 'agora';
-  localStorage.setItem('emaLabVisao', visaoLab);
-  const permitidos = new Set(CARTOES_LAB[visaoLab]);
-  Object.values(CARTOES_LAB).flat().forEach(id => {
+function mudarVisaoPainel(nome) {
+  visaoPainel = CARTOES_PAINEL[nome] ? nome : 'agora';
+  localStorage.setItem(chaveVisaoPainel, visaoPainel);
+  const permitidos = new Set(CARTOES_PAINEL[visaoPainel]);
+  Object.values(CARTOES_PAINEL).flat().forEach(id => {
     const el = document.getElementById(id);
     if (el) el.classList.toggle('lab-hidden', !permitidos.has(id));
   });
-  document.querySelectorAll('#lab-nav button').forEach(b => b.classList.toggle('on', b.dataset.labView === visaoLab));
+  document.querySelectorAll('#painel-nav button').forEach(b => b.classList.toggle('on', b.dataset.painelView === visaoPainel));
   setTimeout(() => window.dispatchEvent(new Event('resize')), 0);
 }
 if (modoLab) {
-  document.getElementById('lab-nav').style.display = 'flex';
   document.getElementById('barra-logo').textContent = 'LAB EMA · M5/M15';
   document.getElementById('cartao-dados').style.display = '';
-  mudarVisaoLab(visaoLab);
 }
+mudarVisaoPainel(visaoPainel);
 // ── Dossiê de entrada ────────────────────────────────────────────────────
 function renderEntradaDetalhada(e) {
   const dCls = e.direcao==='call'?'entrada-dir-call':'entrada-dir-put';
@@ -1916,7 +1916,7 @@ function renderizarPainel(dados) {
       ['Timeframe', `M${Math.max(1,Math.round((dados.timeframeSegundos||300)/60))}`],
       ['Atualização', dados.atualizadoEm ? new Date(dados.atualizadoEm*1000).toLocaleTimeString('pt-BR') : '—'],
     ].map(([r,v])=>`<div class="dados-chip"><span>${escapar(r)}</span><strong>${escapar(v)}</strong></div>`).join('');
-    mudarVisaoLab(visaoLab);
+    mudarVisaoPainel(visaoPainel);
   }
   // P&L hero card
   const stats = dados.statsGlobais;
@@ -1995,6 +1995,7 @@ function renderizarPainel(dados) {
 
   // Por setup (card sempre visível) — PRACTICE vs SOMBRA, por timeframe
   const porSetup = dados.desempenhoPorSetup || {};
+  const porCampanha = dados.desempenhoPorCampanha || [];
   const porSetupSombra = dados.desempenhoSimuladoPorSetup || {};
   const NOMES_SETUP = {
     pullback:'Pullback', pullback_confluencia:'Pullback+Fib',
@@ -2042,7 +2043,31 @@ function renderizarPainel(dados) {
       sombra[tf]  ? _linhaSetup(nome, tf, sombra[tf],  'sombra')  : '',
     ]);
   }).filter(Boolean).join('');
-  document.getElementById('setup-corpo').innerHTML = linhasSetup || '<p style="color:var(--muted)">Sem dados.</p>';
+  // Um banco usado por muitos dias pode conter centenas de campanhas. Desenhar
+  // todas no card lateral deixava a aba Estudos visualmente inutilizável.
+  const LIMITE_CAMPANHAS_ESTUDOS = 10;
+  const campanhasVisiveis = porCampanha.slice(0, LIMITE_CAMPANHAS_ESTUDOS);
+  const linhasCampanha = campanhasVisiveis.map(s => {
+    const wr = s.winrate ?? 0;
+    const cor = wr >= 60 ? 'var(--green)' : (wr >= 45 ? 'var(--yellow)' : 'var(--red)');
+    const pl = s.lucro >= 0 ? 'var(--green)' : 'var(--red)';
+    const ic = s.ic_95 ? `IC95% [${s.ic_95[0]}–${s.ic_95[1]}%]` : '';
+    return `<div class="setup-row">` +
+      `<span class="setup-row-label">${escapar(s.setup)} · ${escapar(s.ativo)} · ${_tfLabel(s.timeframe)}<br>` +
+      `<span style="color:var(--muted);font-size:9px">${s.expiracao}min · campanha ${escapar(s.campanha)} · ${s.total}op</span></span>` +
+      `<div class="setup-row-bar-wrap"><div class="setup-row-bar" style="width:${wr}%;background:${cor}"></div></div>` +
+      `<span class="setup-row-wr" style="color:${cor}">${wr}%</span>` +
+      `<span class="setup-row-pl" style="color:${pl}">${s.lucro >= 0 ? '+' : ''}${s.lucro.toFixed(1)}</span>` +
+      `</div>` + (ic ? `<div style="color:var(--muted);font-size:9px;padding:0 4px 4px 8px">${ic} · EV ${s.ev >= 0 ? '+' : ''}${s.ev.toFixed(3)}u</div>` : '');
+  }).join('');
+  document.getElementById('setup-corpo').innerHTML =
+    (linhasSetup ? `<div style="color:var(--muted);font-size:9px;padding:6px 4px 3px;text-transform:uppercase">Visão histórica agregada</div>${linhasSetup}` : '') ||
+    '<p style="color:var(--muted)">Sem dados.</p>';
+    (linhasCampanha ? `<div style="color:var(--accent);font-size:9px;padding:2px 4px 5px;text-transform:uppercase">Campanhas separadas — ${campanhasVisiveis.length} de ${porCampanha.length}</div>${linhasCampanha}` : '') +
+    (linhasSetup ? `<div style="color:var(--muted);font-size:9px;padding:6px 4px 3px;text-transform:uppercase">Visão histórica agregada</div>${linhasSetup}` : '') ||
+    '<p style="color:var(--muted)">Sem dados.</p>';
+    (linhasSetup ? `<div style="color:var(--muted);font-size:9px;padding:6px 4px 3px;text-transform:uppercase">Visão histórica agregada</div>${linhasSetup}` : '') ||
+    '<p style="color:var(--muted)">Sem dados.</p>';
 
   // Análise de atraso de envio
   const atraso = dados.analiseAtraso || {};

@@ -106,16 +106,47 @@ class MonitorEventStore:
                     atualizado_em=excluded.atualizado_em
             """, linhas)
 
-    def resumo(self) -> dict:
+    def resumo(self, desde: datetime | None = None) -> dict:
+        """Resumo operacional sem misturar entradas com rastros de estudo.
+
+        ``entrada_valida`` identifica a única classe que o Monitor chama de
+        entrada.  Os demais eventos são observações/estudos e não podem inflar
+        o contador de operações nem o de pendências de operação.
+        """
+        filtro = ""
+        parametros: tuple[object, ...] = ()
+        if desde is not None:
+            filtro = " WHERE quando >= ?"
+            parametros = (desde.astimezone(timezone.utc).isoformat(timespec="seconds"),)
         with self._conectar() as con:
-            total, validos, pendentes, ambiguos = con.execute("""
-                SELECT COUNT(*), SUM(entrada_valida),
-                       SUM(CASE WHEN desfecho='aguardando' THEN 1 ELSE 0 END),
-                       SUM(CASE WHEN desfecho LIKE 'ambíguo%' THEN 1 ELSE 0 END)
-                FROM monitor_eventos
-            """).fetchone()
+            linha = con.execute(f"""
+                SELECT COUNT(*),
+                       SUM(CASE WHEN entrada_valida=1 THEN 1 ELSE 0 END),
+                       SUM(CASE WHEN entrada_valida=1 AND desfecho='aguardando' THEN 1 ELSE 0 END),
+                       SUM(CASE WHEN entrada_valida=1 AND desfecho='win_tp1' THEN 1 ELSE 0 END),
+                       SUM(CASE WHEN entrada_valida=1 AND desfecho='loss_sl' THEN 1 ELSE 0 END),
+                       SUM(CASE WHEN entrada_valida=1 AND desfecho LIKE 'ambíguo%' THEN 1 ELSE 0 END),
+                       SUM(CASE WHEN entrada_valida=0
+                                     AND (tipo IS NULL OR tipo!='bof_m30_m5_candidato') THEN 1 ELSE 0 END),
+                       SUM(CASE WHEN entrada_valida=0
+                                     AND (tipo IS NULL OR tipo!='bof_m30_m5_candidato')
+                                     AND desfecho='aguardando' THEN 1 ELSE 0 END),
+                       SUM(CASE WHEN tipo='bof_m30_m5_candidato' THEN 1 ELSE 0 END)
+                FROM monitor_eventos{filtro}
+            """, parametros).fetchone()
+        (total, validos, pendentes_entrada, tp1, stops, ambiguas_entrada,
+         estudos, pendentes_estudo, candidatos_bof) = linha
         return {
             "schema": SCHEMA_VERSAO, "armazenamento": "SQLite",
             "eventos": int(total or 0), "entradas_validas": int(validos or 0),
-            "pendentes": int(pendentes or 0), "ambiguos": int(ambiguos or 0),
+            "entradas_pendentes": int(pendentes_entrada or 0),
+            "tp1": int(tp1 or 0), "stops": int(stops or 0),
+            "entradas_ambiguas": int(ambiguas_entrada or 0),
+            "estudos": int(estudos or 0),
+            "estudos_pendentes": int(pendentes_estudo or 0),
+            "candidatos_bof": int(candidatos_bof or 0),
+            # Compatibilidade com leitores antigos. Estes campos deliberadamente
+            # seguem a definição operacional, não todos os estudos.
+            "pendentes": int(pendentes_entrada or 0),
+            "ambiguos": int(ambiguas_entrada or 0),
         }

@@ -1054,6 +1054,53 @@ class RegistroSQLite:
                 item["ev"] = round(item["lucro"] / n, 3) if n else None
         return agregado
 
+    def desempenho_por_campanha(self, limite: int = 500) -> list[dict]:
+        """Resultados PRACTICE sem misturar campanhas incompatíveis.
+
+        Um mesmo ``setup`` pode ter mudado de ativo, expiração ou regra. Este
+        placar mantém cada combinação separada para que um resultado legado
+        nunca pareça validação da configuração que está rodando agora.
+        """
+        with self._lock, self._sessao() as db:
+            linhas = db.execute(
+                """
+                SELECT o.setup, o.ativo, COALESCE(o.timeframe, 0),
+                       COALESCE(o.expiracao_minutos, 0),
+                       COALESCE(o.campanha_id, 'legado'),
+                       COALESCE(c.config_hash, 'legado'), o.lucro
+                FROM operacoes o
+                LEFT JOIN campanhas c ON c.id = o.campanha_id
+                WHERE o.status='finalizada' AND o.lucro IS NOT NULL
+                  AND o.setup != 'correcao_manual'
+                ORDER BY o.enviada_em DESC LIMIT ?
+                """,
+                (limite,),
+            ).fetchall()
+        agregado: dict[tuple, dict] = {}
+        for setup, ativo, timeframe, expiracao, campanha_id, config_hash, lucro in linhas:
+            chave = (setup, ativo, int(timeframe), int(expiracao), campanha_id)
+            item = agregado.setdefault(chave, {
+                "setup": setup, "ativo": ativo, "timeframe": int(timeframe),
+                "expiracao": int(expiracao), "campanha": str(campanha_id)[:8],
+                "config_hash": str(config_hash)[:8], "total": 0,
+                "vitorias": 0, "lucro": 0.0,
+            })
+            item["total"] += 1
+            item["lucro"] += float(lucro)
+            if lucro > 0:
+                item["vitorias"] += 1
+        saida = []
+        for item in agregado.values():
+            n, w = item["total"], item["vitorias"]
+            item["winrate"] = round(100 * w / n, 1) if n else None
+            item["lucro"] = round(item["lucro"], 2)
+            item["ic_95"] = list(_wilson_ci(w, n) or ()) or None
+            item["amostra_suficiente"] = n >= 30
+            item["maturidade"] = _maturidade(n)
+            item["ev"] = round(item["lucro"] / n, 3) if n else None
+            saida.append(item)
+        return sorted(saida, key=lambda item: (-item["total"], item["setup"], item["ativo"]))
+
     def resumo_movimentos_unicos(self) -> dict:
         """Agrupa ordens do mesmo par/direção/minuto em uma oportunidade.
 
