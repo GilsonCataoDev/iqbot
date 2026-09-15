@@ -1913,8 +1913,8 @@ function renderizarPainel(dados) {
     if (corpoDados) corpoDados.innerHTML = [
       ['Candles', candlesSaude.length], ['Sinais na tela', sinaisSaude.length],
       ['Entradas hoje', entradasSaude.length], ['Pendentes', pendentes],
-      ['Timeframe', `M${Math.max(1,Math.round((dados.timeframeSegundos||300)/60))}`],
-      ['Atualização', dados.atualizadoEm ? new Date(dados.atualizadoEm*1000).toLocaleTimeString('pt-BR') : '—'],
+      ['Timeframe', `M${Math.max(1,Math.round((dados.timeframeSeg||300)/60))}`],
+      ['Atualização', dados.atualizado_em ? new Date(dados.atualizado_em*1000).toLocaleTimeString('pt-BR') : '—'],
     ].map(([r,v])=>`<div class="dados-chip"><span>${escapar(r)}</span><strong>${escapar(v)}</strong></div>`).join('');
     mudarVisaoPainel(visaoPainel);
   }
@@ -2061,11 +2061,7 @@ function renderizarPainel(dados) {
       `</div>` + (ic ? `<div style="color:var(--muted);font-size:9px;padding:0 4px 4px 8px">${ic} · EV ${s.ev >= 0 ? '+' : ''}${s.ev.toFixed(3)}u</div>` : '');
   }).join('');
   document.getElementById('setup-corpo').innerHTML =
-    (linhasSetup ? `<div style="color:var(--muted);font-size:9px;padding:6px 4px 3px;text-transform:uppercase">Visão histórica agregada</div>${linhasSetup}` : '') ||
-    '<p style="color:var(--muted)">Sem dados.</p>';
     (linhasCampanha ? `<div style="color:var(--accent);font-size:9px;padding:2px 4px 5px;text-transform:uppercase">Campanhas separadas — ${campanhasVisiveis.length} de ${porCampanha.length}</div>${linhasCampanha}` : '') +
-    (linhasSetup ? `<div style="color:var(--muted);font-size:9px;padding:6px 4px 3px;text-transform:uppercase">Visão histórica agregada</div>${linhasSetup}` : '') ||
-    '<p style="color:var(--muted)">Sem dados.</p>';
     (linhasSetup ? `<div style="color:var(--muted);font-size:9px;padding:6px 4px 3px;text-transform:uppercase">Visão histórica agregada</div>${linhasSetup}` : '') ||
     '<p style="color:var(--muted)">Sem dados.</p>';
 
