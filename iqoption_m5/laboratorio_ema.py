@@ -264,6 +264,8 @@ def _motivo_sombra(
     setup: str,
     ativo: str,
     noticia_high: bool,
+    direcao: str | None = None,
+    hora_utc: int | None = None,
 ) -> str | None:
     """Por que este sinal observa em vez de mandar ordem. None = manda.
 
@@ -288,6 +290,11 @@ def _motivo_sombra(
         return None
     if noticia_high:
         return "noticia_high"
+    # PUT entre 05h–13h BRT (08h–16h UTC): taxa histórica 41% vs CALL 66%, n=54.
+    if direcao == "put" and hora_utc is not None:
+        hora_brt = (hora_utc - 3) % 24
+        if 5 <= hora_brt <= 13:
+            return "put_horario_fraco"
     return None
 
 
@@ -915,7 +922,9 @@ def executar_laboratorio_ema() -> None:
                             )
                         )
                         motivo_sombra = _motivo_sombra(
-                            base, rastro, setup, ativo, noticia_high
+                            base, rastro, setup, ativo, noticia_high,
+                            direcao=decisao.direcao,
+                            hora_utc=agora_utc.hour,
                         )
                         autorizacao = (
                             Autorizacao(False, motivo_sombra)

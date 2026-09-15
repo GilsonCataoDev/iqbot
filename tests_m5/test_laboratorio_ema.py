@@ -515,3 +515,49 @@ def test_ativo_ja_em_sombra_mantem_o_motivo_original_mesmo_com_noticia():
     assert _motivo_sombra(
         base, rastro, "ema920_pullback", "NZDUSD", noticia_high=True
     ) == "ativo_candidato_sombra"
+
+
+def test_put_horario_fraco_vai_para_sombra():
+    """PUT entre 05h–13h BRT bloqueado: taxa histórica 41%, CALL 66% no mesmo período."""
+    base = configuracao_ema_laboratorio_practice()
+    rastro = _rastro_que_opera(_rastros(base))
+
+    # 10h UTC = 07h BRT — dentro da faixa bloqueada
+    assert _motivo_sombra(
+        base, rastro, "ema920_pullback", "AUDCAD",
+        noticia_high=False, direcao="put", hora_utc=10,
+    ) == "put_horario_fraco"
+
+
+def test_call_no_horario_fraco_do_put_passa():
+    """CALL no mesmo horário não é afetado pelo filtro PUT."""
+    base = configuracao_ema_laboratorio_practice()
+    rastro = _rastro_que_opera(_rastros(base))
+
+    assert _motivo_sombra(
+        base, rastro, "ema920_pullback", "AUDCAD",
+        noticia_high=False, direcao="call", hora_utc=10,
+    ) is None
+
+
+def test_put_fora_do_horario_fraco_passa():
+    """PUT após 14h BRT (17h+ UTC) não é bloqueado."""
+    base = configuracao_ema_laboratorio_practice()
+    rastro = _rastro_que_opera(_rastros(base))
+
+    # 17h UTC = 14h BRT — fora da faixa
+    assert _motivo_sombra(
+        base, rastro, "ema920_pullback", "AUDCAD",
+        noticia_high=False, direcao="put", hora_utc=17,
+    ) is None
+
+
+def test_put_horario_fraco_nao_afeta_fibo_mtf():
+    """fibo_mtf_confirmado retorna None independente de horário e direção."""
+    base = configuracao_ema_laboratorio_practice()
+    rastro = _rastro_que_opera(_rastros(base))
+
+    assert _motivo_sombra(
+        base, rastro, "fibo_mtf_confirmado", "GBPUSD",
+        noticia_high=False, direcao="put", hora_utc=10,
+    ) is None
