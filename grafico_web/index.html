@@ -2316,16 +2316,16 @@ async function carregarHistoricoHoje() {
       const dataCSV = _dataEntradas || new Date().toISOString().slice(0, 10);
       csvLink.href = `/exportar?data=${dataCSV}`;
     }
-    // Atualiza painel de entradas diretamente do historico_hoje.json (atualizado a cada 15s pelo bot)
+    // Atualiza painel de entradas a partir do historico_hoje.json
+    // Só usa esses dados se tiver mais entradas que a poll do ativo (que já chama _renderizarListaEntradas)
     if (hist.entradasDetalhadas && hist.entradasDetalhadas.length) {
-      const cartaoEntradas = document.getElementById('cartao-entradas');
-      if (cartaoEntradas) {
-        const t = hist.entradasDetalhadas.length;
-        const w = hist.entradasDetalhadas.filter(e => e.lucro != null && e.lucro > 0).length;
-        const resumo = document.getElementById('entradas-resumo');
-        if (resumo) resumo.textContent = t > 0 ? `${w}/${t}` : '';
-        cartaoEntradas.innerHTML = '<h3>Detalhes <span id="entradas-resumo" style="font-weight:400;color:var(--muted);font-size:10px;text-transform:none;letter-spacing:0">' + (t>0?`${w}/${t}`:'') + '</span></h3>' +
-          [...hist.entradasDetalhadas].reverse().map(renderEntradaDetalhada).join('');
+      const t = hist.entradasDetalhadas.length;
+      const w = hist.entradasDetalhadas.filter(e => e.lucro != null && e.lucro > 0).length;
+      const resumo = document.getElementById('entradas-resumo');
+      if (resumo) resumo.textContent = t > 0 ? `${w}/${t}` : '';
+      if (!_dataEntradas && (!_entradasHoje || t > _entradasHoje.length)) {
+        _entradasHoje = hist.entradasDetalhadas;
+        _renderizarListaEntradas(_entradasHoje);
       }
     }
   } catch(_) {}
