@@ -174,7 +174,8 @@ def _rastros(base: Configuracao) -> list[RastroEma]:
         if timeframe == 300:
             setups.append(("ema920_prime", "EMA9/20 Prime"))
         for setup, nome in setups:
-            executavel_reteste = timeframe == 300 and setup in ativos_reteste_m5
+            # ema921_rsi_intravela (AUDUSD): taxa histórica 30%, abaixo do break-even — sombra até nova amostra.
+            executavel_reteste = timeframe == 300 and setup in ativos_reteste_m5 and setup != "ema921_rsi_intravela"
             saida.append(
                 RastroEma(
                     nome=(

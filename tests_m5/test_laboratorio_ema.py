@@ -47,8 +47,11 @@ def test_laboratorio_tem_rastros_m5_e_m15_e_nzd_em_sombra():
     )
     assert h1_shadow is not None
     assert all(r.somente_sombra for r in rastros_m15)
+    # ema921_rsi_intravela (AUDUSD) suspenso: taxa histórica 30%, abaixo do break-even.
+    intravela_m5 = next(r for r in rastros if r.config.ema921_rsi_intravela_ativo and r.config.timeframe_segundos == 300)
+    assert intravela_m5.somente_sombra
     rastros_executaveis = [r for r in rastros if not r.somente_sombra]
-    assert len(rastros_executaveis) == 7
+    assert len(rastros_executaveis) == 6
     assert {r.config.timeframe_segundos for r in rastros_executaveis} == {300, 3600}
     assert sum(r.config.ema920_pullback_ativo for r in rastros_executaveis) == 1
     fibo_mtf = next(r for r in rastros if r.config.fibo_mtf_confirmado_ativo)
