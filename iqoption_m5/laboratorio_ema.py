@@ -266,6 +266,7 @@ def _motivo_sombra(
     noticia_high: bool,
     direcao: str | None = None,
     hora_utc: int | None = None,
+    leitura_m5_ausente: bool = False,
 ) -> str | None:
     """Por que este sinal observa em vez de mandar ordem. None = manda.
 
@@ -295,6 +296,12 @@ def _motivo_sombra(
         hora_brt = (hora_utc - 3) % 24
         if 5 <= hora_brt <= 13:
             return "put_horario_fraco"
+    # PUT em USDJPY (36%, n=11) e USDCAD (40%, n=15): abaixo do break-even.
+    if direcao == "put" and ativo in ("USDJPY", "USDCAD"):
+        return "put_ativo_fraco"
+    # Sem leitura M5 (auditoria ausente no candle): taxa histórica 44%, n=62.
+    if leitura_m5_ausente:
+        return "m5_leitura_ausente"
     return None
 
 
@@ -925,6 +932,7 @@ def executar_laboratorio_ema() -> None:
                             base, rastro, setup, ativo, noticia_high,
                             direcao=decisao.direcao,
                             hora_utc=agora_utc.hour,
+                            leitura_m5_ausente=decisao.detalhes.get("leitura_m5") is None,
                         )
                         autorizacao = (
                             Autorizacao(False, motivo_sombra)

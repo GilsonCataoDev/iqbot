@@ -561,3 +561,76 @@ def test_put_horario_fraco_nao_afeta_fibo_mtf():
         base, rastro, "fibo_mtf_confirmado", "GBPUSD",
         noticia_high=False, direcao="put", hora_utc=10,
     ) is None
+
+
+def test_usdjpy_put_vai_para_sombra():
+    """PUT em USDJPY bloqueado: taxa histórica 36%, n=11."""
+    base = configuracao_ema_laboratorio_practice()
+    rastro = _rastro_que_opera(_rastros(base))
+
+    assert _motivo_sombra(
+        base, rastro, "ema920_pullback", "USDJPY",
+        noticia_high=False, direcao="put", hora_utc=20,
+    ) == "put_ativo_fraco"
+
+
+def test_usdcad_put_vai_para_sombra():
+    """PUT em USDCAD bloqueado: taxa histórica 40%, n=15."""
+    base = configuracao_ema_laboratorio_practice()
+    rastro = _rastro_que_opera(_rastros(base))
+
+    assert _motivo_sombra(
+        base, rastro, "ema920_pullback", "USDCAD",
+        noticia_high=False, direcao="put", hora_utc=20,
+    ) == "put_ativo_fraco"
+
+
+def test_put_ativo_fraco_call_nao_afetado():
+    """CALL em USDJPY e USDCAD não é bloqueado pelo filtro put_ativo_fraco."""
+    base = configuracao_ema_laboratorio_practice()
+    rastro = _rastro_que_opera(_rastros(base))
+
+    assert _motivo_sombra(
+        base, rastro, "ema920_pullback", "USDJPY",
+        noticia_high=False, direcao="call", hora_utc=20,
+    ) is None
+    assert _motivo_sombra(
+        base, rastro, "ema920_pullback", "USDCAD",
+        noticia_high=False, direcao="call", hora_utc=20,
+    ) is None
+
+
+def test_m5_leitura_ausente_vai_para_sombra():
+    """Sem leitura M5 (auditoria ausente): taxa histórica 44%, abaixo do break-even."""
+    base = configuracao_ema_laboratorio_practice()
+    rastro = _rastro_que_opera(_rastros(base))
+
+    assert _motivo_sombra(
+        base, rastro, "ema920_pullback", "AUDCAD",
+        noticia_high=False, direcao="call", hora_utc=20,
+        leitura_m5_ausente=True,
+    ) == "m5_leitura_ausente"
+
+
+def test_m5_leitura_presente_nao_bloqueada():
+    """Com leitura M5 presente (qualificada ou não), ordem segue normal."""
+    base = configuracao_ema_laboratorio_practice()
+    rastro = _rastro_que_opera(_rastros(base))
+
+    assert _motivo_sombra(
+        base, rastro, "ema920_pullback", "AUDCAD",
+        noticia_high=False, direcao="call", hora_utc=20,
+        leitura_m5_ausente=False,
+    ) is None
+
+
+def test_m5_ausente_nao_afeta_fibo_mtf():
+    """fibo_mtf_confirmado é exempt mesmo sem leitura M5."""
+    base = configuracao_ema_laboratorio_practice()
+    rastro = _rastro_que_opera(_rastros(base))
+
+    assert _motivo_sombra(
+        base, rastro, "fibo_mtf_confirmado", "GBPUSD",
+        noticia_high=False, direcao="call", hora_utc=20,
+        leitura_m5_ausente=True,
+    ) is None
