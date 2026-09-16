@@ -325,3 +325,87 @@ arquivo de atualização da página; XLSX é exportação, não fonte de verdade
 
 Começar pela **Fase 1**. Melhorar primeiro o visual sem reconciliar os dados só
 deixaria números conflitantes mais bonitos.
+
+---
+
+## Entrega de 11–16/09/2026
+
+### Filtros de sombra no Lab EMA (`_motivo_sombra`)
+
+Quatro novos motivos de bloqueio foram acrescentados a `laboratorio_ema.py`.
+Todos respeitam a isenção de `fibo_mtf_confirmado` (retorna `None` antes de
+qualquer filtro). A ordem de verificação ficou:
+
+```
+ativos_somente_sombra → rastro.somente_sombra → fibo_mtf_confirmado (isento)
+  → noticia_high → put_horario_fraco → put_ativo_fraco → m5_leitura_ausente
+```
+
+| Motivo | Condição | Taxa histórica | n |
+|---|---|---|---|
+| `ema921_rsi_intravela` somente\_sombra | AUDUSD excluído de `executavel_reteste` | 30% | ~20 |
+| `put_horario_fraco` | `direcao == "put"` e 05h ≤ hora BRT ≤ 13h | 41% vs 66% CALL | 54 |
+| `put_ativo_fraco` | `direcao == "put"` e ativo em (USDJPY, USDCAD) | 36% e 40% resp. | 11 / 15 |
+| `m5_leitura_ausente` | `decisao.detalhes.get("leitura_m5") is None` | 44% | 62 |
+
+Break-even para payout 86%: ~54%. Todos os filtros ficam abaixo desse limiar.
+
+**Commits:** `95a451c` (AUDUSD), `de21061` (put\_horario\_fraco), `82618ef`
+(put\_ativo\_fraco + m5\_leitura\_ausente).
+
+### Fix BOF candidato repetitivo no Monitor (`monitor_mercado.py`)
+
+`Estado.registrar_sinal()` ganhou o parâmetro `chave_dedup: str | None`.
+Para BOF candidato (sem simulação) a chave passou a ser:
+
+```
+bof_m30_m5_candidato:{ativo}:{direcao}:{etapa}
+```
+
+Antes usava o timestamp da vela M30, que muda a cada 30 minutos: o mesmo
+candidato reaparecia sem que a etapa tivesse avançado, gerando dezenas de
+entradas por período. A nova chave só muda quando `etapa` ou `direcao` mudam
+— fases repetidas numa janela de 30 min são ignoradas.
+
+### Diagnóstico das 130 falhas de envio
+
+Análise completa das `operacoes` com `status='falha_envio'` identificou
+três causas distintas:
+
+| Grupo | n | Causa | Ação |
+|---|---|---|---|
+| Sep 11 — conectividade | ~73 | Queda de rede no dia | Não acionável |
+| EURJPY `fibo_sr_retracao` intravela | ~25 | Retry estrutural: cada M5 após recusa gera nova tentativa | Pendente |
+| Timeframe 0s | ~12 | Bug de inicialização antigo | Resolvido em versão anterior |
+| AUDUSD (`ema921_rsi_intravela`) | ~20 | Setup com taxa 30% | Suspenso (`95a451c`) |
+
+O padrão de retry do EURJPY é estrutural: após uma recusa da IQ, o executor
+retenta em cada vela M5 dentro da janela de expiração. Não foi corrigido nesta
+entrega; exigiria lógica de max-retry ou exclusão explícita por setup.
+
+### Suíte de testes
+
+| Período | Total | Resultado |
+|---|---|---|
+| Antes (04/09) | ~106 | passando |
+| 16/09 | **834 passed, 1 skipped** | passando |
+
+Os 728 testes adicionais cobrem: filtros `put_horario_fraco`, `put_ativo_fraco`,
+`m5_leitura_ausente`, isenção `fibo_mtf_confirmado`, suspensão AUDUSD,
+e os módulos do Monitor (BOF, dedup, estado, fluxo).
+
+### Situação dos dados em 16/09/2026
+
+#### Lab EMA
+
+- 3.471 decisões · 530 tentativas de operação · 2.610 simulações sombra.
+- 400 operações finalizadas · 130 falhas de envio (diagnosticadas acima).
+- M5 PRACTICE referência (operações sem filtros novos):
+  `ema920_pullback` 61,0% em 136 · `fibo_sr_retracao` abaixo do break-even.
+- AUDUSD (`ema921_rsi_intravela`) suspensa; PUT 05h–13h BRT, USDJPY PUT e
+  USDCAD PUT em sombra. Todos aguardam nova amostra com filtros ativos.
+
+#### Monitor de Mercado
+
+- BOF candidato com registro deduplicado por etapa (sem inflar contadores).
+- Histórico já em SQLite; JSON permanece apenas como espelho de página.

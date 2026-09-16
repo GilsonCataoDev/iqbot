@@ -2016,9 +2016,15 @@ class Estado:
             self.dados[ativo] = atual
 
     def registrar_sinal(self, ativo: str, vela: str, info: dict,
-                        tipo: str = "falso_rompimento") -> bool:
-        """Salva um sinal novo e informa se ele foi realmente persistido."""
-        chave = f"{tipo}:{ativo}:{vela}"
+                        tipo: str = "falso_rompimento",
+                        chave_dedup: str | None = None) -> bool:
+        """Salva um sinal novo e informa se ele foi realmente persistido.
+
+        ``chave_dedup`` substitui a chave padrão ``tipo:ativo:vela`` para
+        deduplicação. Útil quando o valor de ``vela`` muda a cada candle mas o
+        sinal representa a mesma condição (e.g. BOF candidato na mesma etapa).
+        """
+        chave = chave_dedup or f"{tipo}:{ativo}:{vela}"
         with self._lock:
             if chave in self._vistos:
                 return False
@@ -2976,10 +2982,20 @@ def loop(api, cfg, estado: Estado, calendario: CalendarioEconomico | None = None
                     }
                     if bof.get("sinal_estudo"):
                         tipo_bof = "bof_m30_m5"
+                        chave_bof = None
                     else:
                         tipo_bof = "bof_m30_m5_candidato"
                         info_bof["sem_simulacao"] = True
-                    if estado.registrar_sinal(a, vela_bof, info_bof, tipo=tipo_bof):
+                        # Candidato repete a cada nova vela M30 enquanto o
+                        # padrão está se formando. Usar etapa+direção como
+                        # chave evita uma entrada nova a cada 30 min sem que
+                        # a condição tenha mudado.
+                        chave_bof = (
+                            f"bof_m30_m5_candidato:{a}"
+                            f":{bof['direcao']}:{bof['etapa']}"
+                        )
+                    if estado.registrar_sinal(a, vela_bof, info_bof, tipo=tipo_bof,
+                                              chave_dedup=chave_bof):
                         print(f"[BOF M30→M5 — {'ESTUDO' if bof.get('sinal_estudo') else 'CANDIDATO'}] "
                               f"{a} {bof['direcao'].upper()} @ {vela_bof} etapa={bof['etapa']} "
                               f"RR={bof.get('rr', 0)}")
