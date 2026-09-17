@@ -22,7 +22,7 @@ def test_laboratorio_tem_rastros_m5_e_m15_e_nzd_em_sombra():
     config = configuracao_ema_laboratorio_practice()
     rastros = _rastros(config)
 
-    assert len(rastros) == 13
+    assert len(rastros) == 14
     assert config.ativos == (
         "EURUSD", "AUDCAD", "NZDUSD", "GBPUSD", "USDJPY", "AUDUSD", "USDCAD", "EURJPY", "EURCHF",
     )
@@ -51,9 +51,10 @@ def test_laboratorio_tem_rastros_m5_e_m15_e_nzd_em_sombra():
     intravela_m5 = next(r for r in rastros if r.config.ema921_rsi_intravela_ativo and r.config.timeframe_segundos == 300)
     assert intravela_m5.somente_sombra
     rastros_executaveis = [r for r in rastros if not r.somente_sombra]
-    assert len(rastros_executaveis) == 6
+    assert len(rastros_executaveis) == 7
     assert {r.config.timeframe_segundos for r in rastros_executaveis} == {300, 3600}
-    assert sum(r.config.ema920_pullback_ativo for r in rastros_executaveis) == 1
+    # AUDCAD e EURUSD: dois rastros ema920_pullback independentes em PRACTICE.
+    assert sum(r.config.ema920_pullback_ativo for r in rastros_executaveis) == 2
     fibo_mtf = next(r for r in rastros if r.config.fibo_mtf_confirmado_ativo)
     assert fibo_mtf.config.ativos == ("EURUSD", "GBPUSD", "USDJPY")
     assert fibo_mtf.config.expiracao_por_setup == {"fibo_mtf_confirmado": 15}

@@ -211,6 +211,20 @@ def _rastros(base: Configuracao) -> list[RastroEma]:
             somente_sombra=False,
         )
     )
+    # ema920_pullback: EURUSD reteste independente do AUDCAD.
+    # 60,3% em 117 ordens reais (set/01–11). Rastro isolado para que
+    # movimentos correlacionados USD não disputem o slot do AUDCAD.
+    saida.append(
+        RastroEma(
+            nome="M5 | EMA9/20 reteste EURUSD (PRACTICE)",
+            config=replace(
+                _config_rastro(base, 300, "ema920_pullback"),
+                ativos=("EURUSD",),
+            ),
+            intravela=False,
+            somente_sombra=False,
+        )
+    )
     # Comparação: ema920_pullback M5 com filtro H1 ativo. O rastro principal
     # opera sem filtro H1; este acumula amostra paralela para decidir se o
     # filtro melhora o acerto antes de qualquer mudança no real.
