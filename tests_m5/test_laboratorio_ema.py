@@ -57,13 +57,19 @@ def test_laboratorio_tem_rastros_m5_e_m15_e_nzd_em_sombra():
     intravela_m5 = next(r for r in rastros if r.config.ema921_rsi_intravela_ativo and r.config.timeframe_segundos == 300)
     assert intravela_m5.somente_sombra
     rastros_executaveis = [r for r in rastros if not r.somente_sombra]
-    assert len(rastros_executaveis) == 6
+    assert len(rastros_executaveis) == 5
     assert {r.config.timeframe_segundos for r in rastros_executaveis} == {300, 3600}
-    # AUDCAD, EURUSD e EURJPY: tres rastros ema920_pullback independentes em
-    # PRACTICE. Cada um com ativo proprio para nao disputar a reserva global.
-    assert sum(r.config.ema920_pullback_ativo for r in rastros_executaveis) == 3
+    # AUDCAD e EURUSD: dois rastros ema920_pullback independentes promovidos
+    # ao real. EURJPY fica em sombra acumulando IC95 na config atual.
+    assert sum(r.config.ema920_pullback_ativo for r in rastros_executaveis) == 2
     assert {r.config.ativos[0] for r in rastros_executaveis
-            if r.config.ema920_pullback_ativo} == {"AUDCAD", "EURUSD", "EURJPY"}
+            if r.config.ema920_pullback_ativo} == {"AUDCAD", "EURUSD"}
+    # EURJPY deve estar em sombra
+    eurjpy_rastro = next(
+        r for r in rastros
+        if r.config.ema920_pullback_ativo and "EURJPY" in r.config.ativos
+    )
+    assert eurjpy_rastro.somente_sombra
     # fibo_mtf_confirmado partido em dois: EURUSD executavel, GBPUSD/USDJPY
     # em sombra por WR abaixo do break-even (41,7% n=12 e 45,8% n=24).
     fibo_mtf = [r for r in rastros if r.config.fibo_mtf_confirmado_ativo]
@@ -275,9 +281,9 @@ def test_watchdog_do_lab_ignora_tempo_gasto_na_inicializacao():
 def test_grafico_atualiza_antes_do_bloqueio_de_mercado_fechado():
     """Estado de negociação bloqueia ordens, não o desenho dos candles."""
     import inspect
-    from iqoption_m5.laboratorio_ema import executar_laboratorio_ema
+    from iqoption_m5.laboratorio_ema import _executar_laboratorio_ema
 
-    fonte = inspect.getsource(executar_laboratorio_ema)
+    fonte = inspect.getsource(_executar_laboratorio_ema)
     assert fonte.index("_atualizar_grafico_laboratorio(") < fonte.index(
         "if not snapshot.mercado_aberto:"
     )

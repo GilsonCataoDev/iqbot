@@ -1005,6 +1005,50 @@ def configuracao_ema_laboratorio_practice(base: Configuracao | None = None) -> C
     )
 
 
+def configuracao_ema_laboratorio_real(base: Configuracao | None = None) -> Configuracao:
+    """Laboratório EMA em conta REAL: somente EURUSD+AUDCAD M5 ema920_pullback.
+
+    Os demais rastros (EURJPY, M15, Fibo, NZD…) continuam em sombra — coletam
+    amostra sem operar dinheiro real.  Money management idêntico ao perfil
+    conservador isolado (``configuracao_ema_m5_real``): stake R$2,50, piso R$70,
+    meta R$15/dia, drawdown 30%, sem anti-martingale.
+    """
+    lab = configuracao_ema_laboratorio_practice(base)
+    real = configuracao_ema_m5_real(base)
+    return replace(
+        lab,
+        conta="REAL",
+        confirmo_conta_real=True,
+        executar_ordens=True,
+        bloquear_otc_real=True,
+        # Money management do perfil real conservador
+        valor_por_ordem=real.valor_por_ordem,
+        valor_percentual_banca=real.valor_percentual_banca,
+        banca_inicial=real.banca_inicial,
+        piso_banca=real.piso_banca,
+        stop_diario=real.stop_diario,
+        meta_diaria=real.meta_diaria,
+        max_operacoes_dia=real.max_operacoes_dia,
+        max_perdas_consecutivas=real.max_perdas_consecutivas,
+        parar_por_perdas=real.parar_por_perdas,
+        parar_por_prejuizo=real.parar_por_prejuizo,
+        drawdown_maximo_percentual=real.drawdown_maximo_percentual,
+        circuit_breaker_max_perdas=real.circuit_breaker_max_perdas,
+        circuit_breaker_cooldown_minutos=real.circuit_breaker_cooldown_minutos,
+        max_ordens_paralelas=real.max_ordens_paralelas,
+        cooldown_pos_ordem_por_ativo_candles=real.cooldown_pos_ordem_por_ativo_candles,
+        anti_martingale_ativo=real.anti_martingale_ativo,
+        alavancagem_pyramid=real.alavancagem_pyramid,
+        alavancagem_maximo=real.alavancagem_maximo,
+        payout_minimo=real.payout_minimo,
+        expiracao_por_setup=real.expiracao_por_setup,
+        pullback_fib_min=real.pullback_fib_min,
+        pullback_fib_max=real.pullback_fib_max,
+        sufixo_banco="ema_laboratorio_real",
+        porta_grafico=8784,
+    )
+
+
 def configuracao_scalping_m1(base: Configuracao | None = None) -> Configuracao:
     """Scalping M1 — Opção A: só pullback em micro-tendência.
 

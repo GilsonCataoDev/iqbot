@@ -14,7 +14,7 @@ from datetime import datetime, timezone
 
 import pandas as pd
 
-from .config import Configuracao, configuracao_ema_laboratorio_practice
+from .config import Configuracao, configuracao_ema_laboratorio_practice, configuracao_ema_laboratorio_real
 from .auditoria_entrada import (
     enriquecer_decisao,
     qualificar_leitura_m5,
@@ -236,15 +236,17 @@ def _rastros(base: Configuracao) -> list[RastroEma]:
     # (54,5% em n=299) e 83,3% em 12 ordens reais da config antiga. Rastro
     # próprio pelo mesmo motivo do EURUSD: sem slot exclusivo os sinais
     # disputam a reserva global e o estudo fica sem amostra.
+    # Mantido em sombra até acumular IC95 próprio na configuração atual
+    # (reativado em 2026-09-22; n insuficiente para promover ao real).
     saida.append(
         RastroEma(
-            nome="M5 | EMA9/20 reteste EURJPY (PRACTICE)",
+            nome="M5 | EMA9/20 reteste EURJPY (SOMBRA)",
             config=replace(
                 _config_rastro(base, 300, "ema920_pullback"),
                 ativos=("EURJPY",),
             ),
             intravela=False,
-            somente_sombra=False,
+            somente_sombra=True,
         )
     )
     # Comparação: ema920_pullback M5 com filtro H1 ativo. O rastro principal
@@ -707,9 +709,22 @@ def _recuperar_pendencias_periodicas(
     return agora_monotonico
 
 
+def executar_laboratorio_ema_real() -> None:
+    """Executa o laboratório EMA em conta REAL.
+
+    Somente EURUSD+AUDCAD M5 ema920_pullback enviam ordens reais.
+    EURJPY, M15, Fibo, NZD e demais rastros continuam em sombra.
+    """
+    _executar_laboratorio_ema(configuracao_ema_laboratorio_real())
+
+
 def executar_laboratorio_ema() -> None:
     """Executa rastros EMA, mantendo toques e NZD em amostra simulada."""
-    base = configuracao_ema_laboratorio_practice()
+    _executar_laboratorio_ema(configuracao_ema_laboratorio_practice())
+
+
+def _executar_laboratorio_ema(base: Configuracao) -> None:
+    """Núcleo compartilhado dos dois launchers (practice e real)."""
     base.validar()
     rastros = _rastros(base)
     registro = RegistroSQLite(base.banco_sqlite, config=base)
@@ -748,8 +763,9 @@ def executar_laboratorio_ema() -> None:
     progresso = ProgressoLaboratorio()
     iniciado = False
 
+    modo = base.conta
     print("=" * 68)
-    print("LABORATÓRIO EMA — PRACTICE | uma conexão IQ | M5 + M15")
+    print(f"LABORATÓRIO EMA — {modo} | uma conexão IQ | M5 + M15")
     ativos_ordem = tuple(ativo for ativo in base.ativos if ativo not in base.ativos_somente_sombra)
     print("Re-teste PRACTICE M5: EMA9/20=AUDCAD | EMA9/21=USDCAD/AUDUSD | Fibo=EURJPY | NZD=NZDUSD.")
     print("M15: somente sombra; a amostra anterior não passou no teste.")
