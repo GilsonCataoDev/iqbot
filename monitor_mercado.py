@@ -44,6 +44,7 @@ from iqoption_m5.config import configuracao_scalping_m15
 from iqoption_m5.grafico import GraficoM5
 from iqoption_m5.mercado_iq import MercadoIQ
 from iqoption_m5.perfil_horario_xauusd import contexto_horario as _ctx_xauusd, regime_atr as _regime_atr_xauusd
+import iqoption_m5.perfil_horario as _ph
 from iqoption_m5.monitor_store import MonitorEventStore, SCHEMA_VERSAO
 from iqoption_m5.noticias import CalendarioEconomico
 from iqoption_m5.ia import segunda_opiniao_grafico
@@ -830,6 +831,186 @@ def plano_ouro_movimento(df: pd.DataFrame, atr: pd.Series, ativo: str,
                 "tp1_pts": ctx["tp1_pts"],
                 "tp2_pts": ctx["tp2_pts"],
                 "sl_min_pts": ctx["sl_min_pts"],
+            },
+            "checklist": checklist,
+        }
+    except (ValueError, TypeError, IndexError, KeyError):
+        return vazio
+
+
+def plano_movimento_generico(
+    df: pd.DataFrame, atr: pd.Series, ativo: str,
+    noticia: dict | None = None,
+    tab: dict | None = None,
+) -> dict:
+    """Scanner M15 de continuação genérico para forex/crypto.
+
+    Espelho de plano_ouro_movimento, mas para qualquer ativo forex/crypto.
+    tab = perfil_horario.tabela(df) pré-computado pelo chamador (cache por ativo).
+    Quando tab=None (dados insuficientes), retorna sinal_estudo=False — acumulando.
+
+    Critérios:
+      M15 + H1 alinhados  +  FVG M15  +  rejeição  +  regime normal  +  RR ≥ 1,0
+    Alvos calibrados pelo perfil histórico da hora UTC atual (p50/p75).
+    """
+    vazio = {
+        "disponivel": False, "sinal_estudo": False,
+        "estado": f"{ativo} MOVIMENTO GENÉRICO — AGUARDANDO",
+        "motivo": "Perfil horário acumulando dados.",
+    }
+    if CLASSE.get(ativo) not in ("forex", "crypto"):
+        return {**vazio, "motivo": "Exclusivo para forex e crypto."}
+    if len(df) < 96 or atr.empty:
+        return vazio
+    if tab is None:
+        return vazio
+    try:
+        m15 = _tendencia_ema(df["Close"])
+        h1 = _tendencia_h1_a_partir_m15(df)
+        vela = df.iloc[-1]
+        abertura = float(vela["Open"])
+        maxima = float(vela["High"])
+        minima = float(vela["Low"])
+        fechamento = float(vela["Close"])
+        hora_utc = (
+            pd.Timestamp(df.index[-1]).tz_localize("UTC").hour
+            if pd.Timestamp(df.index[-1]).tzinfo is None
+            else pd.Timestamp(df.index[-1]).hour
+        )
+        atr_atual = float(atr.reindex(df.index).iloc[-1])
+        if not np.isfinite(atr_atual) or atr_atual <= 0:
+            return {**vazio, "motivo": "ATR indisponível."}
+
+        ctx = _ph.contexto(tab, hora_utc, fechamento)
+        atr_pct = atr_atual / fechamento * 100 if fechamento > 0 else 0.0
+        regime = _ph.regime(tab, atr_pct, hora_utc)
+
+        direcao = (
+            "buy" if m15 == "alta" and h1 == "alta"
+            else "sell" if m15 == "baixa" and h1 == "baixa"
+            else "neutro"
+        )
+
+        fvg = detectar_fvg_m15(df, atr)
+        fvg_ok = bool(fvg.get("disponivel") and fvg.get("direcao") == direcao)
+        zona_inf = fvg.get("zona_inf")
+        zona_sup = fvg.get("zona_sup")
+
+        if fvg_ok and zona_inf is not None and zona_sup is not None:
+            rejeicao = (
+                minima <= float(zona_sup)
+                and fechamento > abertura
+                and fechamento >= float(zona_sup)
+                if direcao == "buy"
+                else maxima >= float(zona_inf)
+                and fechamento < abertura
+                and fechamento <= float(zona_inf)
+            )
+        else:
+            rejeicao = False
+
+        corpo_atr = abs(fechamento - abertura) / atr_atual
+        impulso_ok = float(fvg.get("tamanho_atr") or 0) >= 0.15
+        corpo_min = 0.20
+        regime_ok = regime == "normal"
+        noticia_estado = (noticia or {}).get("estado")
+
+        rr_ok = True
+        rr_prelim = None
+        _sl_dist_prelim = 0.0
+        if direcao != "neutro" and ctx:
+            _buf = 0.15 * atr_atual
+            _sl_tec = minima - _buf if direcao == "buy" else maxima + _buf
+            _sl_dist_prelim = max(abs(fechamento - _sl_tec), ctx["sl_min_pts"])
+            rr_prelim = ctx["tp1_pts"] / _sl_dist_prelim if _sl_dist_prelim > 0 else 0.0
+            rr_ok = rr_prelim >= 1.0
+
+        sinal_estudo = bool(
+            direcao != "neutro" and fvg_ok and impulso_ok
+            and rejeicao and corpo_atr >= corpo_min
+            and regime_ok and rr_ok
+            and noticia_estado != "janela_risco"
+        )
+
+        alvos = None
+        rr_tp1 = rr_tp2 = None
+        if ctx and direcao in ("buy", "sell"):
+            sinal_dir = 1.0 if direcao == "buy" else -1.0
+            sl_dist = _sl_dist_prelim
+            sl = fechamento - sinal_dir * sl_dist
+            tp1 = fechamento + sinal_dir * ctx["tp1_pts"]
+            tp2 = fechamento + sinal_dir * ctx["tp2_pts"]
+            rr_tp1 = round(ctx["tp1_pts"] / sl_dist, 2) if sl_dist > 0 else None
+            rr_tp2 = round(ctx["tp2_pts"] / sl_dist, 2) if sl_dist > 0 else None
+            passo, unidade = unidade_movimento(ativo)
+            alvos = {
+                "entrada": round(fechamento, 6),
+                "sl": round(sl, 6),
+                "tp1": round(tp1, 6),
+                "tp2": round(tp2, 6),
+                "sl_pts": round(sl_dist, 6),
+                "tp1_pts": ctx["tp1_pts"],
+                "tp2_pts": ctx["tp2_pts"],
+                "rr_tp1": rr_tp1,
+                "rr_tp2": rr_tp2,
+                "risco_unidade": unidade,
+            }
+
+        if regime == "quieto":
+            estado = f"{ativo} — MERCADO PARADO"
+            motivo = f"ATR abaixo do esperado para {hora_utc:02d}h UTC."
+        elif regime == "ativo":
+            estado = f"{ativo} — VOLATILIDADE ANORMAL"
+            motivo = "ATR acima do normal; aguardar acomodação."
+        elif direcao == "neutro":
+            estado = f"{ativo} — SEM TENDÊNCIA H1/M15"
+            motivo = "Aguardar alinhamento."
+        elif not fvg_ok:
+            estado = f"{ativo} — AGUARDAR FVG"
+            motivo = "Aguardar FVG M15 na direção da tendência."
+        elif not rejeicao:
+            estado = f"{ativo} — FVG ATIVO"
+            motivo = "Preço precisa testar a zona e fechar com rejeição."
+        elif sinal_estudo:
+            estado = f"{ativo} MOVIMENTO — TÉCNICO"
+            motivo = (
+                f"Estrutura técnica completa. "
+                f"TP1={ctx['tp1_pts']:.5f} (p50 {hora_utc:02d}h UTC). RR={rr_tp1}."
+            )
+        else:
+            estado = f"{ativo} MOVIMENTO — ESTUDO"
+            motivo = "Condições parciais; registrando para aferição."
+
+        checklist = [
+            {"nome": "Tendência H1 e M15 alinhadas", "ok": direcao != "neutro"},
+            {"nome": "FVG M15 na direção da tendência", "ok": fvg_ok},
+            {"nome": "Candle fechou rejeitando a zona", "ok": rejeicao},
+            {"nome": f"Corpo ≥ {int(corpo_min * 100)}% ATR", "ok": corpo_atr >= corpo_min},
+            {"nome": f"Regime normal para {hora_utc:02d}h UTC", "ok": regime_ok},
+            {"nome": "RR TP1 ≥ 1,0", "ok": rr_ok},
+            {"nome": "Sem notícia pendente (janela_risco)", "ok": noticia_estado != "janela_risco"},
+        ]
+
+        return {
+            "disponivel": True,
+            "sinal_estudo": sinal_estudo,
+            "direcao": direcao,
+            "h1": h1,
+            "estado": estado,
+            "motivo": motivo,
+            "fvg": fvg,
+            "zona_inf": zona_inf,
+            "zona_sup": zona_sup,
+            "corpo_atr": round(corpo_atr, 2),
+            "rr": rr_tp1,
+            "alvos": alvos,
+            "perfil_horario": {
+                "hora_utc": hora_utc,
+                "regime_atr": regime,
+                "tp1_pts": ctx["tp1_pts"] if ctx else None,
+                "tp2_pts": ctx["tp2_pts"] if ctx else None,
+                "sl_min_pts": ctx["sl_min_pts"] if ctx else None,
+                "n_velas_perfil": len(df),
             },
             "checklist": checklist,
         }
@@ -2696,6 +2877,8 @@ def loop(api, cfg, estado: Estado, calendario: CalendarioEconomico | None = None
     cfg_bof = replace(cfg, timeframe_segundos=TF_BOF)
     hist_bof: dict[str, pd.DataFrame] = {}
     ultimo_bucket_bof: dict[str, int] = {}
+    # tab=None até acumular dados suficientes; rebuild quando len(df) muda
+    _cache_tab_perfil: dict[str, tuple[int, dict | None]] = {}
     _ultimo_teste_conexao: float = 0.0
 
     def _tentar_reconectar() -> None:
@@ -2799,6 +2982,15 @@ def loop(api, cfg, estado: Estado, calendario: CalendarioEconomico | None = None
                 fvg = detectar_fvg_m15(df, atr)
                 confluencia = plano_confluencia_local(df, atr, a, noticia)
                 ouro_movimento = plano_ouro_movimento(df, atr, a, noticia)
+                # perfil horário genérico: recalcula só quando df cresce
+                _n_df = len(df)
+                _cached_ph = _cache_tab_perfil.get(a)
+                if _cached_ph is None or _cached_ph[0] != _n_df:
+                    _tab = _ph.tabela(df) if CLASSE.get(a) in ("forex", "crypto") else None
+                    _cache_tab_perfil[a] = (_n_df, _tab)
+                else:
+                    _tab = _cached_ph[1]
+                movimento_generico = plano_movimento_generico(df, atr, a, noticia, tab=_tab)
                 tp1_curto = plano_tp1_curto_forex(df, atr, a, noticia)
                 fluxo = leitura_fluxo_sessao(df, atr, a)
                 orb = plano_orb_sessao(df, atr, a)
@@ -2916,6 +3108,7 @@ def loop(api, cfg, estado: Estado, calendario: CalendarioEconomico | None = None
                     "fvg": fvg,
                     "confluencia": confluencia,
                     "ouro_movimento": ouro_movimento,
+                    "movimento_generico": movimento_generico,
                     "tp1_curto": tp1_curto,
                     "ia_groq": ia_atual,
                     "fluxo": fluxo,
@@ -3024,6 +3217,28 @@ def loop(api, cfg, estado: Estado, calendario: CalendarioEconomico | None = None
                         tag = "ENTRADA" if _entrada_valida_ouro else "ESTUDO"
                         print(f"[OURO MOVIMENTO — {tag}] {a} {ouro_movimento['direcao'].upper()} "
                               f"@ {df.index[-1]} RR={ouro_movimento['rr']}")
+                if movimento_generico.get("sinal_estudo"):
+                    estudo_gen = {
+                        **estado.dados[a], "sinal": True,
+                        "direcao": movimento_generico["direcao"],
+                        "entrada_valida": False,
+                        "elegivel": True,
+                        "estado_entrada": "MOVIMENTO GENÉRICO — ESTUDO",
+                        "motivo_entrada": movimento_generico["motivo"],
+                        "checklist": movimento_generico["checklist"],
+                        "alvos": None,
+                        "alvos_estudo": movimento_generico["alvos"],
+                        "horizonte_velas": 4, "horizonte_longo_velas": 8,
+                        "movimento_generico": movimento_generico,
+                    }
+                    if estado.registrar_sinal(
+                        a, str(df.index[-1]), estudo_gen, tipo="movimento_generico_m15"
+                    ):
+                        print(
+                            f"[MOVIMENTO GENÉRICO — ESTUDO] {a} "
+                            f"{movimento_generico['direcao'].upper()} "
+                            f"@ {df.index[-1]} RR={movimento_generico['rr']}"
+                        )
                 if fluxo.get("sinal_estudo"):
                     estudo_fluxo = {
                         **estado.dados[a],
