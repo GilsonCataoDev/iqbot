@@ -11,7 +11,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 
-SCHEMA_VERSAO = 1
+SCHEMA_VERSAO = 2
 
 
 class MonitorEventStore:
@@ -46,6 +46,34 @@ class MonitorEventStore:
             """)
             con.execute("CREATE INDEX IF NOT EXISTS idx_monitor_quando ON monitor_eventos(quando)")
             con.execute("CREATE INDEX IF NOT EXISTS idx_monitor_tipo ON monitor_eventos(tipo, desfecho)")
+            self._migrar_coluna_elegivel(con)
+            con.execute("CREATE INDEX IF NOT EXISTS idx_monitor_elegivel"
+                        " ON monitor_eventos(tipo, elegivel, desfecho)")
+
+    @staticmethod
+    def _migrar_coluna_elegivel(con: sqlite3.Connection) -> None:
+        """Acrescenta ``elegivel`` e herda o passado de ``entrada_valida``.
+
+        As duas colunas respondem perguntas diferentes. ``entrada_valida`` diz
+        se o sinal VAI virar ordem agora; ``elegivel`` diz se ele viraria caso o
+        setup estivesse promovido. A primeira implica a segunda.
+
+        Sem essa separacao um setup em estudo mede a populacao errada: todo
+        evento dele tem entrada_valida falso, entao sinais que o proprio portao
+        de horario ou contexto recusaria entram na conta junto dos que seriam
+        operados, e a medida vira piso em vez de estimativa.
+
+        Para as linhas que ja existiam nao da para saber a elegibilidade de quem
+        ficou fora: herdar ``entrada_valida`` mantem exatamente o recorte que o
+        motor ja usava. Quem grava daqui para frente informa o campo.
+        """
+        colunas = {linha["name"] for linha in con.execute(
+            "PRAGMA table_info(monitor_eventos)")}
+        if "elegivel" in colunas:
+            return
+        con.execute("ALTER TABLE monitor_eventos"
+                    " ADD COLUMN elegivel INTEGER NOT NULL DEFAULT 0")
+        con.execute("UPDATE monitor_eventos SET elegivel=entrada_valida")
 
     def _migrar_legado_se_vazio(self) -> None:
         with self._conectar() as con:
@@ -86,9 +114,14 @@ class MonitorEventStore:
             if not identificador or not quando:
                 continue
             simulacao = item.get("simulacao") or {}
+            entrada_valida = bool(item.get("entrada_valida"))
+            # Uma entrada valida e sempre elegivel; o contrario nao vale. Sem o
+            # campo explicito, o passado herda entrada_valida em vez de assumir
+            # elegibilidade que ninguem afirmou.
+            elegivel = bool(item.get("elegivel", entrada_valida)) or entrada_valida
             linhas.append((
                 identificador, quando, item.get("ativo"), item.get("tipo"),
-                int(bool(item.get("entrada_valida"))), item.get("estado_entrada"),
+                int(entrada_valida), int(elegivel), item.get("estado_entrada"),
                 simulacao.get("desfecho"),
                 json.dumps(item, ensure_ascii=False, default=str), agora,
             ))
@@ -97,18 +130,19 @@ class MonitorEventStore:
         with self._conectar() as con:
             con.executemany("""
                 INSERT INTO monitor_eventos
-                    (id, quando, ativo, tipo, entrada_valida, estado, desfecho, payload_json, atualizado_em)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    (id, quando, ativo, tipo, entrada_valida, elegivel, estado, desfecho, payload_json, atualizado_em)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(id) DO UPDATE SET
                     quando=excluded.quando, ativo=excluded.ativo, tipo=excluded.tipo,
-                    entrada_valida=excluded.entrada_valida, estado=excluded.estado,
+                    entrada_valida=excluded.entrada_valida, elegivel=excluded.elegivel,
+                    estado=excluded.estado,
                     desfecho=excluded.desfecho, payload_json=excluded.payload_json,
                     atualizado_em=excluded.atualizado_em
             """, linhas)
 
     def desempenho_por_tipo(self, tipo: str, minimo: int = 50,
                             z: float = 1.96,
-                            somente_entradas: bool | None = None) -> dict:
+                            somente_elegiveis: bool | None = None) -> dict:
         """Mede um setup pelo proprio historico e diz se ele se sustenta.
 
         Decide em R-multiplo, nao em taxa de acerto: no Monitor cada setup tem
@@ -125,33 +159,33 @@ class MonitorEventStore:
         passa, que e o comportamento desejado: promover exige evidencia, nao
         sorte recente.
 
-        ``somente_entradas`` escolhe a populacao. Um setup ja promovido registra
-        tanto o que operaria quanto o que o proprio portao recusou — o falso
-        rompimento, por exemplo, grava sinais fora da janela das 21h que nunca
-        viram ordem. Medir os dois juntos rebaixa o setup pelo que ele ja
-        descarta de proposito: no historico de 2026-09-22 isso levava 54% em 50
-        entradas para 31,9% em 288 eventos. O padrao ``None`` resolve sozinho —
-        usa as entradas validas quando existem e cai para todos os eventos
-        quando o setup ainda esta em estudo e nunca marcou nenhuma.
+        ``somente_elegiveis`` escolhe a populacao, e e o ponto delicado. Um setup
+        registra tanto o que operaria quanto o que o proprio portao recusou — o
+        falso rompimento grava sinais fora da janela das 21h que nunca viram
+        ordem. Medir os dois juntos rebaixa o setup pelo que ele ja descarta de
+        proposito: no historico de 2026-09-22 isso levava 54% em 50 entradas
+        para 31,9% em 288 eventos.
 
-        A heuristica tem um limite conhecido: num setup em estudo, todo evento
-        tem ``entrada_valida`` falso, entao a medida inclui sinais que um portao
-        de horario ou contexto recusaria depois da promocao. Enquanto os setups
-        em estudo nao marcarem elegibilidade a parte, o numero deles e piso, nao
-        estimativa.
+        ``elegivel`` e a coluna certa aqui porque responde "este sinal seria
+        operado se o setup estivesse promovido", independente de ele estar
+        promovido hoje. Usar ``entrada_valida`` zerava a amostra de qualquer
+        setup em estudo, que e exatamente quem precisa ser medido.
+
+        O padrao ``None`` usa os elegiveis quando existem e cai para todos os
+        eventos quando nenhum foi marcado.
         """
         with self._conectar() as con:
-            if somente_entradas is None:
-                somente_entradas = bool(con.execute(
+            if somente_elegiveis is None:
+                somente_elegiveis = bool(con.execute(
                     "SELECT 1 FROM monitor_eventos"
-                    " WHERE tipo=? AND entrada_valida=1"
+                    " WHERE tipo=? AND elegivel=1"
                     " AND desfecho IN ('win_tp1','loss_sl') LIMIT 1",
                     (tipo,),
                 ).fetchone())
             consulta = ("SELECT desfecho, payload_json FROM monitor_eventos"
                         " WHERE tipo=?")
-            if somente_entradas:
-                consulta += " AND entrada_valida=1"
+            if somente_elegiveis:
+                consulta += " AND elegivel=1"
             linhas = con.execute(consulta, (tipo,)).fetchall()
         erres: list[float] = []
         vitorias = 0
@@ -184,7 +218,7 @@ class MonitorEventStore:
         if not total:
             return {"tipo": tipo, "n": 0, "ignorados": ignorados,
                     "promove": False, "motivo": "sem desfecho resolvido",
-                    "escopo": "entradas_validas" if somente_entradas
+                    "escopo": "elegiveis" if somente_elegiveis
                               else "todos_eventos"}
         erres.sort()
         meio = total // 2
@@ -217,7 +251,7 @@ class MonitorEventStore:
             "esperanca": round(esperanca, 3),
             "esperanca_inferior": round(esperanca_inferior, 3),
             "minimo": minimo, "promove": promove, "motivo": motivo,
-            "escopo": "entradas_validas" if somente_entradas else "todos_eventos",
+            "escopo": "elegiveis" if somente_elegiveis else "todos_eventos",
         }
 
     def resumo(self, desde: datetime | None = None) -> dict:

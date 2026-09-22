@@ -1,4 +1,5 @@
 import json
+import sqlite3
 
 from iqoption_m5.monitor_store import MonitorEventStore
 
@@ -52,9 +53,9 @@ def test_resumo_separa_entrada_valida_de_estudos(tmp_path):
 
 
 def _evento(indice: int, tipo: str, desfecho: str, *, entrada=100.0, sl=99.0,
-            tp1=103.0, estudo=False) -> dict:
+            tp1=103.0, estudo=False, elegivel=None) -> dict:
     alvos = {"entrada": entrada, "sl": sl, "tp1": tp1}
-    return {
+    item = {
         "id": f"{tipo}-{indice}", "quando": f"2026-09-01T00:{indice % 60:02d}:00",
         "ativo": "EURUSD", "tipo": tipo, "entrada_valida": not estudo,
         "estado_entrada": "x",
@@ -63,6 +64,9 @@ def _evento(indice: int, tipo: str, desfecho: str, *, entrada=100.0, sl=99.0,
         "alvos": None if estudo else alvos,
         "alvos_estudo": alvos,
     }
+    if elegivel is not None:
+        item["elegivel"] = elegivel
+    return item
 
 
 def test_desempenho_exige_amostra_antes_de_promover(tmp_path):
@@ -162,19 +166,19 @@ def test_desempenho_ignora_o_que_o_proprio_portao_recusou(tmp_path):
 
     auto = loja.desempenho_por_tipo("portao", minimo=50)
 
-    assert auto["escopo"] == "entradas_validas"
+    assert auto["escopo"] == "elegiveis"
     assert auto["n"] == 60
     assert auto["taxa"] == 50.0
     assert auto["promove"]
 
-    tudo = loja.desempenho_por_tipo("portao", minimo=50, somente_entradas=False)
+    tudo = loja.desempenho_por_tipo("portao", minimo=50, somente_elegiveis=False)
 
     assert tudo["n"] == 260
     assert not tudo["promove"]
 
 
-def test_desempenho_de_setup_em_estudo_usa_todos_os_eventos(tmp_path):
-    """Sem nenhuma entrada valida, medir so entradas daria amostra zero."""
+def test_desempenho_sem_marcacao_cai_para_todos_os_eventos(tmp_path):
+    """Setup antigo, sem ninguem informando elegivel, ainda precisa medir."""
     loja = MonitorEventStore(tmp_path / "m.sqlite3")
     loja.salvar([_evento(i, "so_estudo", "win_tp1" if i % 2 == 0 else "loss_sl",
                          estudo=True) for i in range(60)])
@@ -184,3 +188,68 @@ def test_desempenho_de_setup_em_estudo_usa_todos_os_eventos(tmp_path):
     assert d["escopo"] == "todos_eventos"
     assert d["n"] == 60
     assert d["promove"]
+
+
+def test_setup_em_estudo_mede_so_o_que_seria_operado(tmp_path):
+    """O caso que motivou a coluna: estudo tem entrada_valida sempre falso.
+
+    Sem ``elegivel``, os sinais que o portao do setup recusaria entrariam na
+    conta junto dos que seriam operados, e um setup bom pareceria ruim.
+    """
+    loja = MonitorEventStore(tmp_path / "m.sqlite3")
+    operaveis = [_evento(i, "estudo", "win_tp1" if i % 2 == 0 else "loss_sl",
+                         estudo=True, elegivel=True) for i in range(60)]
+    recusados = [_evento(500 + i, "estudo", "loss_sl", estudo=True,
+                         elegivel=False) for i in range(200)]
+    loja.salvar(operaveis + recusados)
+
+    d = loja.desempenho_por_tipo("estudo", minimo=50)
+
+    assert d["escopo"] == "elegiveis"
+    assert d["n"] == 60
+    assert d["taxa"] == 50.0
+    assert d["promove"]
+
+
+def test_entrada_valida_implica_elegivel(tmp_path):
+    """Nao da para operar um sinal e negar que ele seria operado."""
+    loja = MonitorEventStore(tmp_path / "m.sqlite3")
+    loja.salvar([_evento(i, "coerente", "win_tp1" if i % 2 == 0 else "loss_sl",
+                         elegivel=False) for i in range(60)])
+
+    with sqlite3.connect(tmp_path / "m.sqlite3") as con:
+        assert con.execute(
+            "SELECT COUNT(*) FROM monitor_eventos"
+            " WHERE entrada_valida=1 AND elegivel=0").fetchone()[0] == 0
+
+    assert loja.desempenho_por_tipo("coerente", minimo=50)["n"] == 60
+
+
+def test_migracao_herda_elegivel_de_entrada_valida(tmp_path):
+    """Banco v1 nao sabe a elegibilidade de quem ficou fora da entrada.
+
+    Herdar entrada_valida preserva exatamente o recorte que o motor ja usava,
+    em vez de inventar elegibilidade que ninguem afirmou.
+    """
+    caminho = tmp_path / "antigo.sqlite3"
+    with sqlite3.connect(caminho) as con:
+        con.execute("""
+            CREATE TABLE monitor_eventos (
+                id TEXT PRIMARY KEY, quando TEXT NOT NULL, ativo TEXT, tipo TEXT,
+                entrada_valida INTEGER NOT NULL DEFAULT 0, estado TEXT,
+                desfecho TEXT, payload_json TEXT NOT NULL, atualizado_em TEXT NOT NULL
+            )
+        """)
+        con.executemany(
+            "INSERT INTO monitor_eventos VALUES (?,?,?,?,?,?,?,?,?)",
+            [(f"v1-{i}", "2026-09-01T00:00:00", "EURUSD", "antigo",
+              1 if i < 10 else 0, "x", "win_tp1", "{}", "2026-09-01T00:00:00")
+             for i in range(30)])
+
+    MonitorEventStore(caminho)
+
+    with sqlite3.connect(caminho) as con:
+        pares = con.execute(
+            "SELECT entrada_valida, elegivel, COUNT(*) FROM monitor_eventos"
+            " GROUP BY 1, 2 ORDER BY 1").fetchall()
+    assert pares == [(0, 0, 20), (1, 1, 10)]
