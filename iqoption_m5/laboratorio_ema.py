@@ -199,16 +199,16 @@ def _rastros(base: Configuracao) -> list[RastroEma]:
                     somente_sombra=not executavel_reteste,
                 )
             )
-    # NZD tem seu próprio ativo e pode agora formar nova amostra independente.
+    # NZD: WR 45.8% (n=24) abaixo do break-even — sombra de acompanhamento.
     saida.append(
         RastroEma(
-            nome="M5 | NZD tendência + M15 + ADX (PRACTICE reteste)",
+            nome="M5 | NZD tendência + M15 + ADX (sombra WR<54%)",
             config=replace(
                 _config_rastro(base, 300, "nzd_trend_pullback_v1"),
                 ativos=ativos_reteste_m5["nzd_trend_pullback_v1"],
             ),
             intravela=False,
-            somente_sombra=False,
+            somente_sombra=True,
         )
     )
     # ema920_pullback: EURUSD reteste independente do AUDCAD.
@@ -240,19 +240,35 @@ def _rastros(base: Configuracao) -> list[RastroEma]:
         )
     )
     # Campanha independente da EMA: é a regra que o backtest acabou de medir.
-    # Apenas os três pares mais fortes entram em PRACTICE.
+    # EURUSD mantido em PRACTICE. GBPUSD (41.7%, n=12) e USDJPY (45.8%, n=24)
+    # abaixo do break-even (54.05%) — movidos para sombra até nova amostra.
     saida.append(
         RastroEma(
             nome="M5 | Fibo M15 50-61,8 + confirmação (PRACTICE)",
             config=replace(
                 _config_rastro(base, 300, "fibo_mtf_confirmado"),
-                ativos=("EURUSD", "GBPUSD", "USDJPY"),
+                ativos=("EURUSD",),
                 entrada_max_segundos_no_candle=45,
                 expiracao_minutos=15,
                 expiracao_por_setup={"fibo_mtf_confirmado": 15},
             ),
             intravela=False,
             somente_sombra=False,
+        )
+    )
+    # GBPUSD e USDJPY: sombra de acompanhamento enquanto WR abaixo do break-even.
+    saida.append(
+        RastroEma(
+            nome="M5 | Fibo M15 50-61,8 GBPUSD/USDJPY (sombra WR<54%)",
+            config=replace(
+                _config_rastro(base, 300, "fibo_mtf_confirmado"),
+                ativos=("GBPUSD", "USDJPY"),
+                entrada_max_segundos_no_candle=45,
+                expiracao_minutos=15,
+                expiracao_por_setup={"fibo_mtf_confirmado": 15},
+            ),
+            intravela=False,
+            somente_sombra=True,
         )
     )
     # H1 tem campanha própria, ativo exclusivo e uma única regra. A ordem só
