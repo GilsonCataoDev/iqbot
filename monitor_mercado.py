@@ -2906,16 +2906,27 @@ def loop(api, cfg, estado: Estado, calendario: CalendarioEconomico | None = None
                               f"regime={cls.iloc[-1]}")
                 # Fibo é um segundo estudo, independente do falso rompimento:
                 # registra somente quando a retração e a rejeição se completam.
-                # Não altera ``entrada_valida`` nem envia qualquer posição.
+                #
+                # Nunca promove entrada_valida. A geometria trava o R em ~3,14
+                # (entrada no 61,8%, stop no 78,6%, alvo no extremo), o que
+                # exige 24,2% de acerto; o medido foi 14,0% em n=178, IC95
+                # [9,7–19,9] — o intervalo inteiro abaixo do break-even.
+                # O stop cai dentro da própria zona de retração, então uma
+                # retração normal até 78,6% vira loss: nos loss a mediana de
+                # excursão favorável é 2,08R, o movimento costuma acontecer
+                # depois do stop. Tendência já era exigida (os 178 tinham M15
+                # e H1 a favor), e nenhum corte por ativo, hora ou amplitude
+                # reverte. Salvar exige mudar o stop para além do 100%, o que
+                # precisa de backtest com as velas — não de mais um filtro.
                 if fibo.get("qualificada"):
                     estudo_fibo = {
                         **estado.dados[a],
                         "sinal": True, "direcao": fibo["direcao"],
-                        "entrada_valida": CLASSE.get(a) == "forex",
+                        "entrada_valida": False,
                         "estado_entrada": "FIBO — ESTUDO",
                         "motivo_entrada": fibo["motivo"],
                         "checklist": fibo["checklist"],
-                        "alvos": fibo["alvos"], "alvos_estudo": fibo["alvos"],
+                        "alvos": None, "alvos_estudo": fibo["alvos"],
                     }
                     if estado.registrar_sinal(a, str(df.index[-1]), estudo_fibo, tipo="fibo_m15"):
                         print(f"[FIBO — ESTUDO] {a} {fibo['direcao'].upper()} @ {df.index[-1]} "
