@@ -2876,7 +2876,7 @@ def loop(api, cfg, estado: Estado, calendario: CalendarioEconomico | None = None
                     estudo_fibo = {
                         **estado.dados[a],
                         "sinal": True, "direcao": fibo["direcao"],
-                        "entrada_valida": True,
+                        "entrada_valida": CLASSE.get(a) == "forex",
                         "estado_entrada": "FIBO — ESTUDO",
                         "motivo_entrada": fibo["motivo"],
                         "checklist": fibo["checklist"],
@@ -2920,7 +2920,7 @@ def loop(api, cfg, estado: Estado, calendario: CalendarioEconomico | None = None
                     estudo_fluxo = {
                         **estado.dados[a],
                         "sinal": True, "direcao": fluxo["direcao"],
-                        "entrada_valida": True,
+                        "entrada_valida": CLASSE.get(a) == "forex",
                         "estado_entrada": "FLUXO — ESTUDO",
                         "motivo_entrada": fluxo["motivo"],
                         "checklist": fluxo["checklist"],
@@ -2935,7 +2935,7 @@ def loop(api, cfg, estado: Estado, calendario: CalendarioEconomico | None = None
                     estudo_orb = {
                         **estado.dados[a],
                         "sinal": True, "direcao": orb["direcao"],
-                        "entrada_valida": True,
+                        "entrada_valida": CLASSE.get(a) == "forex",
                         "estado_entrada": "ORB/FVG — ESTUDO",
                         "motivo_entrada": orb["motivo"],
                         "checklist": orb["checklist"],
