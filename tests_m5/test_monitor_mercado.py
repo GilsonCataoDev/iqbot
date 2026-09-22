@@ -106,7 +106,8 @@ def test_decisao_deixa_sinal_fora_da_janela_em_estudo():
     assert resultado["sinal"]
     assert not resultado["entrada_valida"]
     assert resultado["estado_entrada"] == "ESTUDO — NÃO OPERAR"
-    assert [item["ok"] for item in resultado["checklist"]] == [True, True, False]
+    # Acumulacao, rompimento, H4 (default bullish) e janela — nessa ordem.
+    assert [item["ok"] for item in resultado["checklist"]] == [True, True, True, False]
 
 
 def test_decisao_so_valida_com_todas_as_regras():
@@ -114,6 +115,16 @@ def test_decisao_so_valida_com_todas_as_regras():
 
     assert resultado["entrada_valida"]
     assert resultado["estado_entrada"] == "ENTRADA VÁLIDA"
+
+
+def test_decisao_barra_sinal_com_h4_baixista_mesmo_na_janela():
+    """Todos os loss historicos do falso rompimento eram buy com H4 em baixa."""
+    resultado = decisao_entrada(True, True, True, h4_bullish=False)
+
+    assert resultado["sinal"]
+    assert not resultado["entrada_valida"]
+    assert [item["ok"] for item in resultado["checklist"]] == [True, True, False, True]
+    assert "H4" in resultado["motivo_entrada"]
 
 
 def test_simulador_usa_alvo_de_estudo_quando_nao_ha_entrada_valida():
@@ -682,9 +693,14 @@ def test_monitor_inclui_cripto_e_ouro_sem_herdar_validacao_de_forex():
     assert {"BTCUSD", "ETHUSD", "XRPUSD", "XAUUSD"} <= set(ATIVOS)
     assert CLASSE["BTCUSD"] == "crypto"
     assert CLASSE["XAUUSD"] == "ouro"
-    assert janela_validada_para("crypto", 8)
+    # Crypto perdeu a janela 24/7: ao vivo fora das 21h UTC so acumulou loss
+    # (09h, 16h, 18h e 19h todos negativos). Coincidir com forex agora e
+    # resultado de medicao, nao heranca — as classes seguem avaliadas a parte.
+    assert janela_validada_para("crypto", 21)
+    assert not janela_validada_para("crypto", 8)
     assert janela_validada_para("forex", 21)
     assert not janela_validada_para("forex", 8)
+    # Ouro nunca teve janela propria: fica em estudo via plano_ouro_movimento.
     assert not janela_validada_para("ouro", 21)
 
 

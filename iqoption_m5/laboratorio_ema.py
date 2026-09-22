@@ -157,11 +157,15 @@ def _rastros(base: Configuracao) -> list[RastroEma]:
     # Uma estratégia por ativo no re-teste PRACTICE. Isso impede que sinais
     # correlacionados sejam recusados pela reserva global e deixem o estudo
     # sem amostra, como ocorreu com a primeira campanha Fibo.
+    # fibo_sr_retracao perdeu o EURJPY: a sombra dele acumulou 41,2% em n=119
+    # (IC95 [32,7–50,2], abaixo do break-even) enquanto o ema920_pullback no
+    # mesmo par mede 54,5% em n=299 — a melhor sombra de todos os ativos.
+    # Sem ativo exclusivo o setup cai para sombra em toda a cesta, o que
+    # também acelera a amostra que falta para decidi-lo.
     ativos_reteste_m5 = {
         "ema920_pullback": ("AUDCAD",),
         "ema921_rsi_pullback": ("USDCAD",),
         "ema921_rsi_intravela": ("AUDUSD",),
-        "fibo_sr_retracao": ("EURJPY",),
         "nzd_trend_pullback_v1": ("NZDUSD",),
     }
     for timeframe, rotulo in ((300, "M5"), (900, "M15")):
@@ -178,14 +182,17 @@ def _rastros(base: Configuracao) -> list[RastroEma]:
             executavel_reteste = timeframe == 300 and setup in ativos_reteste_m5 and setup != "ema921_rsi_intravela"
             saida.append(
                 RastroEma(
+                    # O sufixo segue o status real do rastro. A versão anterior
+                    # derivava do setup e marcava "sombra de validação" em
+                    # rastro executável, o que enganava a leitura de log.
                     nome=(
                         f"{rotulo} | {nome}"
                         + (
-                            " (sombra H1)"
-                            if timeframe == 900 and setup != "ema920_pullback"
+                            ""
+                            if executavel_reteste
+                            else " (sombra H1)"
+                            if timeframe == 900
                             else " (sombra de validação)"
-                            if setup != "ema920_pullback"
-                            else ""
                         )
                     ),
                     config=replace(
@@ -220,6 +227,21 @@ def _rastros(base: Configuracao) -> list[RastroEma]:
             config=replace(
                 _config_rastro(base, 300, "ema920_pullback"),
                 ativos=("EURUSD",),
+            ),
+            intravela=False,
+            somente_sombra=False,
+        )
+    )
+    # ema920_pullback: EURJPY reteste independente. Melhor sombra da cesta
+    # (54,5% em n=299) e 83,3% em 12 ordens reais da config antiga. Rastro
+    # próprio pelo mesmo motivo do EURUSD: sem slot exclusivo os sinais
+    # disputam a reserva global e o estudo fica sem amostra.
+    saida.append(
+        RastroEma(
+            nome="M5 | EMA9/20 reteste EURJPY (PRACTICE)",
+            config=replace(
+                _config_rastro(base, 300, "ema920_pullback"),
+                ativos=("EURJPY",),
             ),
             intravela=False,
             somente_sombra=False,
@@ -307,14 +329,18 @@ def _motivo_sombra(
     """
     if ativo in base.ativos_somente_sombra:
         return "ativo_candidato_sombra"
+    # Um rastro de sombra não manda ordem por definição — o motivo é esse, e
+    # não um filtro de qualidade. Os rótulos anteriores (m5_h1_validacao,
+    # m15_h1_validacao, fibo_sr_validacao, nzd_v1_validacao) afirmavam
+    # timeframe e filtro H1 que ninguém checava: m15_h1_validacao saiu 331
+    # vezes em timeframe=300 e m5_h1_validacao 51 vezes em timeframe=900.
+    # Isso inflava o peso aparente do filtro H1 em qualquer análise de funil.
+    # setup e timeframe já são colunas de ``decisoes``; o motivo não precisa
+    # repeti-los, só precisa ser verdadeiro.
     if rastro.somente_sombra:
-        if setup == "fibo_sr_retracao":
-            return "fibo_sr_validacao"
-        if setup == "nzd_trend_pullback_v1":
-            return "nzd_v1_noticia_high" if noticia_high else "nzd_v1_validacao"
-        if setup == "ema920_pullback":
-            return "m5_h1_validacao"
-        return "m15_h1_validacao"
+        if setup == "nzd_trend_pullback_v1" and noticia_high:
+            return "nzd_v1_noticia_high"
+        return "rastro_sombra"
     # A campanha MTF mede a mesma regra do backtest; notícia vira contexto,
     # mas não remove silenciosamente observações do teste em PRACTICE.
     if setup == "fibo_mtf_confirmado":

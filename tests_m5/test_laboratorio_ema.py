@@ -22,7 +22,7 @@ def test_laboratorio_tem_rastros_m5_e_m15_e_nzd_em_sombra():
     config = configuracao_ema_laboratorio_practice()
     rastros = _rastros(config)
 
-    assert len(rastros) == 14
+    assert len(rastros) == 16
     assert config.ativos == (
         "EURUSD", "AUDCAD", "NZDUSD", "GBPUSD", "USDJPY", "AUDUSD", "USDCAD", "EURJPY", "EURCHF",
     )
@@ -32,9 +32,15 @@ def test_laboratorio_tem_rastros_m5_e_m15_e_nzd_em_sombra():
     fibos = [r for r in rastros if r.config.fibo_sr_retracao_ativo]
     assert {r.config.timeframe_segundos for r in fibos} == {300, 900}
     assert all(r.intravela for r in fibos)
-    assert any(not r.somente_sombra and r.config.timeframe_segundos == 300 for r in fibos)
+    # fibo_sr_retracao perdeu o EURJPY para o ema920_pullback: sombra 41,2%
+    # em n=119 contra 54,5% em n=299 do ema920 no mesmo par. Sem ativo
+    # exclusivo, o setup roda em sombra na cesta inteira.
+    assert all(r.somente_sombra for r in fibos)
+    assert all(r.config.ativos == config.ativos for r in fibos)
+    # NZDUSD: 45,8% em n=24 real e 48,2% em n=369 sombra, abaixo do
+    # break-even (~53,9%) nas duas medidas.
     nzd = next(r for r in rastros if r.config.nzd_trend_pullback_ativo)
-    assert not nzd.somente_sombra
+    assert nzd.somente_sombra
     assert nzd.config.timeframe_segundos == 300
     rastros_m15 = [r for r in rastros if r.config.timeframe_segundos == 900]
     assert all(r.config.filtro_h1_ativo for r in rastros_m15)
@@ -51,13 +57,23 @@ def test_laboratorio_tem_rastros_m5_e_m15_e_nzd_em_sombra():
     intravela_m5 = next(r for r in rastros if r.config.ema921_rsi_intravela_ativo and r.config.timeframe_segundos == 300)
     assert intravela_m5.somente_sombra
     rastros_executaveis = [r for r in rastros if not r.somente_sombra]
-    assert len(rastros_executaveis) == 7
+    assert len(rastros_executaveis) == 6
     assert {r.config.timeframe_segundos for r in rastros_executaveis} == {300, 3600}
-    # AUDCAD e EURUSD: dois rastros ema920_pullback independentes em PRACTICE.
-    assert sum(r.config.ema920_pullback_ativo for r in rastros_executaveis) == 2
-    fibo_mtf = next(r for r in rastros if r.config.fibo_mtf_confirmado_ativo)
-    assert fibo_mtf.config.ativos == ("EURUSD", "GBPUSD", "USDJPY")
-    assert fibo_mtf.config.expiracao_por_setup == {"fibo_mtf_confirmado": 15}
+    # AUDCAD, EURUSD e EURJPY: tres rastros ema920_pullback independentes em
+    # PRACTICE. Cada um com ativo proprio para nao disputar a reserva global.
+    assert sum(r.config.ema920_pullback_ativo for r in rastros_executaveis) == 3
+    assert {r.config.ativos[0] for r in rastros_executaveis
+            if r.config.ema920_pullback_ativo} == {"AUDCAD", "EURUSD", "EURJPY"}
+    # fibo_mtf_confirmado partido em dois: EURUSD executavel, GBPUSD/USDJPY
+    # em sombra por WR abaixo do break-even (41,7% n=12 e 45,8% n=24).
+    fibo_mtf = [r for r in rastros if r.config.fibo_mtf_confirmado_ativo]
+    assert len(fibo_mtf) == 2
+    executavel = next(r for r in fibo_mtf if not r.somente_sombra)
+    sombra_mtf = next(r for r in fibo_mtf if r.somente_sombra)
+    assert executavel.config.ativos == ("EURUSD",)
+    assert sombra_mtf.config.ativos == ("GBPUSD", "USDJPY")
+    assert all(r.config.expiracao_por_setup == {"fibo_mtf_confirmado": 15}
+               for r in fibo_mtf)
     assert config.bloquear_direcao_paralela
     assert config.pullback_fib_min == 0.382
     assert config.pullback_fib_max == 0.618
@@ -79,7 +95,9 @@ def test_todo_rastro_identifica_o_proprio_setup_sem_stopiteration():
 
     assert "ema920_prime" in setups
     assert setups.count("fibo_sr_retracao") == 2
-    assert setups.count("fibo_mtf_confirmado") == 1
+    assert setups.count("fibo_mtf_confirmado") == 2
+    # M5 AUDCAD, M15, EURUSD, EURJPY e a sombra de comparacao com filtro H1.
+    assert setups.count("ema920_pullback") == 5
     assert len(setups) == len(rastros)
 
 
