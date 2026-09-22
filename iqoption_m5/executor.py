@@ -274,7 +274,7 @@ class ExecutorSeguro:
                 config=self.config,
             )
             logger.exception(
-                "falha_envio ativo=%s signal_id=%s",
+                "nao_enviada ativo=%s signal_id=%s",
                 decisao.ativo,
                 decisao.signal_id,
             )

@@ -110,7 +110,7 @@ def reapurar(banco: Path, indice: dict[str, dict], dia: str | None, dry_run: boo
     con = sqlite3.connect(banco)
     sql = (
         "SELECT id_ordem, ativo, direcao, enviada_em, valor, payout, setup, lucro, "
-        "resultado_bruto, status FROM operacoes WHERE status != 'falha_envio'"
+        "resultado_bruto, status FROM operacoes WHERE status != 'nao_enviada'"
     )
     params: tuple = ()
     if dia:

@@ -638,7 +638,7 @@ class RegistroSQLite:
                 INSERT INTO operacoes (
                     id_ordem, ativo, direcao, enviada_em, valor, payout, setup,
                     resultado_bruto, campanha_id, timeframe, expiracao_minutos, status
-                ) VALUES (?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?, 'falha_envio')
+                ) VALUES (?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?, 'nao_enviada')
                 """,
                 (
                     f"falha-{decisao.ativo}-{decisao.candle_hora.isoformat()}-{datetime.now().timestamp()}",
@@ -1119,7 +1119,7 @@ class RegistroSQLite:
                        SUM(CASE WHEN status='finalizada' AND lucro = 0 THEN 1 ELSE 0 END),
                        SUM(CASE WHEN status != 'finalizada' OR lucro IS NULL THEN 1 ELSE 0 END)
                 FROM operacoes
-                WHERE date(enviada_em)=? AND status != 'falha_envio'
+                WHERE date(enviada_em)=? AND status != 'nao_enviada'
                 GROUP BY ativo, direcao, strftime('%Y-%m-%dT%H:%M', enviada_em)
                 """,
                 (hoje,),
@@ -1325,7 +1325,7 @@ class RegistroSQLite:
     def stats_globais(self) -> dict:
         """Entradas e winrate do dia atual, separados por OTC e mercado normal.
 
-        Conta TODAS as ordens do dia exceto falha_envio (inclusive as ainda abertas).
+        Conta TODAS as ordens do dia exceto nao_enviada (inclusive as ainda abertas).
         Winrate e lucro calculados apenas sobre as finalizadas com lucro definido.
         """
         hoje = datetime.now().date().isoformat()
@@ -1333,7 +1333,7 @@ class RegistroSQLite:
             linhas = db.execute(
                 """
                 SELECT ativo, status, lucro FROM operacoes
-                WHERE date(enviada_em)=? AND status != 'falha_envio'
+                WHERE date(enviada_em)=? AND status != 'nao_enviada'
                 """,
                 (hoje,),
             ).fetchall()
@@ -1409,7 +1409,7 @@ class RegistroSQLite:
     def entradas_hoje_detalhadas(self, data: str | None = None) -> list[dict]:
         """Lista de entradas do dia com justificativa, correlacionada com decisoes.
 
-        Retorna uma entrada por operação (exceto falha_envio), enriquecida com
+        Retorna uma entrada por operação (exceto nao_enviada), enriquecida com
         o detalhes_json da decisão correspondente (mesmo ativo+direcao, timestamp
         mais próximo dentro de 10 s).
 
@@ -1425,7 +1425,7 @@ class RegistroSQLite:
                 SELECT id_ordem, ativo, direcao, status, lucro, enviada_em, setup,
                        timeframe, expiracao_minutos, preco_entrada, atraso_envio_ms
                 FROM operacoes
-                WHERE date(enviada_em)=? AND status != 'falha_envio'
+                WHERE date(enviada_em)=? AND status != 'nao_enviada'
                 ORDER BY enviada_em ASC
                 """,
                 (hoje,),

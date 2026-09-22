@@ -107,7 +107,7 @@ class TestRiscoEExecutor(unittest.TestCase):
         with closing(sqlite3.connect(cfg.banco_sqlite)) as db:
             return [
                 linha[0] for linha in db.execute(
-                    "SELECT resultado_bruto FROM operacoes WHERE status='falha_envio'"
+                    "SELECT resultado_bruto FROM operacoes WHERE status='nao_enviada'"
                 ).fetchall()
             ]
 
@@ -156,7 +156,7 @@ class TestRiscoEExecutor(unittest.TestCase):
         with closing(sqlite3.connect(cfg.banco_sqlite)) as db:
             timeframe, expiracao = db.execute(
                 "SELECT timeframe, expiracao_minutos FROM operacoes "
-                "WHERE status='falha_envio' ORDER BY enviada_em DESC LIMIT 1"
+                "WHERE status='nao_enviada' ORDER BY enviada_em DESC LIMIT 1"
             ).fetchone()
         self.assertEqual(timeframe, 900)
         self.assertEqual(expiracao, 30)
