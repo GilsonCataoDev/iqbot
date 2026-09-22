@@ -253,3 +253,32 @@ def test_migracao_herda_elegivel_de_entrada_valida(tmp_path):
             "SELECT entrada_valida, elegivel, COUNT(*) FROM monitor_eventos"
             " GROUP BY 1, 2 ORDER BY 1").fetchall()
     assert pares == [(0, 0, 20), (1, 1, 10)]
+
+
+def _com_tags(indice, tipo, desfecho, tags, **kw):
+    item = _evento(indice, tipo, desfecho, **kw)
+    item["dossie"] = {"tags": list(tags)}
+    return item
+
+
+def test_variante_mede_subconjunto_sem_duplicar_evento(tmp_path):
+    loja = MonitorEventStore(tmp_path / "m.sqlite3")
+    # 40 com vela forte e 60% de acerto; 60 fracos e 20%. R=3, BE=25%.
+    fortes = [_com_tags(i, "mix", "win_tp1" if i < 24 else "loss_sl",
+                        ["vela_forte"]) for i in range(40)]
+    fracos = [_com_tags(100 + i, "mix", "win_tp1" if i < 12 else "loss_sl",
+                        ["vela_fraca"]) for i in range(60)]
+    loja.salvar(fortes + fracos)
+
+    base = loja.desempenho_por_tipo("mix", minimo=30)
+    forte = loja.desempenho_por_tipo(
+        "mix", minimo=30, rotulo="vela_forte",
+        filtro=lambda p: "vela_forte" in set((p.get("dossie") or {}).get("tags") or []))
+
+    assert base["n"] == 100
+    assert forte["n"] == 40
+    assert forte["variante"] == "vela_forte"
+    assert forte["taxa"] == 60.0
+    assert forte["esperanca"] > base["esperanca"]
+    # O que o filtro tira conta como ignorado, nao como perda.
+    assert forte["ignorados"] == 60

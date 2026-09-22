@@ -106,6 +106,56 @@ def adquirir_trava_monitor(porta: int = PORTA + 10_000) -> socket.socket:
         raise
 
 
+# Portoes opcionais: regras que o setup PODE passar a exigir se o proprio
+# historico mostrar que apertar melhora o resultado. Cada um recebe o payload
+# de um evento ja resolvido e diz se aquele sinal teria passado.
+#
+# vela_forte sai do dossie, que classifica o candle de sinal em forte quando o
+# corpo ocupa 55% ou mais da amplitude. Medido em 2026-09-22 o efeito nao foi
+# uniforme: levou fluxo_m15 de -0,11R para +0,18R e falso_rompimento de +0,89R
+# para +1,06R, mas piorou orb_fvg_m15 (-0,21R para -0,43R) e
+# rompimento_reteste (-0,19R para -0,33R). Como foram 25 comparacoes, cerca de
+# um falso positivo e esperado por acaso — por isso nenhum portao e ligado na
+# mao aqui: quem decide e desempenho_por_tipo, setup a setup.
+PORTOES_OPCIONAIS = {
+    "vela_forte": lambda payload: "vela_forte" in set(
+        ((payload.get("dossie") or {}) if isinstance(payload.get("dossie"), dict)
+         else {}).get("tags") or []
+    ),
+}
+
+
+def portao_recomendado(loja, tipo: str, minimo: int = 50) -> dict:
+    """Diz se apertar um setup com algum portao opcional se sustenta no dado.
+
+    Devolve o portao que o historico aprova, ou nenhum. Um portao so entra se
+    a variante promover E a versao sem portao nao promover: quando as duas
+    passam, exigir a mais restritiva so descartaria sinal bom.
+
+    Entre varias variantes aprovadas, vence a de maior esperanca no limite
+    INFERIOR do intervalo, nao na observada — o criterio e o mesmo que decide a
+    promocao, para que apertar o setup nunca seja escolha de sorte recente.
+    """
+    base = loja.desempenho_por_tipo(tipo, minimo=minimo)
+    if base.get("promove"):
+        return {"portao": None, "motivo": "setup ja se sustenta sem portao",
+                "base": base}
+    melhor = None
+    for nome, filtro in PORTOES_OPCIONAIS.items():
+        variante = loja.desempenho_por_tipo(tipo, minimo=minimo, filtro=filtro,
+                                            rotulo=nome)
+        if not variante.get("promove"):
+            continue
+        if melhor is None or (variante["esperanca_inferior"]
+                              > melhor["esperanca_inferior"]):
+            melhor = variante
+    if melhor is None:
+        return {"portao": None, "motivo": "nenhuma variante se sustenta",
+                "base": base}
+    return {"portao": melhor["variante"], "motivo": melhor["motivo"],
+            "base": base, "variante": melhor}
+
+
 def janela_validada_para(classe: str, hora_utc: int) -> bool:
     """Janela horária comprovada para o falso rompimento.
 

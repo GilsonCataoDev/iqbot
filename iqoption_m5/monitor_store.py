@@ -142,7 +142,8 @@ class MonitorEventStore:
 
     def desempenho_por_tipo(self, tipo: str, minimo: int = 50,
                             z: float = 1.96,
-                            somente_elegiveis: bool | None = None) -> dict:
+                            somente_elegiveis: bool | None = None,
+                            filtro=None, rotulo: str = "") -> dict:
         """Mede um setup pelo proprio historico e diz se ele se sustenta.
 
         Decide em R-multiplo, nao em taxa de acerto: no Monitor cada setup tem
@@ -173,6 +174,13 @@ class MonitorEventStore:
 
         O padrao ``None`` usa os elegiveis quando existem e cai para todos os
         eventos quando nenhum foi marcado.
+
+        ``filtro`` mede uma VARIANTE do setup: recebe o payload e diz se aquele
+        sinal passaria por um portao opcional, como exigir candle de corpo
+        forte. Serve para responder "vale a pena apertar este setup?" sem
+        duplicar evento nem criar tipo novo — a mesma amostra e reavaliada sob
+        a regra candidata. A definicao da variante fica em quem chama, porque
+        e conhecimento de estrategia e nao de armazenamento.
         """
         with self._conectar() as con:
             if somente_elegiveis is None:
@@ -212,6 +220,9 @@ class MonitorEventStore:
             if risco <= 0:
                 ignorados += 1
                 continue
+            if filtro is not None and not filtro(payload):
+                ignorados += 1
+                continue
             erres.append(abs(alvo - entrada) / risco)
             vitorias += desfecho == "win_tp1"
         total = len(erres)
@@ -219,7 +230,7 @@ class MonitorEventStore:
             return {"tipo": tipo, "n": 0, "ignorados": ignorados,
                     "promove": False, "motivo": "sem desfecho resolvido",
                     "escopo": "elegiveis" if somente_elegiveis
-                              else "todos_eventos"}
+                              else "todos_eventos", "variante": rotulo}
         erres.sort()
         meio = total // 2
         r_mediano = (erres[meio] if total % 2
@@ -252,6 +263,7 @@ class MonitorEventStore:
             "esperanca_inferior": round(esperanca_inferior, 3),
             "minimo": minimo, "promove": promove, "motivo": motivo,
             "escopo": "elegiveis" if somente_elegiveis else "todos_eventos",
+            "variante": rotulo,
         }
 
     def resumo(self, desde: datetime | None = None) -> dict:

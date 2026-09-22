@@ -17,6 +17,7 @@ from monitor_mercado import (
     plano_tp1_curto_forex, plano_orb_sessao,
     plano_bof_m30_m5, plano_varredura_liquidez, plano_confluencia_local, unidade_movimento, wilson_ci,
     candle_atual_para_grafico, sanitizar_candles_m15,
+    PORTOES_OPCIONAIS, portao_recomendado,
 )
 
 
@@ -1361,3 +1362,57 @@ def test_plano_ouro_fvg_sobretestado_bloqueia_sinal():
          patch("monitor_mercado._tendencia_h1_a_partir_m15", return_value="alta"):
         resultado = plano_ouro_movimento(df, atr, "XAUUSD")
     assert not resultado["sinal_tecnico"], "FVG visitado 3+ vezes deve bloquear sinal_tecnico"
+
+
+def _evt_portao(indice, tipo, desfecho, forte, *, tp1=103.0):
+    return {
+        "id": f"{tipo}-{indice}", "quando": f"2026-09-01T00:{indice % 60:02d}:00",
+        "ativo": "EURUSD", "tipo": tipo, "entrada_valida": True,
+        "estado_entrada": "x", "simulacao": {"desfecho": desfecho},
+        "alvos": {"entrada": 100.0, "sl": 99.0, "tp1": tp1},
+        "dossie": {"tags": ["vela_forte"] if forte else ["vela_fraca"]},
+    }
+
+
+def test_portao_nao_apertar_setup_que_ja_se_sustenta(tmp_path):
+    """Exigir mais de um setup aprovado so descartaria sinal bom."""
+    from iqoption_m5.monitor_store import MonitorEventStore
+    loja = MonitorEventStore(tmp_path / "m.sqlite3")
+    loja.salvar([_evt_portao(i, "bom", "win_tp1" if i % 2 == 0 else "loss_sl",
+                             i % 3 == 0) for i in range(60)])
+
+    r = portao_recomendado(loja, "bom", minimo=50)
+
+    assert r["base"]["promove"]
+    assert r["portao"] is None
+    assert "ja se sustenta" in r["motivo"]
+
+
+def test_portao_recomenda_quando_so_a_variante_se_sustenta(tmp_path):
+    from iqoption_m5.monitor_store import MonitorEventStore
+    loja = MonitorEventStore(tmp_path / "m.sqlite3")
+    # 60 fortes a 50% (R=3 passa) e 120 fracos a 5% (afundam o conjunto).
+    fortes = [_evt_portao(i, "apertavel", "win_tp1" if i % 2 == 0 else "loss_sl",
+                          True) for i in range(60)]
+    fracos = [_evt_portao(200 + i, "apertavel",
+                          "win_tp1" if i < 6 else "loss_sl", False)
+              for i in range(120)]
+    loja.salvar(fortes + fracos)
+
+    r = portao_recomendado(loja, "apertavel", minimo=50)
+
+    assert not r["base"]["promove"]
+    assert r["portao"] == "vela_forte"
+    assert r["variante"]["n"] == 60
+
+
+def test_portao_nao_inventa_quando_nenhuma_variante_passa(tmp_path):
+    from iqoption_m5.monitor_store import MonitorEventStore
+    loja = MonitorEventStore(tmp_path / "m.sqlite3")
+    loja.salvar([_evt_portao(i, "ruim", "loss_sl", i % 2 == 0)
+                 for i in range(120)])
+
+    r = portao_recomendado(loja, "ruim", minimo=50)
+
+    assert r["portao"] is None
+    assert "nenhuma variante" in r["motivo"]
