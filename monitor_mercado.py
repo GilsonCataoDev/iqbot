@@ -107,13 +107,15 @@ def adquirir_trava_monitor(porta: int = PORTA + 10_000) -> socket.socket:
 
 
 def janela_validada_para(classe: str, hora_utc: int) -> bool:
-    """Só devolve elegibilidade onde o falso rompimento foi medido.
+    """Janela horária comprovada para o falso rompimento.
 
-    Cripto foi avaliado 24/7. Ouro não deve receber, por semelhança, a janela
-    de Forex: por enquanto seus sinais ficam como estudo e o plano Fibo serve
-    apenas para leitura/registro.
+    Forex: edge medido em 21h UTC. 22h vivo mostrou WR<35%, mantido somente
+    enquanto a amostra viva cresce.
+    Crypto: restrito a 21h — live fora desse horário acumulou só losses
+    (09h, 16h, 18h, 19h UTC todos negativos).
+    Ouro: sem janela própria; fica em estudo via plano_ouro_movimento.
     """
-    return classe == "crypto" or (classe == "forex" and hora_utc in (21, 22))
+    return classe in ("forex", "crypto") and hora_utc == 21
 
 
 def unidade_movimento(ativo: str) -> tuple[float, str]:
@@ -587,6 +589,10 @@ def plano_ouro_movimento(df: pd.DataFrame, atr: pd.Series, ativo: str,
         return vazio
     try:
         m15, h1 = _tendencia_ema(df["Close"]), _tendencia_h1_a_partir_m15(df)
+        _ema_r = df["Close"].ewm(span=16, adjust=False).mean()
+        _ema_l = df["Close"].ewm(span=96, adjust=False).mean()
+        h4_trend = "alta" if float(_ema_r.iloc[-1]) > float(_ema_l.iloc[-1]) else "baixa"
+        h4_bullish = h4_trend == "alta"
         fvg = detectar_fvg_m15(df, atr)
         zonas = detectar_zonas_fvg_m15(df, atr)
         atr_atual = float(atr.reindex(df.index).iloc[-1])
@@ -603,6 +609,9 @@ def plano_ouro_movimento(df: pd.DataFrame, atr: pd.Series, ativo: str,
         regime = _regime_atr_xauusd(atr_pct, hora_utc)
 
         direcao = "buy" if m15 == "alta" and h1 == "alta" else "sell" if m15 == "baixa" and h1 == "baixa" else "neutro"
+        # ATH bull market: bloquear sell quando H4 está bullish
+        if h4_bullish and direcao == "sell":
+            direcao = "neutro"
         fvg_ok = bool(fvg.get("disponivel") and fvg.get("direcao") == direcao)
         zona_inf, zona_sup = fvg.get("zona_inf"), fvg.get("zona_sup")
         if fvg_ok:
@@ -659,6 +668,7 @@ def plano_ouro_movimento(df: pd.DataFrame, atr: pd.Series, ativo: str,
         sinal_confluente = bool(sinal_tecnico and dado_publicado and noticia_alinhada)
 
         checklist = [
+            {"nome": "H4 bullish (EMA16 > EMA96 no M15)", "ok": h4_bullish},
             {"nome": "Tendência H1 e M15 alinhadas", "ok": direcao != "neutro"},
             {"nome": "FVG M15 na direção da tendência", "ok": fvg_ok},
             {"nome": "FVG não sobretestado (≤ 1 visita prévia)", "ok": fvg_fresco},
@@ -750,6 +760,10 @@ def plano_ouro_movimento(df: pd.DataFrame, atr: pd.Series, ativo: str,
             "sinal_confluente": sinal_confluente,
             "sinal_estudo": sinal_tecnico,  # compatibilidade com código existente
             "direcao": direcao,
+            "h4": h4_trend,
+            "h4_trend": h4_trend,
+            "h4_bullish": h4_bullish,
+            "h1": h1,
             "estado": estado, "motivo": motivo,
             "fvg": fvg,
             "buy_zone": zonas["buy_zone"],
@@ -1826,29 +1840,36 @@ def plano_orb_sessao(df: pd.DataFrame, atr: pd.Series, ativo: str) -> dict:
         return base
 
 
-def decisao_entrada(acumulacao: bool, rompeu_piso: bool, janela_validada: bool) -> dict:
+def decisao_entrada(acumulacao: bool, rompeu_piso: bool, janela_validada: bool,
+                    h4_bullish: bool = True) -> dict:
     """Expõe as regras objetivas sem transformar contexto em sinal.
 
     O estado e a checklist são apresentados ao usuário e também gravados no
     histórico, para que fique claro por que um mesmo desenho foi só estudo ou
     uma entrada elegível.
+
+    h4_bullish: EMA16 > EMA96 no M15 (proxy 4h). Live mostrou que todos os
+    losses do falso rompimento são buy em tendência H4 baixista.
     """
     sinal = bool(acumulacao and rompeu_piso)
     checklist = [
         {"nome": "Acumulação: amplitude das 10 velas comprimida", "ok": bool(acumulacao)},
         {"nome": "Fechamento abaixo do piso das 10 velas", "ok": bool(rompeu_piso)},
-        {"nome": "Janela validada para o ativo", "ok": bool(janela_validada)},
+        {"nome": "H4 bullish — EMA16 > EMA96 (M15)", "ok": bool(h4_bullish)},
+        {"nome": "Janela validada para o ativo (21h UTC)", "ok": bool(janela_validada)},
     ]
-    if sinal and janela_validada:
+    if sinal and janela_validada and h4_bullish:
         return {
             "sinal": True, "entrada_valida": True, "estado_entrada": "ENTRADA VÁLIDA",
-            "motivo_entrada": "BUY: falso rompimento de baixa após acumulação, na janela testada.",
+            "motivo_entrada": "BUY: falso rompimento de baixa após acumulação, H4 bullish, na janela testada.",
             "checklist": checklist,
         }
     if sinal:
+        motivo = ("H4 baixista — aguardar alinhamento." if not h4_bullish
+                  else "Fora da janela testada (21h UTC); registrar, não executar.")
         return {
             "sinal": True, "entrada_valida": False, "estado_entrada": "ESTUDO — NÃO OPERAR",
-            "motivo_entrada": "O falso rompimento apareceu fora da janela testada; registrar, não executar.",
+            "motivo_entrada": motivo,
             "checklist": checklist,
         }
     return {
@@ -2625,6 +2646,15 @@ def loop(api, cfg, estado: Estado, calendario: CalendarioEconomico | None = None
     cfg_bof = replace(cfg, timeframe_segundos=TF_BOF)
     hist_bof: dict[str, pd.DataFrame] = {}
     ultimo_bucket_bof: dict[str, int] = {}
+    _ultimo_teste_conexao: float = 0.0
+
+    def _tentar_reconectar() -> None:
+        try:
+            if not api.check_connect():
+                print("[MONITOR] WebSocket caiu — reconectando...")
+                api.connect()
+        except Exception as _e:
+            print(f"[MONITOR] Falha na reconexão: {_e!r}")
 
     def receber_ia(ativo: str, parecer: dict) -> None:
         estado.atualizar_ia(ativo, parecer)
@@ -2654,6 +2684,10 @@ def loop(api, cfg, estado: Estado, calendario: CalendarioEconomico | None = None
         print("Sem historico."); return
 
     while True:
+        agora_loop = time.time()
+        if agora_loop - _ultimo_teste_conexao > 60.0:
+            _ultimo_teste_conexao = agora_loop
+            threading.Thread(target=_tentar_reconectar, daemon=True).start()
         if calendario is not None:
             calendario.atualizar()
         for a, base in list(hist.items()):
@@ -2782,7 +2816,8 @@ def loop(api, cfg, estado: Estado, calendario: CalendarioEconomico | None = None
                 # Forex só tem janela comprovada em 21-22 UTC; cripto foi
                 # estudado 24h. Ouro fica em estudo até ter amostra própria.
                 janela_validada = janela_validada_para(CLASSE[a], int(df.index[-1].hour))
-                leitura_entrada = decisao_entrada(acum, rompeu_piso, janela_validada)
+                _h4_bullish = tendencia_dia(dfr)["ema"] == "alta"
+                leitura_entrada = decisao_entrada(acum, rompeu_piso, janela_validada, _h4_bullish)
 
                 ia_anterior = estado.dados.get(a, {}).get("ia_groq")
                 ia_atual = ia_anterior if tp1_curto.get("qualificada") else {
@@ -2902,19 +2937,31 @@ def loop(api, cfg, estado: Estado, calendario: CalendarioEconomico | None = None
                         print(f"[TP1 CURTO — ESTUDO] {a} {tp1_curto['direcao'].upper()} "
                               f"@ {df.index[-1]} RR={tp1_curto['rr']}")
                 if ouro_movimento.get("sinal_estudo"):
+                    _hora_utc_ouro = int(pd.Timestamp(df.index[-1]).tz_localize("UTC").hour
+                                        if pd.Timestamp(df.index[-1]).tzinfo is None
+                                        else pd.Timestamp(df.index[-1]).hour)
+                    _london_ny = _hora_utc_ouro in range(13, 18)
+                    _h4_buy = (ouro_movimento.get("h4_bullish")
+                               and ouro_movimento.get("direcao") == "buy")
+                    _entrada_valida_ouro = _h4_buy and _london_ny
                     estudo_ouro = {
                         **estado.dados[a], "sinal": True,
-                        "direcao": ouro_movimento["direcao"], "entrada_valida": False,
-                        "estado_entrada": "OURO MOVIMENTO — ESTUDO",
+                        "direcao": ouro_movimento["direcao"],
+                        "entrada_valida": _entrada_valida_ouro,
+                        "estado_entrada": ("OURO MOVIMENTO — ENTRADA"
+                                           if _entrada_valida_ouro
+                                           else "OURO MOVIMENTO — ESTUDO"),
                         "motivo_entrada": ouro_movimento["motivo"],
                         "checklist": ouro_movimento["checklist"],
-                        "alvos": None, "alvos_estudo": ouro_movimento["alvos"],
+                        "alvos": ouro_movimento["alvos"] if _entrada_valida_ouro else None,
+                        "alvos_estudo": ouro_movimento["alvos"],
                         "horizonte_velas": 4, "horizonte_longo_velas": 8,
                         "ouro_movimento": ouro_movimento,
                     }
                     if estado.registrar_sinal(a, str(df.index[-1]), estudo_ouro,
                                               tipo="ouro_movimento_m15"):
-                        print(f"[OURO MOVIMENTO — ESTUDO] {a} {ouro_movimento['direcao'].upper()} "
+                        tag = "ENTRADA" if _entrada_valida_ouro else "ESTUDO"
+                        print(f"[OURO MOVIMENTO — {tag}] {a} {ouro_movimento['direcao'].upper()} "
                               f"@ {df.index[-1]} RR={ouro_movimento['rr']}")
                 if fluxo.get("sinal_estudo"):
                     estudo_fluxo = {
@@ -3778,12 +3825,20 @@ function renderOuroMovimento(){
     return;
   }
   const dir=o.direcao==='sell'?'VENDA':o.direcao==='buy'?'COMPRA':'—';
+  const horaUtc=new Date().getUTCHours();
+  const londonNy=horaUtc>=13&&horaUtc<18;
+  const h4Bull=o.h4_bullish===true;
+  const entradaHabilitada=h4Bull&&londonNy&&o.direcao==='buy';
+  const sessaoLabel=londonNy?'<span style="color:#4ade80;font-weight:700">▶ LONDON-NY ATIVA (compra habilitada se H4↑)</span>':'<span style="color:#94a3b8">⏸ Fora da janela London-NY (13h–17h UTC)</span>';
+  const estadoCls=entradaHabilitada?'go':o.sinal_estudo?'study':'wait';
   const agenda=noticias.length?`<div class="nota" style="margin-top:.55rem"><b>NOTÍCIAS USD HOJE</b>${noticias.map(n=>`<br>• ${FMT_HORA_BRT.format(new Date(Number(n.quando_ts)*1000))} · ${n.impacto} ${n.moeda} — ${n.titulo}<br><span style="color:#94a3b8">${n.actual!=null?'actual '+n.actual+' · previsto '+(n.forecast??'—'):'programada'} · ${n.uso}</span>`).join('')}</div>`:'<div class="nota" style="margin-top:.55rem">Sem notícia relevante do ativo no calendário de hoje.</div>';
+  const notaEntrada=entradaHabilitada?'<b style="color:#4ade80">ENTRADA HABILITADA</b> — H4 bullish + janela London-NY. Monitor registra e abre ordem se configurado.':'Estudo em sombra: o Monitor registra o resultado, mas não abre ordem.';
   el.innerHTML=`<div class="card ouro-card ${o.sinal_estudo?'okjan ok':'nojan'}">
-    <div style="display:flex;justify-content:space-between;align-items:center"><b>XAUUSD — ${dir}</b><span class="estado ${o.sinal_estudo?'study':'wait'}">${o.estado}</span></div>
+    <div style="display:flex;justify-content:space-between;align-items:center"><b>XAUUSD — ${dir}</b><span class="estado ${estadoCls}">${o.estado}</span></div>
+    <div style="margin:.35rem 0 .5rem;font-size:.8rem">${sessaoLabel}</div>
     ${checklist(o)}
-    <div class="alvos"><div><label>zona FVG</label><span class="fibo-zona">${o.zona_inf??'—'} — ${o.zona_sup??'—'}</span></div><div><label>corpo confirmação</label><span>${o.corpo_atr??'—'} ATR</span></div><div><label>entrada após fechamento</label><span>${a.entrada??'—'}</span></div><div><label>SL técnico</label><span class="dn">${a.sl??'—'}</span></div><div><label>TP1</label><span class="up">${a.tp1??'—'}</span></div></div>
-    <div class="nota">${o.motivo} Estudo em sombra: o Monitor registra o resultado, mas não abre ordem.</div>${agenda}
+    <div class="alvos"><div><label>tendência H4 / H1 / M15</label><span>${o.h4_bullish!=null?(o.h4_bullish?'↑ alta':'↓ baixa'):'—'} / ${o.h1||'—'} / ${o.direcao!=='neutro'?o.direcao:'—'}</span></div><div><label>zona FVG</label><span class="fibo-zona">${o.zona_inf??'—'} — ${o.zona_sup??'—'}</span></div><div><label>corpo confirmação</label><span>${o.corpo_atr??'—'} ATR</span></div><div><label>entrada após fechamento</label><span>${a.entrada??'—'}</span></div><div><label>SL técnico</label><span class="dn">${a.sl??'—'}</span></div><div><label>TP1</label><span class="up">${a.tp1??'—'}</span></div></div>
+    <div class="nota">${o.motivo} ${notaEntrada}</div>${agenda}
   </div>`;
 }
 
