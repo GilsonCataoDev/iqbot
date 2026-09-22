@@ -984,9 +984,14 @@ def configuracao_ema_laboratorio_practice(base: Configuracao | None = None) -> C
         # A campanha de re-teste separa os setups por ativo. Assim, inclusive
         # NZD recebe uma nova amostra sem uma estratégia bloquear a outra.
         ativos_somente_sombra=(),
-        # O M5 e M15 compartilham a mesma conta. Reserva global impede duas
-        # ordens do mesmo ativo (ou duas na mesma direção) em timeframes
-        # diferentes ao mesmo tempo.
+        # Reserva global: impede duas ordens no mesmo ativo ou duas na mesma
+        # direção ao mesmo tempo. A justificativa original era o M5 e o M15
+        # dividirem a conta, mas o M15 deixou de mandar ordem em 2026-09-11 —
+        # o que sustenta a trava hoje é só a correlação entre pares.
+        # Ela custa pouca amostra: desde o redesenho de 09-14, que deu um
+        # ativo exclusivo a cada setup, direcao_ja_exposta barrou 1 sinal
+        # (contra 200 na cesta antiga, que rodava EURUSD/GBPUSD/USDJPY
+        # juntos). Manter ligada é quase de graça; medir antes de mexer.
         bloquear_direcao_paralela=True,
         # O perfil-base vem do experimento M1, que usa uma faixa larga.
         # No Lab M5/M15 a campanha Fibo mede a zona clássica e mais seletiva.
