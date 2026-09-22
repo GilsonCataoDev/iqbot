@@ -12,11 +12,11 @@ REM
 REM Log: diario\supervisor.log
 REM Estado: python supervisor.py --status
 REM ============================================================
-if not exist ".env.bat" (
+if not exist "%~dp0.env.bat" (
     echo ERRO: .env.bat nao encontrado.
     exit /b 1
 )
-call .env.bat
+call "%~dp0.env.bat"
 echo.
 echo SUPERVISOR - vigiando monitor_binaria e monitor_mercado
 echo   painel binaria: http://127.0.0.1:8776/index.html

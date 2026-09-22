@@ -9,11 +9,11 @@ REM Meta: ~26000 candles M15 por par = ~12 meses de dados.
 REM Atual: EURUSD/GBPUSD/USDJPY já têm ~20000; os outros ~5000.
 REM ============================================================
 
-if not exist ".env.bat" (
+if not exist "%~dp0.env.bat" (
     echo ERRO: .env.bat nao encontrado. Crie com IQ_OPTION_EMAIL e IQ_OPTION_SENHA.
     exit /b 1
 )
-call .env.bat
+call "%~dp0.env.bat"
 
 echo.
 echo Baixando historico...

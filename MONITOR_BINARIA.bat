@@ -11,11 +11,11 @@ REM Meta: 250 trades para decidir se o WR real e ~56.0% ou ~54.2%.
 REM Painel: http://127.0.0.1:8776/index.html
 REM ============================================================
 
-if not exist ".env.bat" (
+if not exist "%~dp0.env.bat" (
     echo ERRO: .env.bat nao encontrado.
     exit /b 1
 )
-call .env.bat
+call "%~dp0.env.bat"
 
 echo.
 echo Forward test BINARIA (porta 8776)
