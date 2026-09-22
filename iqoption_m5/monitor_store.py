@@ -106,6 +106,120 @@ class MonitorEventStore:
                     atualizado_em=excluded.atualizado_em
             """, linhas)
 
+    def desempenho_por_tipo(self, tipo: str, minimo: int = 50,
+                            z: float = 1.96,
+                            somente_entradas: bool | None = None) -> dict:
+        """Mede um setup pelo proprio historico e diz se ele se sustenta.
+
+        Decide em R-multiplo, nao em taxa de acerto: no Monitor cada setup tem
+        geometria propria de alvo e stop, entao 40% com alvo de 1R perde e 20%
+        com alvo de 4R ganha. Comparar taxas entre setups seria somar coisas
+        diferentes.
+
+        So conta ``win_tp1`` e ``loss_sl``. Desfecho ambiguo, pendente ou nao
+        executado fica de fora da conta e volta em ``ignorados`` — resultado
+        desconhecido nunca vira perda.
+
+        O corte usa o limite INFERIOR do intervalo de Wilson, nao a taxa
+        observada. Uma amostra pequena com taxa boa tem intervalo largo e nao
+        passa, que e o comportamento desejado: promover exige evidencia, nao
+        sorte recente.
+
+        ``somente_entradas`` escolhe a populacao. Um setup ja promovido registra
+        tanto o que operaria quanto o que o proprio portao recusou — o falso
+        rompimento, por exemplo, grava sinais fora da janela das 21h que nunca
+        viram ordem. Medir os dois juntos rebaixa o setup pelo que ele ja
+        descarta de proposito: no historico de 2026-09-22 isso levava 54% em 50
+        entradas para 31,9% em 288 eventos. O padrao ``None`` resolve sozinho —
+        usa as entradas validas quando existem e cai para todos os eventos
+        quando o setup ainda esta em estudo e nunca marcou nenhuma.
+
+        A heuristica tem um limite conhecido: num setup em estudo, todo evento
+        tem ``entrada_valida`` falso, entao a medida inclui sinais que um portao
+        de horario ou contexto recusaria depois da promocao. Enquanto os setups
+        em estudo nao marcarem elegibilidade a parte, o numero deles e piso, nao
+        estimativa.
+        """
+        with self._conectar() as con:
+            if somente_entradas is None:
+                somente_entradas = bool(con.execute(
+                    "SELECT 1 FROM monitor_eventos"
+                    " WHERE tipo=? AND entrada_valida=1"
+                    " AND desfecho IN ('win_tp1','loss_sl') LIMIT 1",
+                    (tipo,),
+                ).fetchone())
+            consulta = ("SELECT desfecho, payload_json FROM monitor_eventos"
+                        " WHERE tipo=?")
+            if somente_entradas:
+                consulta += " AND entrada_valida=1"
+            linhas = con.execute(consulta, (tipo,)).fetchall()
+        erres: list[float] = []
+        vitorias = 0
+        ignorados = 0
+        for linha in linhas:
+            desfecho = linha["desfecho"]
+            if desfecho not in ("win_tp1", "loss_sl"):
+                ignorados += 1
+                continue
+            try:
+                payload = json.loads(linha["payload_json"] or "{}")
+            except json.JSONDecodeError:
+                ignorados += 1
+                continue
+            # Evento de estudo guarda a geometria em ``alvos_estudo``, porque
+            # ``alvos`` fica nulo justamente para nao parecer ordem executavel.
+            alvos = payload.get("alvos") or payload.get("alvos_estudo") or {}
+            entrada, stop, alvo = (alvos.get("entrada"), alvos.get("sl"),
+                                   alvos.get("tp1"))
+            if not all(isinstance(v, (int, float)) for v in (entrada, stop, alvo)):
+                ignorados += 1
+                continue
+            risco = abs(stop - entrada)
+            if risco <= 0:
+                ignorados += 1
+                continue
+            erres.append(abs(alvo - entrada) / risco)
+            vitorias += desfecho == "win_tp1"
+        total = len(erres)
+        if not total:
+            return {"tipo": tipo, "n": 0, "ignorados": ignorados,
+                    "promove": False, "motivo": "sem desfecho resolvido",
+                    "escopo": "entradas_validas" if somente_entradas
+                              else "todos_eventos"}
+        erres.sort()
+        meio = total // 2
+        r_mediano = (erres[meio] if total % 2
+                     else (erres[meio - 1] + erres[meio]) / 2)
+        taxa = vitorias / total
+        divisor = 1 + z * z / total
+        centro = (taxa + z * z / (2 * total)) / divisor
+        margem = z * ((taxa * (1 - taxa) / total
+                       + z * z / (4 * total * total)) ** 0.5) / divisor
+        taxa_inferior = max(0.0, centro - margem)
+        esperanca = taxa * r_mediano - (1 - taxa)
+        esperanca_inferior = taxa_inferior * r_mediano - (1 - taxa_inferior)
+        promove = total >= minimo and esperanca_inferior > 0
+        if promove:
+            motivo = (f"n={total}, esperanca minima {esperanca_inferior:+.2f}R "
+                      f"acima de zero")
+        elif total < minimo:
+            motivo = f"amostra insuficiente: {total} de {minimo}"
+        else:
+            motivo = (f"esperanca minima {esperanca_inferior:+.2f}R nao supera "
+                      f"zero (observada {esperanca:+.2f}R)")
+        return {
+            "tipo": tipo, "n": total, "vitorias": vitorias,
+            "ignorados": ignorados,
+            "taxa": round(100 * taxa, 1),
+            "taxa_inferior": round(100 * taxa_inferior, 1),
+            "r_mediano": round(r_mediano, 2),
+            "break_even": round(100 / (1 + r_mediano), 1),
+            "esperanca": round(esperanca, 3),
+            "esperanca_inferior": round(esperanca_inferior, 3),
+            "minimo": minimo, "promove": promove, "motivo": motivo,
+            "escopo": "entradas_validas" if somente_entradas else "todos_eventos",
+        }
+
     def resumo(self, desde: datetime | None = None) -> dict:
         """Resumo operacional sem misturar entradas com rastros de estudo.
 
