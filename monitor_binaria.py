@@ -53,8 +53,8 @@ FOREX = ["EURUSD", "GBPUSD", "USDJPY", "AUDUSD", "EURJPY", "USDCAD", "NZDUSD",
 # melhor da lista. Adicionam so ~4 sinais/dia.
 # NAO tratar isoladamente: USOUSD deu 60.08% mas e o melhor de 4 — selecionar
 # por isso e o mesmo data snooping que ja falhou no teste de selecao de pares.
-# XAUUSD e o unico dos 18 ativos com EV negativo (53.16%, BE 53.48%).
-COMMODITIES = ["XAUUSD", "XAGUSD", "UKOUSD", "USOUSD"]
+# XAUUSD excluido: EV negativo no backtest (53.16% < BE 53.48%).
+COMMODITIES = ["XAGUSD", "UKOUSD", "USOUSD"]
 
 # Crypto — out-of-sample em classe de ativo, e o melhor resultado dos tres
 # blocos (01/09/2026): combinado n=2307 n_ef=1554 WR=56.87% IC=[54.41%,59.33%].
@@ -77,6 +77,7 @@ INTERVALO_S = 20
 # Verificado por simulacao: nem n=600 decide em nenhum dos dois cenarios.
 META_TRADES = 2100
 JAN = 10
+SLIPPAGE_MAX_PIPS = 10   # entradas com slippage > 10p são descartadas (simulação de execução real)
 
 # Referencia do backtest, para comparar ao vivo
 BT_WR = 0.5603
@@ -354,6 +355,11 @@ def loop(api, cfg, estado: Estado, diario: Diario) -> None:
                     if cl == op:
                         pendentes.remove(p)
                         continue                      # empate: descarta (como no backtest)
+                    slippage = round((p["preco_deteccao"] - op) / M.pip(a), 2)
+                    if abs(slippage) > SLIPPAGE_MAX_PIPS:
+                        print(f"[SKIP] {a} slippage={slippage:+.1f}p > {SLIPPAGE_MAX_PIPS}p — descartado")
+                        pendentes.remove(p)
+                        continue
                     ganhou = cl > op                  # LONG
                     pay = float(p["payout_real"])
                     reg = {
@@ -364,7 +370,7 @@ def loop(api, cfg, estado: Estado, diario: Diario) -> None:
                         "preco_deteccao": p["preco_deteccao"],
                         "abertura_entrada": round(op, 5),
                         "fechamento_entrada": round(cl, 5),
-                        "slippage_pips": round((p["preco_deteccao"] - op) / M.pip(a), 2),
+                        "slippage_pips": slippage,
                         "payout_real": pay,
                         "resultado": "ganho" if ganhou else "perda",
                         "retorno_u": round(pay if ganhou else -1.0, 4),
@@ -389,6 +395,10 @@ def loop(api, cfg, estado: Estado, diario: Diario) -> None:
                     print(f"[SINAL] {a} ignorado: payout indisponivel")
                     continue
 
+                need = (1 - BT_WR) / BT_WR
+                if pay <= need:
+                    print(f"[SINAL] {a} ignorado: payout {pay:.3f} < min {need:.3f}")
+                    continue
                 preco = float(df["Close"].iloc[-1])
                 ts_ent = ts_sinal + pd.Timedelta(seconds=TF)
                 pendentes.append({
@@ -398,10 +408,8 @@ def loop(api, cfg, estado: Estado, diario: Diario) -> None:
                     "preco_deteccao": round(preco, 5),
                     "payout_real": pay,
                 })
-                need = (1 - BT_WR) / BT_WR
-                ok = "OK" if pay > need else "PAYOUT BAIXO"
                 print(f"[SINAL] {a} LONG @ {ts_sinal} | preco={preco:.5f} "
-                      f"payout={pay:.2f} (min {need:.3f}) {ok}")
+                      f"payout={pay:.2f} (min {need:.3f})")
 
             except Exception as e:
                 print(f"[{a}] erro: {e!r}")
