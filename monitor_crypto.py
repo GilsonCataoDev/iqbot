@@ -29,7 +29,7 @@ CRYPTO_ATIVOS_PADRAO = [
 ]
 CRYPTO_ATIVOS = [x.strip().upper() for x in __import__("os").getenv(
     "CRYPTO_ATIVOS", ",".join(CRYPTO_ATIVOS_PADRAO)).split(",") if x.strip()]
-PORTA_CRYPTO = 8776
+PORTA_CRYPTO = 8779
 _NEWS_CACHE = {"at": 0.0, "items": []}
 
 def noticias_crypto(ativo: str) -> dict:
