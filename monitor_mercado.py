@@ -2889,6 +2889,26 @@ def loop(api, cfg, estado: Estado, calendario: CalendarioEconomico | None = None
         except Exception as _e:
             print(f"[MONITOR] Falha na reconexão: {_e!r}")
 
+    def _baixar_com_timeout(ativo: str, n: int, timeout: float = 15.0) -> pd.DataFrame | None:
+        """Wraps baixar_historico em thread com timeout para evitar travar o loop."""
+        result: list = [None]
+        exc: list = [None]
+
+        def _run() -> None:
+            try:
+                result[0] = backtest.baixar_historico(api, cfg, ativo, n)
+            except Exception as e:
+                exc[0] = e
+
+        t = threading.Thread(target=_run, daemon=True)
+        t.start()
+        t.join(timeout)
+        if t.is_alive():
+            raise TimeoutError(f"Timeout ({timeout:.0f}s) baixando {ativo}")
+        if exc[0] is not None:
+            raise exc[0]
+        return result[0]
+
     def receber_ia(ativo: str, parecer: dict) -> None:
         estado.atualizar_ia(ativo, parecer)
         estado.salvar()
@@ -2925,7 +2945,7 @@ def loop(api, cfg, estado: Estado, calendario: CalendarioEconomico | None = None
             calendario.atualizar()
         for a, base in list(hist.items()):
             try:
-                novo = backtest.baixar_historico(api, cfg, a, 60)
+                novo = _baixar_com_timeout(a, 60)
                 if novo is None or novo.empty:
                     continue
                 novo = sanitizar_candles_m15(novo)
