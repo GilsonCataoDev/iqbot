@@ -797,7 +797,11 @@ class MercadoIQ:
         # o filtro de status em _extrair_lucro_historico nao reconhecer o campo
         # exato que a IQ usa pra "ainda aberta" — resultado: grava win/loss que
         # ainda pode reverter nos segundos finais do candle.
-        espera_inicial = minutos * 60 + 5
+        # +300s: a IQ arredonda o vencimento para o proximo marco de 5 min a
+        # partir de (envio + minutos), o que pode adicionar ate ~4:59 de espera
+        # extra. Sem essa folga, consultamos antes da expiracao real e pegamos
+        # pnl_net provisorio — o que registrou WIN numa opcao que expirou LOSS.
+        espera_inicial = minutos * 60 + 300 + 5
         time.sleep(espera_inicial)
         limite = time.monotonic() + 600
         while time.monotonic() < limite:
