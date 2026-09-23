@@ -163,19 +163,30 @@ def _stats_simulacoes(banco: Path) -> list[dict]:
     return resultado
 
 
+MOTIVOS_ESTRUTURAIS = {
+    # Rastro/ativo estruturalmente em sombra — não são filtros de qualidade.
+    # Incluir esses motivos na análise de filtros gera falsos AJUSTAR_FILTRO.
+    "rastro_sombra", "ativo_candidato_sombra",
+    # Rótulos legados de versões anteriores que significavam "ativo pausado":
+    "nzd_ema_pausada", "nzd_v1_validacao",
+}
+
+
 def _stats_filtros(banco: Path) -> list[dict]:
-    """WR das simulações geradas por cada motivo de bloqueio."""
-    rows = _query(banco, """
+    """WR das simulações por motivo de bloqueio — apenas filtros de qualidade."""
+    placeholders = ",".join("?" * len(MOTIVOS_ESTRUTURAIS))
+    rows = _query(banco, f"""
         SELECT motivo,
                COUNT(*) as n,
                SUM(CASE WHEN resultado='win' THEN 1 ELSE 0 END) as w,
                SUM(CASE WHEN resultado='loss' THEN 1 ELSE 0 END) as l
         FROM simulacoes
         WHERE resultado IN ('win','loss') AND motivo IS NOT NULL
+          AND motivo NOT IN ({placeholders})
         GROUP BY motivo
         HAVING n >= 10
         ORDER BY n DESC
-    """)
+    """, tuple(MOTIVOS_ESTRUTURAIS))
     resultado = []
     for motivo, n, w, l in rows:
         ic_lo, ic_hi = _ic95(w, n)
@@ -261,8 +272,10 @@ Regras:
 - Break-even é {be}% (payout 85%). Só recomende promover ao real se IC95 inferior > {be}%.
 - n < 80 é insuficiente para qualquer decisão definitiva — indique como MONITORAR.
 - Considere tendência recente (últimas 20) vs histórico para identificar mudanças.
-- Filtros com WR > break-even são prejudiciais (estão bloqueando entradas lucrativas).
-- Filtros com WR < 50% são benéficos (estão bloqueando entradas ruins).
+- A seção "Filtros de bloqueio" contém APENAS filtros de qualidade (ex: noticia_high, put_horario_fraco).
+  Motivos estruturais como rastro_sombra e ativo_candidato_sombra já foram removidos — não aparecem lá.
+- Filtros com WR > break-even ({be}%) são prejudiciais (bloqueando entradas lucrativas → AJUSTAR_FILTRO).
+- Filtros com WR < break-even ({be}%) são benéficos (bloqueando entradas ruins → MANTER ou elogiar).
 - Seja específico: setup, ativo, horário, direção quando relevante.
 
 Retorne APENAS o JSON abaixo, sem texto extra:
@@ -301,7 +314,7 @@ def _compactar(dados: dict) -> str:
             f"|{e['wr_pct']}|{e['ic95_lo']}|{e['ic95_hi']}|{e['periodo']}"
         )
 
-    linhas.append("\n## Filtros de bloqueio (motivo|n|WR%|IC95lo) — abaixo de 50% = filtro bom")
+    linhas.append(f"\n## Filtros de qualidade (motivo|n|WR%|IC95lo) — somente regras ativas; motivos estruturais excluídos. Abaixo de {BREAK_EVEN}% = filtro bom")
     for e in dados["practice"]["filtros"][:12]:
         linhas.append(f"{e['motivo']}|{e['n']}|{e['wr_pct']}|{e['ic95_lo']}")
 
