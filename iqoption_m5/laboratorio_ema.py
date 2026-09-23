@@ -203,7 +203,10 @@ def _rastros(base: Configuracao) -> list[RastroEma]:
                     # M15 passa a ser só observação: a amostra anterior foi
                     # negativa. No M5, os rastros do re-teste têm ativos
                     # exclusivos e portanto geram dados comparáveis.
-                    somente_sombra=not executavel_reteste,
+                    somente_sombra=(
+                        not executavel_reteste
+                        or (base.confirmo_conta_real and setup != "ema920_pullback")
+                    ),
                 )
             )
     # NZD: WR 45.8% (n=24) abaixo do break-even — sombra de acompanhamento.
@@ -277,7 +280,7 @@ def _rastros(base: Configuracao) -> list[RastroEma]:
                 expiracao_por_setup={"fibo_mtf_confirmado": 15},
             ),
             intravela=False,
-            somente_sombra=False,
+            somente_sombra=base.confirmo_conta_real,
         )
     )
     # GBPUSD e USDJPY: sombra de acompanhamento enquanto WR abaixo do break-even.
@@ -306,7 +309,7 @@ def _rastros(base: Configuracao) -> list[RastroEma]:
                 expiracao_por_setup={"breakout_reteste": 60},
             ),
             intravela=False,
-            somente_sombra=False,
+            somente_sombra=base.confirmo_conta_real,
         )
     )
     return saida
