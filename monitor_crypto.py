@@ -23,6 +23,7 @@ from iqoption_m5.grafico import GraficoM5
 from iqoption_m5.mercado_iq import MercadoIQ
 
 CRYPTO_ATIVOS_PADRAO = [
+    "XAUUSD",
     "BTCUSD", "ETHUSD", "LTCUSD", "XRPUSD", "BCHUSD", "EOSUSD", "ETCUSD",
     "DASHUSD", "TRXUSD", "ZECUSD", "ADAUSD", "SOLUSD", "DOTUSD", "LINKUSD",
     "UNIUSD", "DOGEUSD",
