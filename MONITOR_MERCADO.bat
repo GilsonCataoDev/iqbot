@@ -17,4 +17,4 @@ echo Monitor Mercado - porta 8777
 echo http://127.0.0.1:8777/index.html
 echo Ctrl+C para parar.
 echo.
-python monitor_mercado.py
+"%LOCALAPPDATA%\Programs\Python\Python312\python.exe" monitor_mercado.py

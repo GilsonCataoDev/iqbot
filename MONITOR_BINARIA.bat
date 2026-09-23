@@ -24,4 +24,4 @@ echo Modo: registro em papel (nenhuma ordem enviada)
 echo Ctrl+C para parar. O CSV acumula entre execucoes.
 echo.
 
-python monitor_binaria.py
+"%LOCALAPPDATA%\Programs\Python\Python312\python.exe" monitor_binaria.py
