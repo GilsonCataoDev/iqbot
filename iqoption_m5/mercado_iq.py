@@ -583,6 +583,30 @@ class MercadoIQ:
                 if buffer is None or len(buffer) < 3:
                     raise MercadoIndisponivel(f"Sem candles suficientes tf={tf}s para {ativo}.")
                 buffer_local = buffer.copy()
+            ultimo_stream_extra = max((int(item["from"]) for item in linhas), default=0)
+            stream_extra_atrasado = (
+                self._mercado_aberto.get(ativo, False)
+                and (not ultimo_stream_extra or timestamp_servidor - ultimo_stream_extra > tf * 2)
+            )
+            if stream_extra_atrasado:
+                agora_mono = time.monotonic()
+                fallbacks_extras = getattr(self, "_ultimo_fallback_extras", {})
+                self._ultimo_fallback_extras = fallbacks_extras
+                ult_fb = fallbacks_extras.get(chave, float("-inf"))
+                if agora_mono - ult_fb >= 5.0:
+                    fallbacks_extras[chave] = agora_mono
+                    try:
+                        direto = self._candles_para_df(
+                            self._buscar_com_timeout(ativo, tf, limite)
+                        )
+                        with self._lock_buffers:
+                            anterior = self._buffers_extras.get(chave)
+                            comb = pd.concat([anterior, direto]) if anterior is not None else direto
+                            comb = comb[~comb.index.duplicated(keep="last")]
+                            self._buffers_extras[chave] = comb.sort_index().tail(limite)
+                            buffer_local = self._buffers_extras[chave].copy()
+                    except Exception as erro_fb:
+                        print(f" [mercado] {ativo} tf={tf}s: stream atrasado; fallback falhou ({erro_fb})")
             if self._mercado_aberto.get(ativo, False):
                 ultimo = pd.Timestamp(buffer_local.index[-1])
                 ultimo_epoch = int(ultimo.tz_localize("UTC").timestamp()) if ultimo.tzinfo is None else int(ultimo.timestamp())
