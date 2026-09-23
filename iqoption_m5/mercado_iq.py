@@ -811,7 +811,7 @@ class MercadoIQ:
                         fechamento = float(buffer.iloc[posicao]["Close"])
                         # Compara fechamento vs preco_entrada (resultado da opção binária),
                         # não vs abertura do candle (que pode diferir do preço de entrada).
-                        if abs(fechamento - preco_entrada) < 1e-8:
+                        if abs(fechamento - preco_entrada) < 1e-5:
                             return "equal"
                         venceu = (fechamento > preco_entrada) if direcao == "call" else (fechamento < preco_entrada)
                         print(f" [DIAG-RES] {ativo}: expiracao={alvo}, entrada={preco_entrada:.5f}, "

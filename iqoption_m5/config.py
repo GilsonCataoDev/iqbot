@@ -1046,6 +1046,11 @@ def configuracao_ema_laboratorio_real(base: Configuracao | None = None) -> Confi
         pullback_fib_max=real.pullback_fib_max,
         sufixo_banco="ema_laboratorio_real",
         porta_grafico=8784,
+        # Conta real: usa resultado oficial da IQ Option, não estimativa por candle.
+        # A estimativa usa o Close do candle de sinal como preço de entrada, mas a
+        # IQ Option aceita a ordem no preço live (pode diferir por alguns pips) —
+        # isso gera wins/losses divergentes entre banco e plataforma.
+        verificar_resultado_por_candle=False,
     )
 
 

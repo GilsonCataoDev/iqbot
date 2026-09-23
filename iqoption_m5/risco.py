@@ -252,9 +252,10 @@ class GerenciadorRisco:
                 if lucro > 0:
                     self._perdas_consecutivas = 0
                     self._wins_consecutivos += 1
-                else:
+                elif lucro < 0:
                     self._perdas_consecutivas += 1
                     self._wins_consecutivos = 0
+                # lucro == 0.0 (empate/equal): streaks não se alteram
                 # Atualiza pico de banca para drawdown percentual
                 banca_atual = self.config.banca_inicial + self._lucro_total
                 if banca_atual > self._banca_pico:
