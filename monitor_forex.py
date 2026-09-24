@@ -347,7 +347,7 @@ class AnalistaGemini:
                  chave_groq: str | None = None):
         self._chave = chave if chave is not None else os.getenv("GEMINI_API_KEY", "").strip()
         self._chave_groq = chave_groq if chave_groq is not None else os.getenv("GROQ_API_KEY", "").strip()
-        self._modelo_groq = os.getenv("GROQ_MODEL", "llama-3.3-70b-versatile").strip() or "llama-3.3-70b-versatile"
+        self._modelo_groq = os.getenv("GROQ_MODEL", "openai/gpt-oss-120b").strip() or "openai/gpt-oss-120b"
         self._intervalo_s = intervalo_s
         self._ultima: dict[str, float] = {}
         self._contexto_noticia: dict[str, str] = {}

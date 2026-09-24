@@ -17,7 +17,7 @@ import pandas as pd
 import requests as _req
 
 _URL = "https://api.groq.com/openai/v1/chat/completions"
-_MODELO = os.getenv("GROQ_MODEL", "llama-3.3-70b-versatile").strip() or "llama-3.3-70b-versatile"
+_MODELO = os.getenv("GROQ_MODEL", "openai/gpt-oss-120b").strip() or "openai/gpt-oss-120b"
 _TIMEOUT = 10.0
 _MAX_TOKENS = 120
 

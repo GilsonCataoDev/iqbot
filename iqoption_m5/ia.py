@@ -184,7 +184,7 @@ def _parsear_resposta(conteudo: str) -> ParecerIA | None:
         return ParecerIA(texto=conteudo[:200], confianca="baixa", direcao_sugerida=None)
 
 
-MODELO_SEGUNDA_OPINIAO = "llama-3.3-70b-versatile"
+MODELO_SEGUNDA_OPINIAO = os.getenv("GROQ_MODEL", "openai/gpt-oss-120b") or "openai/gpt-oss-120b"
 
 
 def _montar_prompt_segunda_opiniao(alerta: dict) -> str:
