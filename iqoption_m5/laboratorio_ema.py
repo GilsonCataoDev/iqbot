@@ -708,16 +708,23 @@ def _motivos(decisao) -> str:
     return "; ".join(partes) or "critérios do setup atendidos"
 
 
-def _alvo_sombra(snapshot: SnapshotMercado, rastro: RastroEma) -> pd.Timestamp:
-    """Candle cujo fechamento equivale ao vencimento simulado da ordem."""
-    inicio = pd.Timestamp(snapshot.candles.index[-1])
+def _alvo_sombra(
+    candle_hora_sinal: pd.Timestamp,
+    rastro: RastroEma,
+    snapshot: SnapshotMercado,
+) -> pd.Timestamp:
+    """Candle cujo fechamento equivale ao vencimento simulado da ordem.
+
+    Âncora no candle fechado do sinal, não no snapshot: quando o stream
+    chega defasado, snapshot.candles.index[-1] pode já estar fechado e
+    alvo = index[-1] + 0 resolveria na iteração seguinte (prematuramente).
+    Intravela mantém index[-1] porque a entrada e o vencimento são na
+    própria vela em formação.
+    """
     if rastro.intravela:
-        return inicio
-    duracao = max(
-        rastro.config.timeframe_segundos,
-        rastro.config.expiracao_minutos * 60,
-    )
-    return inicio + pd.Timedelta(seconds=duracao - rastro.config.timeframe_segundos)
+        return pd.Timestamp(snapshot.candles.index[-1])
+    expiracao_s = rastro.config.expiracao_minutos * 60
+    return candle_hora_sinal + pd.Timedelta(seconds=expiracao_s)
 
 
 def _registrar_sombra(
@@ -731,7 +738,7 @@ def _registrar_sombra(
         ativo=decisao.ativo,
         direcao=decisao.direcao,
         setup=rastro.rotulo_sombra or decisao.detalhes.get("setup", decisao.motivo),
-        candle_hora=_alvo_sombra(snapshot, rastro),
+        candle_hora=_alvo_sombra(decisao.candle_hora, rastro, snapshot),
         preco_entrada=decisao.preco,
         payout=float(snapshot.payout) if snapshot.payout is not None else 0.85,
         motivo=motivo,

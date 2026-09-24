@@ -421,14 +421,16 @@ def test_sombra_usa_fechamento_equivalente_a_expiracao_do_rastro():
     )
     m5_intravela = next(r for r in rastros if r.config.ema921_rsi_intravela_ativo and r.config.timeframe_segundos == 300)
     inicio = pd.Timestamp("2026-09-01 12:00:00")
+    # candle_hora_sinal é a vela fechada do sinal (5 min antes do formando).
+    sinal = inicio - pd.Timedelta(seconds=300)
     snapshot = SnapshotMercado(
         "NZDUSD", pd.DataFrame({"Close": [0.59]}, index=[inicio]), 0.85, True, int(inicio.timestamp())
     )
 
-    # M5 com expiração 15min compara o fechamento da terceira vela M5 (12:10).
-    assert _alvo_sombra(snapshot, m5_fechado) == pd.Timestamp("2026-09-01 12:10:00")
-    # Toque intravela vence no fechamento da própria vela.
-    assert _alvo_sombra(snapshot, m5_intravela) == inicio
+    # M5 com expiração 15min: sinal + 15min = 11:55 + 15min = 12:10.
+    assert _alvo_sombra(sinal, m5_fechado, snapshot) == pd.Timestamp("2026-09-01 12:10:00")
+    # Toque intravela vence no fechamento da própria vela (formando = 12:00).
+    assert _alvo_sombra(sinal, m5_intravela, snapshot) == inicio
 
 
 def test_laboratorio_pede_expiracao_configurada_para_sinais_fechados():
