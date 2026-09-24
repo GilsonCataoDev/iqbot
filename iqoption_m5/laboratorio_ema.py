@@ -299,6 +299,23 @@ def _rastros(base: Configuracao) -> list[RastroEma]:
             somente_sombra=True,
         )
     )
+    # Fibo sombra nos ativos restantes da cesta (AUDCAD, NZDUSD, AUDUSD,
+    # USDCAD, EURJPY, EURCHF): coleta amostra paralela para avaliar se o
+    # setup tem poder discriminante nesses pares antes de qualquer promoção.
+    saida.append(
+        RastroEma(
+            nome="M5 | Fibo M15 50-61,8 cesta completa (sombra)",
+            config=replace(
+                _config_rastro(base, 300, "fibo_mtf_confirmado"),
+                ativos=("AUDCAD", "NZDUSD", "AUDUSD", "USDCAD", "EURJPY", "EURCHF"),
+                entrada_max_segundos_no_candle=45,
+                expiracao_minutos=15,
+                expiracao_por_setup={"fibo_mtf_confirmado": 15},
+            ),
+            intravela=False,
+            somente_sombra=True,
+        )
+    )
     # H1 tem campanha própria, ativo exclusivo e uma única regra. A ordem só
     # existe depois de rompimento, reteste do nível e vela de confirmação.
     saida.append(
@@ -325,6 +342,8 @@ def _motivo_sombra(
     direcao: str | None = None,
     hora_utc: int | None = None,
     leitura_m5_ausente: bool = False,
+    ema_sep: float | None = None,
+    adx: float | None = None,
 ) -> str | None:
     """Por que este sinal observa em vez de mandar ordem. None = manda.
 
@@ -335,6 +354,13 @@ def _motivo_sombra(
     """
     if ativo in base.ativos_somente_sombra:
         return "ativo_candidato_sombra"
+    # Mercado lateral: EMAs coladas (ema_sep<0.5) OU tendência fraca (ADX<20).
+    # Avg wins ema_sep=1.45 | Avg losses ema_sep=0.66 (n=25); ADX<20 = sem trend.
+    if setup == "ema920_pullback":
+        lateral_sep = ema_sep is not None and ema_sep < 0.5
+        lateral_adx = adx is not None and adx < 20.0
+        if lateral_sep or lateral_adx:
+            return "ema_sep_lateral"
     # Um rastro de sombra não manda ordem por definição — o motivo é esse, e
     # não um filtro de qualidade. Os rótulos anteriores (m5_h1_validacao,
     # m15_h1_validacao, fibo_sr_validacao, nzd_v1_validacao) afirmavam
@@ -1032,11 +1058,20 @@ def _executar_laboratorio_ema(base: Configuracao) -> None:
                                 ativo, agora_utc, antes=30, depois=30
                             )
                         )
+                        _aud = decisao.detalhes.get("auditoria") or {}
+                        _candle_fechado_idx = len(indicadores) - 2
+                        try:
+                            _adx_val = float(indicadores["ADX"].iloc[_candle_fechado_idx])
+                            _adx_val = None if not (_adx_val == _adx_val) else _adx_val  # NaN guard
+                        except (KeyError, IndexError, TypeError, ValueError):
+                            _adx_val = None
                         motivo_sombra = _motivo_sombra(
                             base, rastro, setup, ativo, noticia_high,
                             direcao=decisao.direcao,
                             hora_utc=agora_utc.hour,
                             leitura_m5_ausente=decisao.detalhes.get("leitura_m5") is None,
+                            ema_sep=_aud.get("ema_separacao_atr"),
+                            adx=_adx_val,
                         )
                         autorizacao = (
                             Autorizacao(False, motivo_sombra)
