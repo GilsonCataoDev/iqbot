@@ -111,6 +111,8 @@ class Configuracao:
     # Hipótese MTF do laboratório: contexto de impulso M15 + confirmação M5.
     # Não é reutilizada pelas estratégias genéricas; o Lab a avalia isolada.
     fibo_mtf_confirmado_ativo: bool = False
+    fibo_m15_zona382_ativo: bool = False   # zona ampliada 38,2%–61,8% (sombra)
+    fibo_m5_puro_ativo: bool = False        # perna M5 sem confluência M15 (sombra)
     reversao_candle_ativo: bool = True     # inclui reversao_confluencia
     reversao_bollinger_rsi_ativo: bool = True  # retorno à banda de Bollinger com RSI extremo
 

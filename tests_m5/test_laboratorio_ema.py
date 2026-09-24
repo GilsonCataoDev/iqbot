@@ -23,7 +23,7 @@ def test_laboratorio_tem_rastros_m5_e_m15_e_nzd_em_sombra():
     config = configuracao_ema_laboratorio_practice()
     rastros = _rastros(config)
 
-    assert len(rastros) == 18
+    assert len(rastros) == 20
     assert config.ativos == (
         "EURUSD", "AUDCAD", "NZDUSD", "GBPUSD", "USDJPY", "AUDUSD", "USDCAD", "EURJPY", "EURCHF",
     )

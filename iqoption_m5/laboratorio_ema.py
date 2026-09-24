@@ -133,6 +133,8 @@ def _config_rastro(base: Configuracao, timeframe: int, setup: str) -> Configurac
         ema921_rsi_intravela_ativo=setup == "ema921_rsi_intravela",
         fibo_sr_retracao_ativo=setup == "fibo_sr_retracao",
         fibo_mtf_confirmado_ativo=setup == "fibo_mtf_confirmado",
+        fibo_m15_zona382_ativo=setup == "fibo_m15_zona382",
+        fibo_m5_puro_ativo=setup == "fibo_m5_puro",
         nzd_trend_pullback_ativo=setup == "nzd_trend_pullback_v1",
         breakout_reteste_ativo=setup == "breakout_reteste",
         # M15 só segue a favor do contexto H1. O filtro é medido em sombra
@@ -337,6 +339,40 @@ def _rastros(base: Configuracao) -> list[RastroEma]:
             somente_sombra=True,
         )
     )
+    # Fibo zona ampliada (38,2%–61,8%): mesma lógica M15 mas aceita retrações
+    # menos profundas. Roda em sombra para medir se 38,2% tem taxa similar
+    # à zona original — se sim, o setup principal pode incorporar.
+    saida.append(
+        RastroEma(
+            nome="M5 | Fibo M15 38-61,8 zona ampliada (sombra)",
+            config=replace(
+                _config_rastro(base, 300, "fibo_m15_zona382"),
+                ativos=base.ativos,
+                entrada_max_segundos_no_candle=45,
+                expiracao_minutos=15,
+                expiracao_por_setup={"fibo_m15_zona382": 15},
+            ),
+            intravela=False,
+            somente_sombra=True,
+        )
+    )
+    # Fibo M5 puro: perna identificada no próprio M5 sem exigir confluência M15.
+    # Gera 3-5x mais sinais que o fibo_mtf_confirmado. Sombra para medir taxa
+    # antes de qualquer promoção. Expiração de 5 min (1 candle M5).
+    saida.append(
+        RastroEma(
+            nome="M5 | Fibo puro M5 50-61,8 (sombra)",
+            config=replace(
+                _config_rastro(base, 300, "fibo_m5_puro"),
+                ativos=base.ativos,
+                entrada_max_segundos_no_candle=45,
+                expiracao_minutos=5,
+                expiracao_por_setup={"fibo_m5_puro": 5},
+            ),
+            intravela=False,
+            somente_sombra=True,
+        )
+    )
     # H1 tem campanha própria, ativo exclusivo e uma única regra. A ordem só
     # existe depois de rompimento, reteste do nível e vela de confirmação.
     saida.append(
@@ -444,6 +480,8 @@ def _setup_do_rastro(config: Configuracao) -> str:
             ("ema921_rsi_intravela", config.ema921_rsi_intravela_ativo),
             ("fibo_sr_retracao", config.fibo_sr_retracao_ativo),
             ("fibo_mtf_confirmado", config.fibo_mtf_confirmado_ativo),
+            ("fibo_m15_zona382", config.fibo_m15_zona382_ativo),
+            ("fibo_m5_puro", config.fibo_m5_puro_ativo),
             ("nzd_trend_pullback_v1", config.nzd_trend_pullback_ativo),
             ("breakout_reteste", config.breakout_reteste_ativo),
         ) if ligado
@@ -513,6 +551,137 @@ def _avaliar_fibo_m15_confirmado(
                 "Retração na zona Fibo 50–61,8%",
                 f"Confirmação M5 por rejeição/engolfo → {direcao.upper()}",
                 "Entrada na próxima M5; expiração de 15 minutos",
+            ],
+        },
+    )
+
+
+def _avaliar_fibo_m15_zona382(
+    ativo: str, candles_m5: pd.DataFrame, candles_m15: pd.DataFrame
+) -> Decisao | None:
+    """Zona ampliada: 38,2%–61,8%. Mesmo impulso M15, mais candidatos.
+
+    Idêntico ao fibo_mtf_confirmado mas a entrada é válida em toda a faixa
+    38,2%–61,8% em vez de só 50%–61,8%. Roda em sombra para medir se o
+    nível 38,2% tem taxa comparável aos níveis mais profundos.
+    """
+    if len(candles_m5) < 3 or len(candles_m15) < 30:
+        return None
+    sinal_m5 = candles_m5.iloc[-2]
+    contexto = candles_m15.loc[candles_m15.index < candles_m5.index[-2]].copy()
+    if len(contexto) < 30:
+        return None
+    contexto["ema9"] = contexto.Close.ewm(span=9, adjust=False).mean()
+    contexto["ema21"] = contexto.Close.ewm(span=21, adjust=False).mean()
+    janela = contexto.iloc[-5:]
+    faixa_media = (contexto.High - contexto.Low).rolling(14).mean().iloc[-1]
+    topo, fundo = float(janela.High.max()), float(janela.Low.min())
+    amplitude = topo - fundo
+    if not pd.notna(faixa_media) or faixa_media <= 0 or amplitude < 1.5 * float(faixa_media):
+        return None
+    ultimo = janela.iloc[-1]
+    if ultimo.ema9 > ultimo.ema21 and ultimo.Close > janela.Close.iloc[0]:
+        direcao = "call"
+        fib382 = topo - 0.382 * amplitude
+        fib50 = topo - 0.50 * amplitude
+        fib618 = topo - 0.618 * amplitude
+        na_zona = fib618 <= float(sinal_m5.Close) <= fib382
+    elif ultimo.ema9 < ultimo.ema21 and ultimo.Close < janela.Close.iloc[0]:
+        direcao = "put"
+        fib382 = fundo + 0.382 * amplitude
+        fib50 = fundo + 0.50 * amplitude
+        fib618 = fundo + 0.618 * amplitude
+        na_zona = fib382 <= float(sinal_m5.Close) <= fib618
+    else:
+        return None
+    if not na_zona or not _confirmacao_fibo_m5(sinal_m5, candles_m5.iloc[-3], direcao):
+        return None
+    return Decisao(
+        ativo=ativo, direcao=direcao, preco=float(sinal_m5.Close),
+        candle_hora=pd.Timestamp(candles_m5.index[-2]), motivo="fibo_m15_zona382",
+        detalhes={
+            "setup": "fibo_m15_zona382", "fibo_382": round(fib382, 6),
+            "fibo_50": round(fib50, 6), "fibo_618": round(fib618, 6),
+            "m15_topo": round(topo, 6), "m15_fundo": round(fundo, 6),
+            "razao": [
+                "Impulso M15 alinhado com EMA 9/21",
+                "Retração na zona Fibo 38,2–61,8%",
+                f"Confirmação M5 por rejeição/engolfo → {direcao.upper()}",
+                "Entrada na próxima M5; expiração de 15 minutos",
+            ],
+        },
+    )
+
+
+def _avaliar_fibo_m5_puro(
+    ativo: str, candles_m5: pd.DataFrame
+) -> Decisao | None:
+    """Fibo M5 puro: perna identificada no M5 sem exigir confluência M15.
+
+    Mais sinais que fibo_mtf_confirmado porque não depende de swing M15.
+    Filtros: EMA9/20 direcional, perna >= 1,5x ATR14, zona 50–61,8%,
+    confirmação por rejeição ou engolfo no candle de sinal.
+    """
+    if len(candles_m5) < 35:
+        return None
+    sinal = candles_m5.iloc[-2]
+    anterior = candles_m5.iloc[-3]
+    df = candles_m5.iloc[:-1].copy()
+    df["ema9"] = df.Close.ewm(span=9, adjust=False).mean()
+    df["ema20"] = df.Close.ewm(span=20, adjust=False).mean()
+    faixa_media = (df.High - df.Low).rolling(14).mean().iloc[-2]
+    if not pd.notna(faixa_media) or faixa_media <= 0:
+        return None
+    ema9_v = float(df["ema9"].iloc[-2])
+    ema20_v = float(df["ema20"].iloc[-2])
+    # Janela para identificação da perna: 20 candles antes do sinal.
+    janela = df.iloc[-22:-2]
+    if len(janela) < 15:
+        return None
+    if ema9_v > ema20_v:
+        direcao = "call"
+        idx_topo = janela.High.idxmax()
+        antes_topo = janela.loc[janela.index < idx_topo]
+        if len(antes_topo) < 3:
+            return None
+        topo = float(janela.loc[idx_topo, "High"])
+        fundo = float(antes_topo.Low.min())
+        amplitude = topo - fundo
+        if amplitude < 1.5 * float(faixa_media):
+            return None
+        fib50 = topo - 0.50 * amplitude
+        fib618 = topo - 0.618 * amplitude
+        na_zona = fib618 <= float(sinal.Close) <= fib50
+    elif ema9_v < ema20_v:
+        direcao = "put"
+        idx_fundo = janela.Low.idxmin()
+        antes_fundo = janela.loc[janela.index < idx_fundo]
+        if len(antes_fundo) < 3:
+            return None
+        fundo = float(janela.loc[idx_fundo, "Low"])
+        topo = float(antes_fundo.High.max())
+        amplitude = topo - fundo
+        if amplitude < 1.5 * float(faixa_media):
+            return None
+        fib50 = fundo + 0.50 * amplitude
+        fib618 = fundo + 0.618 * amplitude
+        na_zona = fib50 <= float(sinal.Close) <= fib618
+    else:
+        return None
+    if not na_zona or not _confirmacao_fibo_m5(sinal, anterior, direcao):
+        return None
+    return Decisao(
+        ativo=ativo, direcao=direcao, preco=float(sinal.Close),
+        candle_hora=pd.Timestamp(candles_m5.index[-2]), motivo="fibo_m5_puro",
+        detalhes={
+            "setup": "fibo_m5_puro", "fibo_50": round(fib50, 6),
+            "fibo_618": round(fib618, 6), "m5_topo": round(topo, 6),
+            "m5_fundo": round(fundo, 6),
+            "razao": [
+                "EMA9/20 M5 direcional",
+                "Retração na zona Fibo 50–61,8% da última perna M5",
+                f"Confirmação M5 por rejeição/engolfo → {direcao.upper()}",
+                "Expiração 5 minutos",
             ],
         },
     )
@@ -818,6 +987,8 @@ def _executar_laboratorio_ema(base: Configuracao) -> None:
     # A hipótese Fibo entra na M5 seguinte e vence após 15min. Este intervalo
     # evita sinais sobrepostos e mantém a execução comparável ao backtest.
     ultimo_fibo_mtf: dict[str, pd.Timestamp] = {}
+    ultimo_fibo_m15_382: dict[str, pd.Timestamp] = {}
+    ultimo_fibo_m5: dict[str, pd.Timestamp] = {}
     ultima_atualizacao_noticias = 0.0
     ultima_recuperacao_pendencias = 0.0
     tendencias_h1: dict[str, str] = {}
@@ -1047,6 +1218,40 @@ def _executar_laboratorio_ema(base: Configuracao) -> None:
                                     candidato = None
                                 else:
                                     ultimo_fibo_mtf[ativo] = candidato.candle_hora
+                            decisoes = [candidato] if candidato is not None else []
+                        elif setup == "fibo_m15_zona382":
+                            contexto = snapshots.get((ativo, 900))
+                            if contexto is None:
+                                try:
+                                    contexto = mercado.snapshot_timeframe(ativo, 900)
+                                    snapshots[(ativo, 900)] = contexto
+                                except MercadoIndisponivel as erro:
+                                    print(f"[{rastro.nome}] {ativo}: contexto M15 indisponível ({erro})")
+                                    continue
+                            candidato = _avaliar_fibo_m15_zona382(
+                                ativo, snapshot.candles, contexto.candles
+                            )
+                            if candidato is not None:
+                                ultimo = ultimo_fibo_m15_382.get(ativo)
+                                if (
+                                    ultimo is not None
+                                    and candidato.candle_hora - ultimo < pd.Timedelta(minutes=20)
+                                ):
+                                    candidato = None
+                                else:
+                                    ultimo_fibo_m15_382[ativo] = candidato.candle_hora
+                            decisoes = [candidato] if candidato is not None else []
+                        elif setup == "fibo_m5_puro":
+                            candidato = _avaliar_fibo_m5_puro(ativo, snapshot.candles)
+                            if candidato is not None:
+                                ultimo = ultimo_fibo_m5.get(ativo)
+                                if (
+                                    ultimo is not None
+                                    and candidato.candle_hora - ultimo < pd.Timedelta(minutes=15)
+                                ):
+                                    candidato = None
+                                else:
+                                    ultimo_fibo_m5[ativo] = candidato.candle_hora
                             decisoes = [candidato] if candidato is not None else []
                         elif setup == "nzd_trend_pullback_v1":
                             contexto = snapshots.get((ativo, 900))
