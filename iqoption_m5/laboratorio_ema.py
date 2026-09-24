@@ -769,6 +769,8 @@ def _executar_laboratorio_ema(base: Configuracao) -> None:
     # Compartilhado com a thread de saúde do stream (leitura/escrita thread-safe
     # porque CPython garante atomicidade em atribuições de dict).
     ultimo_ts_stream: dict[tuple[str, int], int] = {}
+    # Throttle do aviso [STALE]: imprime no máximo 1 vez a cada 60s por par.
+    ultimo_aviso_stale: dict[tuple[str, int], float] = {}
     iniciado = False
 
     modo = base.conta
@@ -867,13 +869,17 @@ def _executar_laboratorio_ema(base: Configuracao) -> None:
                         # Aviso antecipado de stale por par (antes de tentar o snapshot)
                         ts_anterior = ultimo_ts_stream.get(chave_snapshot, 0)
                         if ts_anterior > 0:
-                            atraso_par = time.time() - ts_anterior
+                            agora_stale = time.time()
+                            atraso_par = agora_stale - ts_anterior
                             tf_par = rastro.config.timeframe_segundos
                             if atraso_par > tf_par * 2.5:
-                                print(
-                                    f"[STALE] {ativo} tf={tf_par}s: "
-                                    f"ultimo candle há {atraso_par:.0f}s — stream possivelmente congelado"
-                                )
+                                ultimo_aviso = ultimo_aviso_stale.get(chave_snapshot, 0.0)
+                                if agora_stale - ultimo_aviso >= 60.0:
+                                    ultimo_aviso_stale[chave_snapshot] = agora_stale
+                                    print(
+                                        f"[STALE] {ativo} tf={tf_par}s: "
+                                        f"ultimo candle há {atraso_par:.0f}s — stream possivelmente congelado"
+                                    )
                         try:
                             snapshot = mercado.snapshot_timeframe(
                                 ativo, rastro.config.timeframe_segundos
