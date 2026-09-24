@@ -29,6 +29,7 @@ from .noticias import CalendarioEconomico
 from .recuperacao import recuperar_operacoes_pendentes
 from .registro import RegistroSQLite
 from .risco import GerenciadorRisco, kill_switch_ativo
+from . import saude_stream
 
 
 @dataclass(frozen=True)
@@ -764,6 +765,10 @@ def _executar_laboratorio_ema(base: Configuracao) -> None:
     lock_grafico_ao_vivo = threading.Lock()
     parar_grafico_ao_vivo = threading.Event()
     progresso = ProgressoLaboratorio()
+    # Rastreia o timestamp do servidor por (ativo, tf) para detectar stale por par.
+    # Compartilhado com a thread de saúde do stream (leitura/escrita thread-safe
+    # porque CPython garante atomicidade em atribuições de dict).
+    ultimo_ts_stream: dict[tuple[str, int], int] = {}
     iniciado = False
 
     modo = base.conta
@@ -831,6 +836,13 @@ def _executar_laboratorio_ema(base: Configuracao) -> None:
             name="ema-lab-watchdog",
             daemon=True,
         ).start()
+        saude_stream.iniciar_monitor(
+            ultimo_ts_stream,
+            mercado,
+            progresso,
+            intervalo_s=600.0,
+            parar=parar_grafico_ao_vivo,
+        )
         print(f"Conectado. Monitorando {', '.join(base.ativos)} a cada 1 segundo.")
 
         while True:
@@ -852,11 +864,22 @@ def _executar_laboratorio_ema(base: Configuracao) -> None:
                     chave_snapshot = (ativo, rastro.config.timeframe_segundos)
                     snapshot = snapshots.get(chave_snapshot)
                     if snapshot is None:
+                        # Aviso antecipado de stale por par (antes de tentar o snapshot)
+                        ts_anterior = ultimo_ts_stream.get(chave_snapshot, 0)
+                        if ts_anterior > 0:
+                            atraso_par = time.time() - ts_anterior
+                            tf_par = rastro.config.timeframe_segundos
+                            if atraso_par > tf_par * 2.5:
+                                print(
+                                    f"[STALE] {ativo} tf={tf_par}s: "
+                                    f"ultimo candle há {atraso_par:.0f}s — stream possivelmente congelado"
+                                )
                         try:
                             snapshot = mercado.snapshot_timeframe(
                                 ativo, rastro.config.timeframe_segundos
                             )
                             snapshots[chave_snapshot] = snapshot
+                            ultimo_ts_stream[chave_snapshot] = snapshot.timestamp_servidor
                             progresso.marcar()
                         except MercadoIndisponivel as erro:
                             print(f"[{rastro.nome}] {ativo}: indisponível ({erro})")
