@@ -12,6 +12,7 @@ from iqoption_m5.laboratorio_ema import (
     _alvo_sombra, _rastros, _recuperar_pendencias_periodicas, _setup_do_rastro,
     _patch_candle_ao_vivo, ProgressoLaboratorio, _reconectar_laboratorio_estagnado,
     _armar_watchdog_apos_inicializacao, _alerta_ema920_m5, _motivo_sombra,
+    _registrar_sombra, _pausa_sequencia,
 )
 from iqoption_m5.mercado_iq import iniciar_com_timeout
 from iqoption_m5.modelos import Autorizacao, Decisao, ResultadoOrdem, SnapshotMercado
@@ -22,7 +23,7 @@ def test_laboratorio_tem_rastros_m5_e_m15_e_nzd_em_sombra():
     config = configuracao_ema_laboratorio_practice()
     rastros = _rastros(config)
 
-    assert len(rastros) == 16
+    assert len(rastros) == 18
     assert config.ativos == (
         "EURUSD", "AUDCAD", "NZDUSD", "GBPUSD", "USDJPY", "AUDUSD", "USDCAD", "EURJPY", "EURCHF",
     )
@@ -71,13 +72,17 @@ def test_laboratorio_tem_rastros_m5_e_m15_e_nzd_em_sombra():
     )
     assert eurjpy_rastro.somente_sombra
     # fibo_mtf_confirmado partido em dois: EURUSD executavel, GBPUSD/USDJPY
-    # em sombra por WR abaixo do break-even (41,7% n=12 e 45,8% n=24).
+    # em sombra por WR abaixo do break-even (41,7% n=12 e 45,8% n=24), e o
+    # resto da cesta em sombra para medir o setup nos outros pares.
     fibo_mtf = [r for r in rastros if r.config.fibo_mtf_confirmado_ativo]
-    assert len(fibo_mtf) == 2
+    assert len(fibo_mtf) == 3
     executavel = next(r for r in fibo_mtf if not r.somente_sombra)
-    sombra_mtf = next(r for r in fibo_mtf if r.somente_sombra)
+    sombras_mtf = [r.config.ativos for r in fibo_mtf if r.somente_sombra]
     assert executavel.config.ativos == ("EURUSD",)
-    assert sombra_mtf.config.ativos == ("GBPUSD", "USDJPY")
+    assert sombras_mtf == [
+        ("GBPUSD", "USDJPY"),
+        ("AUDCAD", "NZDUSD", "AUDUSD", "USDCAD", "EURJPY", "EURCHF"),
+    ]
     assert all(r.config.expiracao_por_setup == {"fibo_mtf_confirmado": 15}
                for r in fibo_mtf)
     assert config.bloquear_direcao_paralela
@@ -101,9 +106,11 @@ def test_todo_rastro_identifica_o_proprio_setup_sem_stopiteration():
 
     assert "ema920_prime" in setups
     assert setups.count("fibo_sr_retracao") == 2
-    assert setups.count("fibo_mtf_confirmado") == 2
-    # M5 AUDCAD, M15, EURUSD, EURJPY e a sombra de comparacao com filtro H1.
-    assert setups.count("ema920_pullback") == 5
+    # EURUSD, GBPUSD/USDJPY e a cesta completa em sombra.
+    assert setups.count("fibo_mtf_confirmado") == 3
+    # M5 AUDCAD, M15, EURUSD, EURJPY, a cesta sem H1 e a sombra de
+    # comparacao com filtro H1.
+    assert setups.count("ema920_pullback") == 6
     assert len(setups) == len(rastros)
 
 
@@ -357,6 +364,32 @@ def test_sombra_guarda_timeframe_para_comparar_m5_e_m15(tmp_path):
         ).fetchall()
     # sqlite3.Row nao compara igual a tupla; o que importa sao os valores.
     assert [linha[0] for linha in linhas] == [300, 900]
+
+
+def test_cesta_sem_h1_mede_config_do_real_sem_colidir_com_rastro_h1(tmp_path):
+    rastros = _rastros(configuracao_ema_laboratorio_practice())
+    cesta = next(r for r in rastros if r.rotulo_sombra == "ema920_pullback_cesta")
+    h1 = next(r for r in rastros if r.nome == "M5 | EMA9/20 + H1 (sombra comparação)")
+
+    assert cesta.somente_sombra
+    assert not cesta.config.filtro_h1_ativo
+    assert _setup_do_rastro(cesta.config) == "ema920_pullback"
+    assert set(cesta.config.ativos) == {"GBPUSD", "USDJPY", "AUDUSD", "USDCAD", "NZDUSD", "EURCHF"}
+
+    # O mesmo sinal nos dois rastros precisa virar duas linhas, não uma.
+    registro = RegistroSQLite(tmp_path / "cesta.sqlite3")
+    inicio = pd.Timestamp("2026-09-01 12:00:00")
+    snapshot = SnapshotMercado(
+        "GBPUSD", pd.DataFrame({"Close": [1.3]}, index=[inicio]), 0.85, True, int(inicio.timestamp())
+    )
+    decisao = Decisao(
+        "GBPUSD", "call", 1.3, inicio, "ema920_pullback", detalhes={"setup": "ema920_pullback"}
+    )
+    for rastro in (cesta, h1):
+        _registrar_sombra(registro, snapshot, rastro, decisao, "rastro_sombra")
+    with registro._sessao() as db:
+        setups = sorted(linha[0] for linha in db.execute("SELECT setup FROM simulacoes"))
+    assert setups == ["ema920_pullback", "ema920_pullback_cesta"]
 
 
 def test_decisoes_grafico_mostra_setup_e_timeframe(tmp_path):
@@ -659,3 +692,83 @@ def test_m5_ausente_nao_afeta_fibo_mtf():
         noticia_high=False, direcao="call", hora_utc=20,
         leitura_m5_ausente=True,
     ) is None
+
+
+def _lateral(ema_sep=None, adx=None, setup="ema920_pullback", rastro=None):
+    base = configuracao_ema_laboratorio_practice()
+    rastro = rastro or _rastro_que_opera(_rastros(base))
+    return _motivo_sombra(
+        base, rastro, setup, "AUDCAD", noticia_high=False,
+        direcao="call", hora_utc=20, ema_sep=ema_sep, adx=adx,
+    )
+
+
+def test_lateral_nao_bloqueia_ema_sep():
+    """ema_sep<0.5 não bloqueia mais: só marca detalhes no loop."""
+    assert _lateral(ema_sep=0.49) is None
+    assert _lateral(ema_sep=0.5) is None
+
+
+def test_lateral_nao_bloqueia_adx():
+    """ADX<20 não bloqueia mais: só marca detalhes no loop."""
+    assert _lateral(ema_sep=1.0, adx=19.9) is None
+    assert _lateral(ema_sep=1.0, adx=20.0) is None
+
+
+def test_lateral_sem_medida_nao_bloqueia():
+    """Auditoria ausente não pode virar bloqueio silencioso."""
+    assert _lateral(ema_sep=None, adx=None) is None
+
+
+def test_lateral_so_vale_para_ema920():
+    assert _lateral(ema_sep=0.1, adx=5.0, setup="ema921_rsi_pullback") is None
+
+
+def test_rastro_sombra_mantem_rotulo_mesmo_lateral():
+    """Sinal de rastro que nunca opera não pode entrar na amostra do filtro."""
+    base = configuracao_ema_laboratorio_practice()
+    sombra = next(
+        r for r in _rastros(base)
+        if r.somente_sombra and r.config.ema920_pullback_ativo
+    )
+    assert _lateral(ema_sep=0.1, rastro=sombra) == "rastro_sombra"
+
+
+def test_pausa_marca_apos_3_losses_recentes():
+    agora = datetime(2026, 9, 24, 4, 0)
+    pausa = _pausa_sequencia(3, pd.Timestamp("2026-09-24T03:30:00"), agora)
+    assert pausa == {"losses_seguidos": 3, "minutos_desde_ultimo": 30.0}
+
+
+def test_pausa_ignora_sequencia_curta_ou_antiga():
+    agora = datetime(2026, 9, 24, 4, 0)
+    assert _pausa_sequencia(2, pd.Timestamp("2026-09-24T03:50:00"), agora) is None
+    assert _pausa_sequencia(3, pd.Timestamp("2026-09-24T02:30:00"), agora) is None
+    assert _pausa_sequencia(0, None, agora) is None
+
+
+def test_sequencia_losses_conta_so_os_consecutivos_mais_recentes(tmp_path):
+    import sqlite3
+    base = configuracao_ema_laboratorio_practice()
+    caminho = tmp_path / "seq.sqlite3"
+    registro = RegistroSQLite(caminho, config=base)
+    resultados = [("03:00", "win"), ("03:10", "loose"), ("03:20", "loose"), ("03:30", "loose")]
+    with sqlite3.connect(caminho) as db:
+        for i, (hora, res) in enumerate(resultados):
+            db.execute(
+                "INSERT INTO operacoes (id_ordem, ativo, direcao, enviada_em, valor, payout,"
+                " setup, hora_sinal, resultado_bruto, status) VALUES (?,?,?,?,?,?,?,?,?,?)",
+                (str(i), "AUDCAD", "call", f"2026-09-24T{hora}:05", 2.5, 0.85,
+                 "ema920_pullback", f"2026-09-24T{hora}:00", res, "finalizada"),
+            )
+    assert registro.sequencia_losses("AUDCAD", "ema920_pullback") == (
+        3, pd.Timestamp("2026-09-24T03:30:00")
+    )
+    assert registro.sequencia_losses("EURUSD", "ema920_pullback") == (0, None)
+
+
+def test_pausa_aceita_agora_com_fuso_utc():
+    from datetime import timezone
+    agora = datetime(2026, 9, 24, 4, 0, tzinfo=timezone.utc)
+    pausa = _pausa_sequencia(4, pd.Timestamp("2026-09-24T03:45:00"), agora)
+    assert pausa["minutos_desde_ultimo"] == 15.0

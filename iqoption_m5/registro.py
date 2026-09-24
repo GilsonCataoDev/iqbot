@@ -800,6 +800,26 @@ class RegistroSQLite:
             for id_ordem, ativo, direcao, enviada_em, valor, payout, setup, timeframe, expiracao in linhas
         ]
 
+    def sequencia_losses(self, ativo: str, setup: str, limite: int = 10) -> tuple[int, pd.Timestamp | None]:
+        """Losses consecutivos mais recentes do par/setup e o candle UTC do último."""
+        with self._lock, self._sessao() as db:
+            linhas = db.execute(
+                """
+                SELECT resultado_bruto, hora_sinal FROM operacoes
+                WHERE ativo=? AND setup=? AND status='finalizada'
+                  AND resultado_bruto IN ('win', 'loose')
+                ORDER BY hora_sinal DESC LIMIT ?
+                """,
+                (ativo, setup, limite),
+            ).fetchall()
+        seguidos = 0
+        for resultado, _ in linhas:
+            if resultado != "loose":
+                break
+            seguidos += 1
+        ultimo = pd.Timestamp(linhas[0][1]) if seguidos and linhas[0][1] else None
+        return seguidos, ultimo
+
     def operacoes_grafico(self, ativo: str, limite: int = 50) -> list[dict]:
         with self._lock, self._sessao() as db:
             linhas = db.execute(

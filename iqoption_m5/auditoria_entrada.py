@@ -71,6 +71,7 @@ def enriquecer_decisao(decisao: Decisao, indicadores: pd.DataFrame) -> Decisao:
             "movimento_3_atr": round(movimento_3, 3),
             "atr_relativo": round(atr_relativo, 3),
             "ema_separacao_atr": None if separacao is None else round(separacao, 3),
+            "adx": round(float(vela["ADX"]), 1) if pd.notna(vela.get("ADX")) else None,
             "volume_relativo": None if volume_relativo is None else round(volume_relativo, 3),
             "tags": tags,
         }

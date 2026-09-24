@@ -38,6 +38,10 @@ class RastroEma:
     config: Configuracao
     intravela: bool
     somente_sombra: bool = False
+    # Rótulo gravado em ``simulacoes.setup``. Dois rastros do mesmo setup nos
+    # mesmos ativos colidiriam na chave única da tabela e um apagaria o outro;
+    # o rótulo próprio mantém as amostras separadas. None = nome do setup.
+    rotulo_sombra: str | None = None
 
 
 class ProgressoLaboratorio:
@@ -253,6 +257,23 @@ def _rastros(base: Configuracao) -> list[RastroEma]:
             somente_sombra=True,
         )
     )
+    # ema920_pullback na mesma configuração do real (sem filtro H1) nos pares
+    # que não têm rastro próprio. Até 2026-09-24 esses pares só eram medidos
+    # na variante com filtro H1, que não é a que opera — a sombra não dizia
+    # se a EMA funcionaria neles como funciona em EURUSD/AUDCAD.
+    # Rótulo próprio: o rastro H1 abaixo gera o mesmo setup nos mesmos pares.
+    saida.append(
+        RastroEma(
+            nome="M5 | EMA9/20 cesta sem H1 (SOMBRA)",
+            config=replace(
+                _config_rastro(base, 300, "ema920_pullback"),
+                ativos=("GBPUSD", "USDJPY", "AUDUSD", "USDCAD", "NZDUSD", "EURCHF"),
+            ),
+            intravela=False,
+            somente_sombra=True,
+            rotulo_sombra="ema920_pullback_cesta",
+        )
+    )
     # Comparação: ema920_pullback M5 com filtro H1 ativo. O rastro principal
     # opera sem filtro H1; este acumula amostra paralela para decidir se o
     # filtro melhora o acerto antes de qualquer mudança no real.
@@ -354,13 +375,6 @@ def _motivo_sombra(
     """
     if ativo in base.ativos_somente_sombra:
         return "ativo_candidato_sombra"
-    # Mercado lateral: EMAs coladas (ema_sep<0.5) OU tendência fraca (ADX<20).
-    # Avg wins ema_sep=1.45 | Avg losses ema_sep=0.66 (n=25); ADX<20 = sem trend.
-    if setup == "ema920_pullback":
-        lateral_sep = ema_sep is not None and ema_sep < 0.5
-        lateral_adx = adx is not None and adx < 20.0
-        if lateral_sep or lateral_adx:
-            return "ema_sep_lateral"
     # Um rastro de sombra não manda ordem por definição — o motivo é esse, e
     # não um filtro de qualidade. Os rótulos anteriores (m5_h1_validacao,
     # m15_h1_validacao, fibo_sr_validacao, nzd_v1_validacao) afirmavam
@@ -391,6 +405,29 @@ def _motivo_sombra(
     if leitura_m5_ausente:
         return "m5_leitura_ausente"
     return None
+
+
+PAUSA_LOSSES_SEGUIDOS = 3
+PAUSA_JANELA_MIN = 60
+
+
+def _pausa_sequencia(
+    seguidos: int, ultimo_loss: pd.Timestamp | None, agora_utc: datetime,
+) -> dict | None:
+    """Etiqueta de estudo: o sinal cairia numa pausa pós-sequência de losses?
+
+    Só marca ``detalhes``; não bloqueia. A regra vira filtro apenas se a
+    amostra marcada mostrar acerto abaixo do break-even.
+    """
+    if seguidos < PAUSA_LOSSES_SEGUIDOS or ultimo_loss is None:
+        return None
+    agora = pd.Timestamp(agora_utc)
+    if agora.tzinfo is not None:
+        agora = agora.tz_convert(None)
+    minutos = (agora - ultimo_loss).total_seconds() / 60
+    if minutos > PAUSA_JANELA_MIN:
+        return None
+    return {"losses_seguidos": seguidos, "minutos_desde_ultimo": round(minutos, 1)}
 
 
 def _setup_do_rastro(config: Configuracao) -> str:
@@ -524,7 +561,7 @@ def _registrar_sombra(
     registro.registrar_simulacao_bloqueada(
         ativo=decisao.ativo,
         direcao=decisao.direcao,
-        setup=decisao.detalhes.get("setup", decisao.motivo),
+        setup=rastro.rotulo_sombra or decisao.detalhes.get("setup", decisao.motivo),
         candle_hora=_alvo_sombra(snapshot, rastro),
         preco_entrada=decisao.preco,
         payout=float(snapshot.payout) if snapshot.payout is not None else 0.85,
@@ -1059,20 +1096,41 @@ def _executar_laboratorio_ema(base: Configuracao) -> None:
                             )
                         )
                         _aud = decisao.detalhes.get("auditoria") or {}
-                        _candle_fechado_idx = len(indicadores) - 2
-                        try:
-                            _adx_val = float(indicadores["ADX"].iloc[_candle_fechado_idx])
-                            _adx_val = None if not (_adx_val == _adx_val) else _adx_val  # NaN guard
-                        except (KeyError, IndexError, TypeError, ValueError):
-                            _adx_val = None
                         motivo_sombra = _motivo_sombra(
                             base, rastro, setup, ativo, noticia_high,
                             direcao=decisao.direcao,
                             hora_utc=agora_utc.hour,
                             leitura_m5_ausente=decisao.detalhes.get("leitura_m5") is None,
                             ema_sep=_aud.get("ema_separacao_atr"),
-                            adx=_adx_val,
+                            adx=_aud.get("adx"),
                         )
+                        if not rastro.somente_sombra:
+                            pausa = _pausa_sequencia(
+                                *registro.sequencia_losses(ativo, setup), agora_utc
+                            )
+                            if pausa is not None:
+                                decisao = replace(
+                                    decisao, detalhes={**decisao.detalhes, "pausa_sequencia": pausa}
+                                )
+                            # Mercado lateral: só observa (não bloqueia) até ter n≥30 em sombra.
+                            # practice n=241: ema_sep<0.5 deu 68,7% vs 67,6% — sem discriminação.
+                            if setup == "ema920_pullback":
+                                ema_sep_v = _aud.get("ema_separacao_atr")
+                                adx_v = _aud.get("adx")
+                                lateral_sep = ema_sep_v is not None and ema_sep_v < 0.5
+                                lateral_adx = adx_v is not None and adx_v < 20.0
+                                if lateral_sep or lateral_adx:
+                                    decisao = replace(
+                                        decisao, detalhes={
+                                            **decisao.detalhes,
+                                            "mercado_lateral": {
+                                                "ema_sep": ema_sep_v,
+                                                "adx": adx_v,
+                                                "lateral_sep": lateral_sep,
+                                                "lateral_adx": lateral_adx,
+                                            },
+                                        }
+                                    )
                         autorizacao = (
                             Autorizacao(False, motivo_sombra)
                             if motivo_sombra is not None

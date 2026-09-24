@@ -18,6 +18,7 @@ import os
 import sqlite3
 import sys
 import time
+from collections import Counter
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
 
@@ -35,6 +36,9 @@ _URL_GROQ = "https://api.groq.com/openai/v1/chat/completions"
 _MODELO   = os.getenv("GROQ_MODEL", "openai/gpt-oss-120b").strip() or "openai/gpt-oss-120b"
 _TIMEOUT  = 30.0
 _MAX_TOKENS = 2000
+# Abaixo disso por ativo:setup, o LLM acha padrão em ruído; filtro não é gravado.
+MIN_AMOSTRA_FILTRO = 30
+_METRICAS = ("corpo_ratio", "ema_separacao_atr", "range_atr", "volume_relativo")
 
 
 # ---------------------------------------------------------------------------
@@ -46,7 +50,9 @@ def _carregar_trades(dias: int) -> list[dict]:
         print(f"ERRO: banco não encontrado — {BANCO}")
         sys.exit(1)
 
-    corte = (datetime.now(timezone.utc) - timedelta(days=dias)).isoformat(timespec="seconds")
+    # hora_sinal é UTC sem fuso; enviada_em é horário local — comparar o corte
+    # UTC com enviada_em deslocava a janela em 3h.
+    corte = (datetime.now(timezone.utc) - timedelta(days=dias)).strftime("%Y-%m-%dT%H:%M:%S")
     conn = sqlite3.connect(BANCO)
     conn.row_factory = sqlite3.Row
 
@@ -59,14 +65,18 @@ def _carregar_trades(dias: int) -> list[dict]:
             d.detalhes_json, d.motivo_risco, d.motivo_estrategia
         FROM operacoes o
         LEFT JOIN slippage s ON s.id_ordem = o.id_ordem
+        -- Chave única de decisoes. A janela de ±30s pegava também a decisão de
+        -- rastros-sombra do mesmo ativo e duplicava trades com indicadores alheios.
         LEFT JOIN decisoes d
             ON d.ativo = o.ativo
             AND d.direcao = o.direcao
-            AND abs(strftime('%s', d.registrado_em) - strftime('%s', o.enviada_em)) < 30
+            AND d.setup = o.setup
+            AND d.timeframe = o.timeframe
+            AND d.candle_hora = o.hora_sinal
         WHERE o.status = 'finalizada'
-          AND o.enviada_em >= ?
+          AND o.hora_sinal >= ?
           AND o.resultado_bruto IN ('win', 'loose')
-        ORDER BY o.enviada_em ASC
+        ORDER BY o.hora_sinal ASC
     """, (corte,)).fetchall()
     conn.close()
     return [dict(r) for r in rows]
@@ -120,6 +130,33 @@ def _resumir_trade(t: dict) -> dict:
     return resumo
 
 
+def _media(valores: list) -> float | None:
+    nums = [float(v) for v in valores if v is not None]
+    return round(sum(nums) / len(nums), 3) if nums else None
+
+
+def _comparativo(resumos: list[dict]) -> list[str]:
+    """Médias e tags de wins vs losses, calculadas aqui para o LLM não fazer conta."""
+    linhas = []
+    for resultado in ("WIN", "LOSS"):
+        grupo = [r for r in resumos if r["resultado"] == resultado]
+        if not grupo:
+            linhas.append(f"  {resultado} (n=0)")
+            continue
+        medias = " ".join(
+            f"{m}={_media([r[m] for r in grupo])}" for m in _METRICAS
+        )
+        tags = Counter(t for r in grupo for t in (r["tags"] or []))
+        top = ", ".join(f"{t}:{c}/{len(grupo)}" for t, c in tags.most_common(6))
+        linhas.append(f"  {resultado} (n={len(grupo)}): {medias}")
+        linhas.append(f"    tags: {top}")
+    return linhas
+
+
+def contagem_por_par(trades: list[dict]) -> Counter:
+    return Counter(f"{t['ativo']}:{t['setup']}" for t in trades)
+
+
 def _montar_contexto(trades: list[dict], insights_anteriores: dict) -> str:
     """Monta o texto completo de contexto para o prompt."""
     resumos = [_resumir_trade(t) for t in trades]
@@ -150,7 +187,15 @@ def _montar_contexto(trades: list[dict], insights_anteriores: dict) -> str:
     for chave, s in stats.items():
         wl = s["wins"] + s["losses"]
         wr = round(s["wins"] / wl * 100) if wl else 0
-        linhas.append(f"{chave}: {s['wins']}W/{s['losses']}L  WR={wr}%")
+        aviso = "" if wl >= MIN_AMOSTRA_FILTRO else f"  [AMOSTRA INSUFICIENTE: n<{MIN_AMOSTRA_FILTRO}]"
+        linhas.append(f"{chave}: {s['wins']}W/{s['losses']}L  WR={wr}%{aviso}")
+
+    linhas.append("\n=== MÉDIAS WIN vs LOSS (calculadas, use estes números) ===")
+    linhas.append("GERAL:")
+    linhas.extend(_comparativo(resumos))
+    for chave in stats:
+        linhas.append(f"{chave}:")
+        linhas.extend(_comparativo([r for r in resumos if f"{r['ativo']}:{r['setup']}" == chave]))
 
     if insights_anteriores:
         linhas.append("\n=== MEMÓRIA DE SESSÕES ANTERIORES ===")
@@ -175,7 +220,10 @@ Analise os trades da sessão e responda em JSON estrito com esta estrutura:
   "proxima_sessao": "1 frase de orientação para amanhã"
 }
 Seja objetivo. Use os indicadores fornecidos (corpo_ratio, range_atr, ema_separacao_atr, tags).
-Não invente dados. Se a amostra for pequena, diga isso."""
+Para comparar wins e losses, use SOMENTE a seção "MÉDIAS WIN vs LOSS"; não recalcule
+nem cite valores que não aparecem no contexto. Um padrão só vale se a diferença aparecer
+nessas médias. Pares marcados com AMOSTRA INSUFICIENTE: não sugira filtro para eles,
+apenas descreva a hipótese em padroes_loss. Se a amostra for pequena, diga isso."""
 
 
 def _chamar_groq(contexto: str) -> dict | None:
@@ -251,24 +299,35 @@ def _carregar_insights() -> dict:
 
 def _salvar_insights(insights: dict, analise: dict, trades: list[dict]) -> None:
     hoje = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-    # Agrupa por (ativo, setup)
-    pares: set[str] = {f"{t['ativo']}:{t['setup']}" for t in trades}
-    for par in pares:
+    horas = sorted(t["hora_sinal"] for t in trades if t.get("hora_sinal"))
+    janela = f"{horas[0][:16]}Z..{horas[-1][:16]}Z" if horas else hoje
+    contagem = contagem_por_par(trades)
+    for par, n in contagem.items():
         chave = par
         if chave not in insights:
             insights[chave] = {"historico": []}
+        ativo, setup = par.split(":", 1)
+        filtros = [
+            f for f in analise.get("filtros_sugeridos", [])
+            if f.get("ativo") == ativo and f.get("setup") == setup
+        ]
+        amostra_ok = n >= MIN_AMOSTRA_FILTRO
+        if filtros and not amostra_ok:
+            print(f"  {par}: {len(filtros)} filtro(s) descartado(s) — n={n} < {MIN_AMOSTRA_FILTRO}")
         registro = {
             "data": hoje,
+            "janela_utc": janela,
+            "n": n,
             "padroes_loss": analise.get("padroes_loss", []),
-            "filtros_sugeridos": [
-                f for f in analise.get("filtros_sugeridos", [])
-                if f.get("ativo") in par or f.get("setup") in par
-            ],
+            "filtros_sugeridos": filtros if amostra_ok else [],
             "resumo_llm": analise.get("resumo", ""),
         }
-        insights[chave]["historico"] = (
-            insights[chave].get("historico", []) + [registro]
-        )[-20:]  # mantém últimas 20 sessões
+        # Rodar de novo sobre a mesma janela substitui, não acumula duplicata.
+        anteriores = [
+            h for h in insights[chave].get("historico", [])
+            if h.get("janela_utc") != janela
+        ]
+        insights[chave]["historico"] = (anteriores + [registro])[-20:]
         insights[chave]["ultima_analise"] = hoje
         # Resumo consolidado do último insight
         insights[chave]["resumo_llm"] = analise.get("resumo", "")
@@ -321,9 +380,13 @@ def main() -> None:
     for p in analise.get("padroes_loss", []):
         print(f"  • {p}")
 
-    print("\n--- FILTROS SUGERIDOS ---")
+    print(f"\n--- FILTROS SUGERIDOS (só pares com n>={MIN_AMOSTRA_FILTRO}) ---")
+    contagem = contagem_por_par(trades)
     for f in analise.get("filtros_sugeridos", []):
-        print(f"  [{f.get('ativo')} {f.get('setup')}] {f.get('condicao')} — {f.get('justificativa')}")
+        n = contagem.get(f"{f.get('ativo')}:{f.get('setup')}", 0)
+        if n < MIN_AMOSTRA_FILTRO:
+            continue
+        print(f"  [{f.get('ativo')} {f.get('setup')} n={n}] {f.get('condicao')} — {f.get('justificativa')}")
 
     print("\n--- PARES FORTES ---", ", ".join(analise.get("pares_fortes", [])))
     print("--- PARES FRACOS  ---", ", ".join(analise.get("pares_fracos", [])))

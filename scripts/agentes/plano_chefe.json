@@ -1,0 +1,13 @@
+{
+  "resumo": "Identificar a estratégia e o horário (BRT) com melhor taxa de acerto (win rate) para operações de compra no ativo ouro.",
+  "banco": "monitor",
+  "subtarefas": [
+    {
+      "label": "Win Rate por Estratégia e Hora",
+      "pergunta": "Qual a taxa de acerto (win_tp1) por tipo de estratégia e hora do dia (BRT) para compras no ouro?",
+      "sql": "SELECT tipo, (CAST(substr(quando,12,2) AS INTEGER) - 3 + 24) % 24 AS hora_brt, COUNT(*) AS total, SUM(CASE WHEN desfecho = 'win_tp1' THEN 1 ELSE 0 END) AS wins, ROUND(100.0 * SUM(CASE WHEN desfecho = 'win_tp1' THEN 1 ELSE 0 END) / COUNT(*), 2) AS win_rate FROM monitor_eventos WHERE ativo = 'ouro' AND tipo LIKE '%compra%' OR (ativo = 'ouro' AND tipo IN ('bof_m30_m5', 'fibo_m15', 'fluxo_m15', 'orb_fvg_m15', 'ouro_movimento_m15', 'rompimento_reteste', 'tp1_curto_forex', 'liquidity_sweep_v2', 'falso_rompimento')) AND json_extract(payload_json, '$.direcao') = 'compra' GROUP BY tipo, hora_brt ORDER BY win_rate DESC, total DESC",
+      "prioridade": 1
+    }
+  ],
+  "prompt_agente": "Execute a query SQL abaixo no banco SQLite 'monitor' e sintetize os resultados. Identifique a combinação de estratégia (tipo) e hora (hora_brt) com a maior win_rate e volume significativo (total > 5). Considere apenas operações de compra no ouro.\n\nSQL:\nSELECT tipo, (CAST(substr(quando,12,2) AS INTEGER) - 3 + 24) % 24 AS hora_brt, COUNT(*) AS total, SUM(CASE WHEN desfecho = 'win_tp1' THEN 1 ELSE 0 END) AS wins, ROUND(100.0 * SUM(CASE WHEN desfecho = 'win_tp1' THEN 1 ELSE 0 END) / COUNT(*), 2) AS win_rate FROM monitor_eventos WHERE ativo = 'ouro' AND (tipo LIKE '%compra%' OR (tipo IN ('bof_m30_m5', 'fibo_m15', 'fluxo_m15', 'orb_fvg_m15', 'ouro_movimento_m15', 'rompimento_reteste', 'tp1_curto_forex', 'liquidity_sweep_v2', 'falso_rompimento') AND json_extract(payload_json, '$.direcao') = 'compra')) GROUP BY tipo, hora_brt ORDER BY win_rate DESC, total DESC;\n\nResponda em português: Qual estratégia e horário funcionam melhor? Cite o win rate e o número de trades."
+}

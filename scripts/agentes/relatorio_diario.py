@@ -1,10 +1,24 @@
-"""Relatório diário de performance do Lab EMA — agente 1."""
+"""Relatório diário de performance do Lab EMA — agente 1.
+
+Lê o Lab REAL por padrão; ``--practice`` volta para o banco de treino.
+"""
 import sqlite3
+import sys
 from datetime import date, timedelta
 from pathlib import Path
 from collections import defaultdict
 
-BANCO = Path(__file__).resolve().parents[2] / "iqoption_m5/dados/iqoption_m5_practice_ema_laboratorio_practice.sqlite3"
+sys.stdout.reconfigure(encoding="utf-8")
+
+DADOS = Path(__file__).resolve().parents[2] / "iqoption_m5/dados"
+if "--practice" in sys.argv:
+    CONTA = "PRACTICE"
+    BANCO = DADOS / "iqoption_m5_practice_ema_laboratorio_practice.sqlite3"
+    MOEDA = "USD"
+else:
+    CONTA = "REAL"
+    BANCO = DADOS / "iqoption_m5_real_ema_laboratorio_real.sqlite3"
+    MOEDA = "BRL"
 BREAK_EVEN = 54.0
 
 ontem = (date.today() - timedelta(days=1)).isoformat()
@@ -32,8 +46,8 @@ falhas = [o for o in ops if o["status"] == "nao_enviada"]
 w, l, n, taxa = wr(fins)
 lucro = sum(o["lucro"] for o in fins)
 
-print(f"=== Lab EMA — {ontem} ===")
-print(f"Finalizadas: {n}  |  Wins: {w}  Losses: {l}  |  WR: {taxa:.1f}%  |  Lucro: {lucro:+.2f} USD")
+print(f"=== Lab EMA {CONTA} — {ontem} ===")
+print(f"Finalizadas: {n}  |  Wins: {w}  Losses: {l}  |  WR: {taxa:.1f}%  |  Lucro: {lucro:+.2f} {MOEDA}")
 if falhas:
     print(f"Nao enviadas (bloqueio ou recusa): {len(falhas)}")
 
